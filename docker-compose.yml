@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: evamp-ops-db
+    environment:
+      POSTGRES_DB: evamp_ops
+      POSTGRES_USER: ${DB_USER:-evamp}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Database password required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-evamp}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - evamp-internal
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: evamp-ops-backend
+    environment:
+      DATABASE_URL: postgresql://${DB_USER:-evamp}:${DB_PASSWORD}@postgres:5432/evamp_ops
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Encryption key required}
+      EBAY_APP_ID: ${EBAY_APP_ID:-}
+      EBAY_CERT_ID: ${EBAY_CERT_ID:-}
+      EBAY_DEV_ID: ${EBAY_DEV_ID:-}
+      EBAY_WEBHOOK_SECRET: ${EBAY_WEBHOOK_SECRET:-}
+      DEBUG: ${DEBUG:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - /app/.venv  # Prevent overwriting container's venv
+    networks:
+      - evamp-internal
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: evamp-ops-frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules  # Prevent overwriting container's node_modules
+    networks:
+      - evamp-internal
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    command: npm run dev -- --host
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  evamp-internal:
+    driver: bridge
