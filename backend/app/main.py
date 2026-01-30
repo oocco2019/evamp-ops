@@ -10,6 +10,7 @@ import logging
 from app.core.config import settings
 from app.core.database import init_db, close_db
 from app.api import settings as settings_api
+from app.api import stock as stock_api
 
 # Configure logging
 logging.basicConfig(
@@ -29,6 +30,19 @@ async def lifespan(app: FastAPI):
     logger.info("Starting EvampOps application...")
     logger.info(f"Debug mode: {settings.DEBUG}")
     logger.info(f"CORS origins: {settings.cors_origins_list}")
+    app_id_ok = bool((settings.EBAY_APP_ID or "").strip())
+    redirect_ok = bool((settings.EBAY_REDIRECT_URI or "").strip()) and not (
+        (settings.EBAY_REDIRECT_URI or "").strip().startswith("http://")
+        or (settings.EBAY_REDIRECT_URI or "").strip().startswith("https://")
+    )
+    if app_id_ok and redirect_ok:
+        logger.info("eBay OAuth env: EBAY_APP_ID and EBAY_REDIRECT_URI set (RuName).")
+    else:
+        logger.warning(
+            "eBay OAuth env: EBAY_APP_ID=%s, EBAY_REDIRECT_URI=%s (set in .env and docker-compose env for Docker).",
+            "set" if app_id_ok else "missing",
+            "set" if bool((settings.EBAY_REDIRECT_URI or "").strip()) else "missing",
+        )
     
     # Initialize database (in production, use Alembic migrations instead)
     if settings.DEBUG:
@@ -83,10 +97,11 @@ app.include_router(
     prefix="/api/settings",
     tags=["settings"]
 )
-
-# TODO: Add more routers as they're implemented
-# app.include_router(stock_api.router, prefix="/api/stock", tags=["stock"])
-# app.include_router(cs_api.router, prefix="/api/customer-service", tags=["customer-service"])
+app.include_router(
+    stock_api.router,
+    prefix="/api/stock",
+    tags=["stock"]
+)
 
 
 @app.get("/")

@@ -31,7 +31,9 @@ services:
       EBAY_APP_ID: ${EBAY_APP_ID:-}
       EBAY_CERT_ID: ${EBAY_CERT_ID:-}
       EBAY_DEV_ID: ${EBAY_DEV_ID:-}
+      EBAY_REDIRECT_URI: ${EBAY_REDIRECT_URI:-}
       EBAY_WEBHOOK_SECRET: ${EBAY_WEBHOOK_SECRET:-}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
       DEBUG: ${DEBUG:-false}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
     ports:

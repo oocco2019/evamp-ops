@@ -1,9 +1,23 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { settingsAPI, type AIModelSetting, type APICredential, type Warehouse } from '../services/api'
+import { settingsAPI, stockAPI, type AIModelSetting, type APICredential, type Warehouse } from '../services/api'
 
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState<'credentials' | 'ai-models' | 'warehouses'>('credentials')
+  const [activeTab, setActiveTab] = useState<'credentials' | 'ai-models' | 'ebay' | 'warehouses'>('credentials')
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const connected = params.get('ebay_connected') === '1'
+    const hasEbayParam = connected || params.get('ebay_error')
+    if (hasEbayParam) {
+      const next = new URLSearchParams(params)
+      next.delete('ebay_connected')
+      next.delete('ebay_error')
+      next.delete('ebay_error_detail')
+      const search = next.toString()
+      window.history.replaceState({}, '', window.location.pathname + (search ? `?${search}` : ''))
+    }
+  }, [])
 
   return (
     <div className="px-4 py-6 sm:px-0">
@@ -38,6 +52,16 @@ export default function Settings() {
             AI Models
           </button>
           <button
+            onClick={() => setActiveTab('ebay')}
+            className={`${
+              activeTab === 'ebay'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
+          >
+            eBay
+          </button>
+          <button
             onClick={() => setActiveTab('warehouses')}
             className={`${
               activeTab === 'warehouses'
@@ -53,6 +77,7 @@ export default function Settings() {
       {/* Tab content */}
       {activeTab === 'credentials' && <CredentialsTab />}
       {activeTab === 'ai-models' && <AIModelsTab />}
+      {activeTab === 'ebay' && <EbayTab />}
       {activeTab === 'warehouses' && <WarehousesTab />}
     </div>
   )
@@ -371,6 +396,169 @@ function AIModelsTab() {
             <p className="text-gray-500 text-center py-4">
               No AI models configured yet. Add one above to enable AI features.
             </p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function EbayTab() {
+  const queryClient = useQueryClient()
+  const [connectError, setConnectError] = useState<string | null>(null)
+  const [importResult, setImportResult] = useState<{
+    orders_added: number
+    orders_updated: number
+    line_items_added: number
+    line_items_updated: number
+    error?: string
+  } | null>(null)
+
+  const { data: status, isLoading: statusLoading } = useQuery({
+    queryKey: ['ebay-status'],
+    queryFn: async () => {
+      const response = await stockAPI.getEbayStatus()
+      return response.data
+    },
+  })
+
+  const authUrlQuery = useQuery({
+    queryKey: ['ebay-auth-url'],
+    queryFn: async () => {
+      const response = await stockAPI.getEbayAuthUrl()
+      return response.data
+    },
+    enabled: false,
+  })
+
+  const connectMutation = useMutation({
+    mutationFn: async () => {
+      setConnectError(null)
+      const { data } = await stockAPI.getEbayAuthUrl()
+      window.location.href = data.url
+    },
+    onError: (err: unknown) => {
+      const message =
+        err && typeof err === 'object' && 'response' in err
+          ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+          : null
+      setConnectError(
+        typeof message === 'string'
+          ? message
+          : Array.isArray(message)
+            ? message.map((m: { msg?: string }) => m?.msg ?? JSON.stringify(m)).join(', ')
+            : err instanceof Error
+              ? err.message
+              : 'Failed to get eBay auth URL. Check backend and .env (EBAY_APP_ID, EBAY_REDIRECT_URI RuName).'
+      )
+    },
+  })
+
+  const importMutation = useMutation({
+    mutationFn: (mode: 'full' | 'incremental') => stockAPI.runImport(mode),
+    onSuccess: (response) => {
+      setImportResult({
+        orders_added: response.data.orders_added,
+        orders_updated: response.data.orders_updated,
+        line_items_added: response.data.line_items_added,
+        line_items_updated: response.data.line_items_updated,
+        error: response.data.error,
+      })
+    },
+  })
+
+  const [urlParams] = useState(() => new URLSearchParams(typeof window !== 'undefined' ? window.location.search : ''))
+  const justConnected = urlParams.get('ebay_connected') === '1'
+  const ebayError = urlParams.get('ebay_error')
+  const ebayErrorDetail = urlParams.get('ebay_error_detail')
+
+  return (
+    <div className="bg-white shadow rounded-lg p-6">
+      <h2 className="text-xl font-semibold mb-4">eBay Connection</h2>
+      <p className="text-gray-600 mb-6">
+        Connect your eBay account to import orders. Configure EBAY_APP_ID, EBAY_CERT_ID, EBAY_DEV_ID and EBAY_REDIRECT_URI in .env.
+      </p>
+
+      {justConnected && (
+        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg text-green-800">
+          eBay account connected successfully.
+        </div>
+      )}
+
+      {ebayError && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
+          <p className="font-medium">eBay connection failed: {ebayError.replace(/_/g, ' ')}</p>
+          {ebayErrorDetail && (
+            <p className="mt-2 text-red-700 break-words">{decodeURIComponent(ebayErrorDetail)}</p>
+          )}
+          <p className="mt-2 text-red-600">
+            Common causes: code expired (complete the flow quickly after ngrok &quot;Visit Site&quot;); redirect_uri must match exactly (RuName in .env and Auth Accepted URL in eBay portal).
+          </p>
+        </div>
+      )}
+
+      <div className="mb-8">
+        <h3 className="font-medium mb-2">Status</h3>
+        {statusLoading ? (
+          <p className="text-gray-500">Checking...</p>
+        ) : status?.connected ? (
+          <p className="text-green-700 font-medium">Connected</p>
+        ) : (
+          <p className="text-gray-600">Not connected</p>
+        )}
+        {!status?.connected && (
+          <>
+            <button
+              type="button"
+              onClick={() => connectMutation.mutate()}
+              disabled={connectMutation.isPending}
+              className="mt-2 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
+            >
+              {connectMutation.isPending ? 'Redirecting...' : 'Connect with eBay'}
+            </button>
+            {connectError && (
+              <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
+                {connectError}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {status?.connected && (
+        <div className="mb-8">
+          <h3 className="font-medium mb-2">Import orders</h3>
+          <p className="text-gray-600 text-sm mb-2">
+            Full: last 90 days (eBay API limit). Incremental: since last import.
+          </p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => importMutation.mutate('full')}
+              disabled={importMutation.isPending}
+              className="bg-gray-700 text-white px-4 py-2 rounded-md hover:bg-gray-800 disabled:opacity-50"
+            >
+              Full import
+            </button>
+            <button
+              type="button"
+              onClick={() => importMutation.mutate('incremental')}
+              disabled={importMutation.isPending}
+              className="bg-gray-600 text-white px-4 py-2 rounded-md hover:bg-gray-700 disabled:opacity-50"
+            >
+              Incremental import
+            </button>
+          </div>
+          {importMutation.data?.data && (
+            <div className="mt-3 p-3 bg-gray-50 rounded-lg text-sm">
+              <p>Orders added: {importMutation.data.data.orders_added}</p>
+              <p>Orders updated: {importMutation.data.data.orders_updated}</p>
+              <p>Line items added: {importMutation.data.data.line_items_added}</p>
+              <p>Line items updated: {importMutation.data.data.line_items_updated}</p>
+              {importMutation.data.data.error && (
+                <p className="text-red-600">Error: {importMutation.data.data.error}</p>
+              )}
+            </div>
           )}
         </div>
       )}

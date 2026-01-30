@@ -3,7 +3,17 @@ Application configuration and settings
 """
 from functools import lru_cache
 from typing import List
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _strip_quotes_and_whitespace(v: str) -> str:
+    if not isinstance(v, str):
+        return v
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+        v = v[1:-1].strip()
+    return v
 
 
 class Settings(BaseSettings):
@@ -21,16 +31,19 @@ class Settings(BaseSettings):
     ENCRYPTION_KEY: str
     SECRET_KEY: str = "your-secret-key-change-in-production"
     
-    # CORS
+    # CORS & Frontend (for OAuth redirects)
     CORS_ORIGINS: str = "http://localhost:5173"
+    FRONTEND_URL: str = "http://localhost:5173"
     
-    # eBay API
+    # eBay API (from .env)
     EBAY_APP_ID: str = ""
     EBAY_CERT_ID: str = ""
     EBAY_DEV_ID: str = ""
     EBAY_WEBHOOK_SECRET: str = ""
+    EBAY_REDIRECT_URI: str = ""  # RuName from eBay Developer Portal (Production RuName when using auth.ebay.com)
     EBAY_API_URL: str = "https://api.ebay.com"
     EBAY_AUTH_URL: str = "https://auth.ebay.com/oauth2"
+    EBAY_IDENTITY_URL: str = "https://api.ebay.com/identity/v1/oauth2"
     
     # AI Providers (can be set via UI)
     ANTHROPIC_API_KEY: str = ""
@@ -48,6 +61,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=True
     )
+
+    @field_validator("EBAY_REDIRECT_URI", mode="before")
+    @classmethod
+    def normalize_ebay_redirect_uri(cls, v: str) -> str:
+        """Strip surrounding quotes and whitespace so .env values match eBay exactly."""
+        return _strip_quotes_and_whitespace(v) if v else ""
     
     @property
     def cors_origins_list(self) -> List[str]:

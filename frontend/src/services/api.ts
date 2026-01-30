@@ -96,6 +96,41 @@ export const settingsAPI = {
     api.delete(`/api/settings/warehouses/${id}`),
 }
 
+// Stock API (eBay + SKUs)
+export interface SKU {
+  sku_code: string
+  title: string
+  landed_cost?: number
+  postage_price?: number
+  profit_per_unit?: number
+  currency: string
+}
+
+export interface ImportResult {
+  orders_added: number
+  orders_updated: number
+  line_items_added: number
+  line_items_updated: number
+  last_import?: string
+  error?: string
+}
+
+export const stockAPI = {
+  getEbayAuthUrl: () => api.get<{ url: string; state: string }>('/api/stock/ebay/auth-url'),
+  getEbayStatus: () => api.get<{ connected: boolean }>('/api/stock/ebay/status'),
+  runImport: (mode: 'full' | 'incremental') =>
+    api.post<ImportResult>('/api/stock/import', { mode }),
+
+  listSKUs: (search?: string) =>
+    api.get<SKU[]>('/api/stock/skus', { params: search ? { search } : {} }),
+  createSKU: (data: Partial<SKU> & { sku_code: string; title: string }) =>
+    api.post<SKU>('/api/stock/skus', data),
+  getSKU: (sku_code: string) => api.get<SKU>(`/api/stock/skus/${sku_code}`),
+  updateSKU: (sku_code: string, data: Partial<SKU>) =>
+    api.put<SKU>(`/api/stock/skus/${sku_code}`, data),
+  deleteSKU: (sku_code: string) => api.delete(`/api/stock/skus/${sku_code}`),
+}
+
 // Health check
 export const healthCheck = () => api.get('/health')
 
