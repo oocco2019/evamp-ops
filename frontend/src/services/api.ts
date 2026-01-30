@@ -118,6 +118,8 @@ export interface ImportResult {
 export const stockAPI = {
   getEbayAuthUrl: () => api.get<{ url: string; state: string }>('/api/stock/ebay/auth-url'),
   getEbayStatus: () => api.get<{ connected: boolean }>('/api/stock/ebay/status'),
+  getEbayCallbackUrl: () =>
+    api.get<{ callback_url: string; hint: string }>('/api/stock/ebay/callback-url'),
   runImport: (mode: 'full' | 'incremental') =>
     api.post<ImportResult>('/api/stock/import', { mode }),
 

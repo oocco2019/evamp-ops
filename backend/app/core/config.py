@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     EBAY_DEV_ID: str = ""
     EBAY_WEBHOOK_SECRET: str = ""
     EBAY_REDIRECT_URI: str = ""  # RuName from eBay Developer Portal (Production RuName when using auth.ebay.com)
+    # Tunnel URL (e.g. https://xxx.localhost.run) so the app can show the full callback URL to paste in eBay
+    CALLBACK_BASE_URL: str = ""
     EBAY_API_URL: str = "https://api.ebay.com"
     EBAY_AUTH_URL: str = "https://auth.ebay.com/oauth2"
     EBAY_IDENTITY_URL: str = "https://api.ebay.com/identity/v1/oauth2"
@@ -67,6 +69,13 @@ class Settings(BaseSettings):
     def normalize_ebay_redirect_uri(cls, v: str) -> str:
         """Strip surrounding quotes and whitespace so .env values match eBay exactly."""
         return _strip_quotes_and_whitespace(v) if v else ""
+
+    @field_validator("CALLBACK_BASE_URL", mode="before")
+    @classmethod
+    def normalize_callback_base_url(cls, v: str) -> str:
+        """Strip quotes/whitespace and trailing slash for building callback URL."""
+        u = _strip_quotes_and_whitespace(v) if v else ""
+        return u.rstrip("/") if u else ""
     
     @property
     def cors_origins_list(self) -> List[str]:

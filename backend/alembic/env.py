@@ -23,11 +23,9 @@ if config.config_file_name is not None:
 # Set target metadata from your Base
 target_metadata = Base.metadata
 
-# Override sqlalchemy.url from environment
-config.set_main_option(
-    "sqlalchemy.url",
-    settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://")
-)
+# Override sqlalchemy.url from environment (support postgres:// from deploy hosts)
+_db_url = settings.DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://").replace("postgres://", "postgresql+asyncpg://")
+config.set_main_option("sqlalchemy.url", _db_url)
 
 
 def run_migrations_offline() -> None:

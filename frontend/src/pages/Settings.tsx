@@ -422,6 +422,14 @@ function EbayTab() {
     },
   })
 
+  const { data: callbackUrlData } = useQuery({
+    queryKey: ['ebay-callback-url'],
+    queryFn: async () => {
+      const response = await stockAPI.getEbayCallbackUrl()
+      return response.data
+    },
+  })
+
   const authUrlQuery = useQuery({
     queryKey: ['ebay-auth-url'],
     queryFn: async () => {
@@ -479,6 +487,46 @@ function EbayTab() {
         Connect your eBay account to import orders. Configure EBAY_APP_ID, EBAY_CERT_ID, EBAY_DEV_ID and EBAY_REDIRECT_URI in .env.
       </p>
 
+      {callbackUrlData && (
+        <div className="mb-6 p-3 bg-gray-50 border border-gray-200 rounded-lg text-sm">
+          <h3 className="font-medium mb-1">Callback URL for eBay</h3>
+          {callbackUrlData.callback_url ? (
+            (() => {
+              const baseUrl = new URL(callbackUrlData.callback_url).origin;
+              const linkRow = (url: string) => (
+                <div className="flex flex-wrap items-center gap-2 mb-2">
+                  <code className="flex-1 min-w-0 break-all bg-white px-2 py-1 rounded border text-gray-800">
+                    {url}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => navigator.clipboard.writeText(url)}
+                    className="shrink-0 px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
+                  >
+                    Copy
+                  </button>
+                </div>
+              );
+              return (
+                <>
+                  <p className="text-gray-600 mb-1 font-medium">Set once:</p>
+                  <p className="text-gray-600 mb-1">Paste this in eBay Developer Portal → User Tokens → Auth Accepted URL.</p>
+                  {linkRow(callbackUrlData.callback_url)}
+                  <p className="text-gray-600 mb-1">Set once: Paste this in eBay Developer Portal → User Tokens → Auth Declined URL.</p>
+                  {linkRow(baseUrl)}
+                  <p className="text-gray-600 mb-1">Set once: Paste it in .env CALLBACK_BASE_URL=</p>
+                  {linkRow(baseUrl)}
+                </>
+              );
+            })()
+          ) : (
+            <p className="text-amber-700">
+              Set CALLBACK_BASE_URL in .env to your tunnel URL (e.g. from localhost.run), restart the backend, then refresh.
+            </p>
+          )}
+        </div>
+      )}
+
       {justConnected && (
         <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg text-green-800">
           eBay account connected successfully.
@@ -492,7 +540,7 @@ function EbayTab() {
             <p className="mt-2 text-red-700 break-words">{decodeURIComponent(ebayErrorDetail)}</p>
           )}
           <p className="mt-2 text-red-600">
-            Common causes: code expired (complete the flow quickly after ngrok &quot;Visit Site&quot;); redirect_uri must match exactly (RuName in .env and Auth Accepted URL in eBay portal).
+            Common causes: code expired (complete the flow quickly); redirect_uri must match exactly (RuName in .env and Auth Accepted URL in eBay portal).
           </p>
         </div>
       )}

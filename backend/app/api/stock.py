@@ -87,18 +87,40 @@ async def ebay_config_check():
     }
 
 
-@router.get("/ebay/ngrok-check")
-async def ebay_ngrok_check(request: Request):
+@router.get("/ebay/callback-url")
+async def ebay_callback_url(request: Request):
+    """
+    Return the full callback URL to paste in eBay (Auth Accepted URL).
+    Set CALLBACK_BASE_URL in .env to your tunnel URL (e.g. localhost.run). With localhost.run the URL is stable — set once in eBay.
+    """
+    from app.core.config import settings as s
+    base = (s.CALLBACK_BASE_URL or "").strip().rstrip("/")
+    if base:
+        callback_url = f"{base}/api/stock/ebay/callback"
+        hint = "Set once: Paste this in eBay Developer Portal → User Tokens → Auth Accepted URL."
+    else:
+        host = (request.headers.get("host") or "").split(":")[0]
+        if host and host not in ("localhost", "127.0.0.1"):
+            callback_url = f"https://{request.headers.get('host', host)}/api/stock/ebay/callback"
+            hint = "You reached the backend via a public host. Paste this in eBay → Auth Accepted URL. To see this from localhost, set CALLBACK_BASE_URL in .env to your tunnel URL (e.g. localhost.run)."
+        else:
+            callback_url = ""
+            hint = "Set CALLBACK_BASE_URL in .env to your tunnel URL (e.g. https://xxx.localhost.run or https://xxx.lhr.life from localhost.run), restart the backend, then refresh this page to see the URL to paste in eBay. Use localhost.run for a stable URL (set once in eBay)."
+    return {"callback_url": callback_url, "hint": hint}
+
+
+@router.get("/ebay/tunnel-check")
+async def ebay_tunnel_check(request: Request):
     """
     Reachability check: returns the Host header of this request.
-    Call this via your ngrok URL (e.g. https://your-subdomain.ngrok-free.dev/api/stock/ebay/ngrok-check).
-    If you see your ngrok host in the response, the request reached the backend.
+    Call via your tunnel URL (e.g. https://xxx.localhost.run/api/stock/ebay/tunnel-check).
+    If the host in the response matches your tunnel URL, the backend is reachable.
     """
     host = request.headers.get("host", "")
     return {
         "ok": True,
         "host": host,
-        "message": "If host matches your ngrok URL, the backend is reachable via ngrok.",
+        "message": "If host matches your tunnel URL, the backend is reachable.",
         "callback_path": "/api/stock/ebay/callback",
         "hint": "In eBay Developer Portal, set 'Your auth accepted URL' to https://<host>/api/stock/ebay/callback (use the host shown above).",
     }

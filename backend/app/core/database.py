@@ -11,10 +11,10 @@ from sqlalchemy.orm import DeclarativeBase
 from app.core.config import settings
 
 
-# Convert postgresql:// to postgresql+asyncpg://
+# Convert postgresql:// or postgres:// to postgresql+asyncpg:// (deploy hosts may use postgres://)
 database_url = settings.DATABASE_URL.replace(
     "postgresql://", "postgresql+asyncpg://"
-)
+).replace("postgres://", "postgresql+asyncpg://")
 
 # Create async engine
 engine = create_async_engine(

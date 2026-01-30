@@ -7,7 +7,7 @@ eBay requires **RuName** in `EBAY_REDIRECT_URI`, not the full URL. Using the ful
 Our app uses **Production** (`auth.ebay.com`). You must use the **Production** RuName:
 
 - In eBay Developer Portal, go to **"Your branded eBay Production Sign In (OAuth)"** (not Sandbox).
-- Create or edit the redirect URL there and set **Your auth accepted URL¹** to your https callback (e.g. ngrok URL).
+- Create or edit the redirect URL there and set **Your auth accepted URL¹** to your https callback (e.g. your tunnel URL from localhost.run).
 - The **RuName** shown for that Production config is what you put in `.env` as `EBAY_REDIRECT_URI`.
 
 If you use the **Sandbox** RuName with Production, you get `400 invalid_request`.
@@ -68,4 +68,4 @@ No `https://`, no path – just the RuName string.
    (e.g. `http://localhost:8000/api/stock/ebay/debug`). Check that `EBAY_REDIRECT_URI_value` and `EBAY_AUTH_URL` match your Production RuName and Production auth URL. If you see `auth.sandbox.ebay.com` anywhere, you are in Sandbox; we use Production only.
 
 5. **Auth Accepted URL in eBay**  
-   For that RuName, the **Auth Accepted URL** in the Developer Portal must be the URL that reaches your backend callback, e.g. `https://your-domain.com/api/stock/ebay/callback` or your ngrok URL. Mismatch here can cause redirect or token-exchange errors.
+   For that RuName, the **Auth Accepted URL** in the Developer Portal must be the URL that reaches your backend callback, e.g. `https://your-domain.com/api/stock/ebay/callback` or your tunnel URL. Mismatch here can cause redirect or token-exchange errors.

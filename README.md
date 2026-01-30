@@ -49,13 +49,18 @@ A full-stack application for managing eBay stock operations and customer service
 
 3. **Start the application:**
    ```bash
-   docker-compose up
+   make up
    ```
+   Or: `docker compose up -d`. From project root only.
 
 4. **Access the app:**
    - Frontend: http://localhost:5173
    - Backend API: http://localhost:8000
    - API Docs: http://localhost:8000/docs
+
+**One-command start:** From project root, `make up` (or `make start` to start and tail logs). `make down` to stop. See [Makefile](Makefile). **Exact commands:** [docs/HOW_TO_START.md](docs/HOW_TO_START.md). **One command (app + tunnel + browser):** `make run`.
+
+**eBay OAuth:** Free ngrok gives a new URL each restart, so you’d have to update eBay’s Auth Accepted URL every time. Use **[localhost.run](docs/LOCALHOST_RUN_SETUP.md)** (free; sign up and add your SSH key for a stable URL). Run `make tunnel` when you need eBay; set the callback URL once in eBay. Or [deploy the backend](docs/DEPLOY_BACKEND.md) or [other tunnels](docs/STABLE_CALLBACK_URL.md).
 
 ### Manual Setup (Without Docker)
 

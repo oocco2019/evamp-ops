@@ -1,8 +1,10 @@
+import { lazy, Suspense } from 'react'
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom'
-import Settings from './pages/Settings'
-import SalesAnalytics from './pages/SalesAnalytics'
-import SKUManager from './pages/SKUManager'
-import MessageDashboard from './pages/MessageDashboard'
+
+const Settings = lazy(() => import('./pages/Settings'))
+const SalesAnalytics = lazy(() => import('./pages/SalesAnalytics'))
+const SKUManager = lazy(() => import('./pages/SKUManager'))
+const MessageDashboard = lazy(() => import('./pages/MessageDashboard'))
 
 function App() {
   return (
@@ -49,16 +51,26 @@ function App() {
 
         {/* Main content */}
         <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-          <Routes>
-            <Route path="/" element={<Home />} />
-            <Route path="/analytics" element={<SalesAnalytics />} />
-            <Route path="/skus" element={<SKUManager />} />
-            <Route path="/messages" element={<MessageDashboard />} />
-            <Route path="/settings" element={<Settings />} />
-          </Routes>
+          <Suspense fallback={<PageLoader />}>
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="/analytics" element={<SalesAnalytics />} />
+              <Route path="/skus" element={<SKUManager />} />
+              <Route path="/messages" element={<MessageDashboard />} />
+              <Route path="/settings" element={<Settings />} />
+            </Routes>
+          </Suspense>
         </main>
       </div>
     </Router>
+  )
+}
+
+function PageLoader() {
+  return (
+    <div className="flex items-center justify-center py-12">
+      <div className="animate-pulse text-gray-500">Loading...</div>
+    </div>
   )
 }
 

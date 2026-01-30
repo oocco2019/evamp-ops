@@ -21,4 +21,7 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Production: run migrations then uvicorn. For local dev without migrations, override with: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
+CMD ["/app/start.sh"]
