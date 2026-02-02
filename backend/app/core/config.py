@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     EBAY_API_URL: str = "https://api.ebay.com"
     EBAY_AUTH_URL: str = "https://auth.ebay.com/oauth2"
     EBAY_IDENTITY_URL: str = "https://api.ebay.com/identity/v1/oauth2"
+    # Optional: seller eBay username for classifying message sender_type (buyer vs seller)
+    EBAY_SELLER_USERNAME: str = ""
     
     # AI Providers (can be set via UI)
     ANTHROPIC_API_KEY: str = ""
@@ -57,7 +59,10 @@ class Settings(BaseSettings):
     
     # Background Tasks
     MESSAGE_SYNC_INTERVAL_MINUTES: int = 60
-    
+
+    # Message sending (Phase 4-6): set True only when ready to test replying to real customers
+    ENABLE_MESSAGE_SENDING: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -194,12 +194,10 @@ docker-compose logs postgres
 
 ## Next Steps
 
-### Phase 2: Stock Manager Core
-- Implement eBay order data import (SM02)
-- Build SKU management CRUD (SM03)
-- Create eBay API client
+### Phase 2: Stock Manager Core (Complete)
+- eBay order data import (SM02), SKU CRUD (SM03), eBay API client
 
-### Phase 3: Analytics & Planning
+### Phase 3: Analytics & Planning (Complete)
 - Sales analytics dashboard with charts (SM01)
 - Stock planning calculator (SM04)
 - Supplier order management (SM06-SM07)

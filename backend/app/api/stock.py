@@ -4,11 +4,12 @@ Stock API: eBay OAuth, order import, SKU CRUD (SM02, SM03).
 import logging
 from datetime import datetime, date, timedelta
 from typing import List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
+from sqlalchemy import select, func, or_
 from pydantic import BaseModel, Field
 from decimal import Decimal
 
@@ -16,7 +17,7 @@ from app.core.database import get_db
 from app.core.config import settings as app_settings
 from app.core.security import encryption_service
 from app.models.settings import APICredential
-from app.models.stock import Order, LineItem, SKU
+from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem
 from app.services.ebay_client import (
     get_authorization_url,
     exchange_code_for_token,
@@ -24,6 +25,7 @@ from app.services.ebay_client import (
     fetch_all_orders,
     fetch_orders_modified_since,
 )
+from app.services.ebay_auth import get_ebay_access_token
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -144,8 +146,23 @@ async def ebay_debug():
     }
 
 
+def _parse_code_from_query_string(query_string: str) -> Optional[str]:
+    """
+    Parse 'code' from raw query string. eBay's code can contain # (encoded as %23);
+    some proxies/servers truncate at #, so we extract code=... manually until next &.
+    """
+    if not query_string:
+        return None
+    for part in query_string.split("&"):
+        if part.startswith("code="):
+            raw_value = part[5:]  # after "code="
+            return unquote(raw_value)
+    return None
+
+
 @router.get("/ebay/callback")
 async def ebay_oauth_callback(
+    request: Request,
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
@@ -161,8 +178,12 @@ async def ebay_oauth_callback(
         redirect_url = f"{base_url}/settings?ebay_error={error_description or error}"
         return RedirectResponse(url=redirect_url, status_code=302)
 
+    if not code and request.scope.get("query_string"):
+        code = _parse_code_from_query_string(request.scope["query_string"].decode("utf-8"))
     if not code:
-        raise HTTPException(status_code=400, detail="Missing authorization code")
+        # User may have declined consent, opened callback URL directly, or eBay sent them to Auth Declined URL
+        redirect_url = f"{base_url}/settings?ebay_error=missing_code&ebay_error_detail={quote('No authorization code in callback. Complete the flow from Settings → Reconnect eBay, sign in on eBay, and click Accept. Do not open the callback URL directly.')}"
+        return RedirectResponse(url=redirect_url, status_code=302)
 
     try:
         token_data = await exchange_code_for_token(code)
@@ -249,26 +270,6 @@ class ImportResponse(BaseModel):
     error: Optional[str] = None
 
 
-async def _get_ebay_access_token(db: AsyncSession) -> str:
-    """Get valid access token: from DB refresh_token, refresh if needed."""
-    result = await db.execute(
-        select(APICredential).where(
-            APICredential.service_name == "ebay",
-            APICredential.key_name == "refresh_token",
-            APICredential.is_active == True,
-        )
-    )
-    cred = result.scalar_one_or_none()
-    if not cred:
-        raise HTTPException(
-            status_code=400,
-            detail="eBay not connected. Connect eBay first in Settings.",
-        )
-    refresh_token = encryption_service.decrypt(cred.encrypted_value)
-    token_data = await refresh_access_token(refresh_token)
-    return token_data["access_token"]
-
-
 @router.post("/import", response_model=ImportResponse)
 async def run_import(
     body: ImportRequest,
@@ -281,7 +282,7 @@ async def run_import(
         raise HTTPException(status_code=400, detail="mode must be 'full' or 'incremental'")
 
     try:
-        access_token = await _get_ebay_access_token(db)
+        access_token = await get_ebay_access_token(db)
     except HTTPException:
         raise
     except Exception as e:
@@ -325,11 +326,15 @@ async def run_import(
                         existing_order.date != o["date"]
                         or existing_order.country != o["country"]
                         or existing_order.last_modified != o["last_modified"]
+                        or getattr(existing_order, "cancel_status", None) != o.get("cancel_status")
+                        or getattr(existing_order, "buyer_username", None) != o.get("buyer_username")
                     )
                     if order_changed:
                         existing_order.date = o["date"]
                         existing_order.country = o["country"]
                         existing_order.last_modified = o["last_modified"]
+                        existing_order.cancel_status = o.get("cancel_status")
+                        existing_order.buyer_username = o.get("buyer_username")
                         await db.flush()
                         orders_updated += 1
                     order_id = existing_order.order_id
@@ -341,6 +346,8 @@ async def run_import(
                         date=o["date"],
                         country=o["country"],
                         last_modified=o["last_modified"],
+                        cancel_status=o.get("cancel_status"),
+                        buyer_username=o.get("buyer_username"),
                     )
                     db.add(new_order)
                     await db.flush()
@@ -386,6 +393,225 @@ async def run_import(
         line_items_added=line_items_added,
         line_items_updated=line_items_updated,
         last_import=last_import,
+    )
+
+
+# === Analytics (SM01) ===
+
+class AnalyticsFilterOptionsResponse(BaseModel):
+    countries: List[str]
+    skus: List[str]
+
+
+def _countries_for_analytics(raw: List[str]) -> List[str]:
+    """Merge PR and VI into US for analytics; return sorted list with US once."""
+    merged = {"US" if c in ("PR", "VI") else c for c in raw if c}
+    return sorted(merged)
+
+
+def _not_canceled():
+    """Exclude CANCELED orders from analytics (include NULL for legacy data)."""
+    return or_(Order.cancel_status.is_(None), Order.cancel_status != "CANCELED")
+
+
+@router.get("/analytics/filter-options", response_model=AnalyticsFilterOptionsResponse)
+async def get_analytics_filter_options(db: AsyncSession = Depends(get_db)):
+    """Return distinct countries and SKUs for analytics filter dropdowns. PR and VI merged into US. Cancelled orders excluded."""
+    countries_stmt = (
+        select(Order.country)
+        .distinct()
+        .where(Order.country.isnot(None), _not_canceled())
+        .order_by(Order.country)
+    )
+    countries_result = await db.execute(countries_stmt)
+    raw_countries = [row[0] for row in countries_result.all() if row[0]]
+    countries = _countries_for_analytics(raw_countries)
+
+    skus_stmt = (
+        select(LineItem.sku)
+        .distinct()
+        .select_from(LineItem)
+        .join(Order, Order.order_id == LineItem.order_id)
+        .where(LineItem.sku.isnot(None), _not_canceled())
+        .order_by(LineItem.sku)
+    )
+    skus_result = await db.execute(skus_stmt)
+    skus = [row[0] for row in skus_result.all() if row[0]]
+
+    return AnalyticsFilterOptionsResponse(countries=countries, skus=skus)
+
+
+class AnalyticsSummaryPoint(BaseModel):
+    period: str
+    order_count: int
+    units_sold: int
+
+
+class AnalyticsSummaryResponse(BaseModel):
+    series: List[AnalyticsSummaryPoint]
+    totals: dict
+
+
+@router.get("/analytics/summary", response_model=AnalyticsSummaryResponse)
+async def get_analytics_summary(
+    from_date: date = Query(..., alias="from", description="Start date (YYYY-MM-DD)"),
+    to_date: date = Query(..., alias="to", description="End date (YYYY-MM-DD)"),
+    group_by: str = Query("day", description="Aggregation: day, week, or month"),
+    country: Optional[str] = Query(None, description="Filter by order country (2-letter code)"),
+    sku: Optional[str] = Query(None, description="Filter by line item SKU"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sales analytics: time series of order count and units sold, with optional filters (SM01)."""
+    if group_by not in ("day", "week", "month"):
+        raise HTTPException(status_code=400, detail="group_by must be day, week, or month")
+    if from_date > to_date:
+        raise HTTPException(status_code=400, detail="from must be <= to")
+
+    period_expr = func.date_trunc(group_by, Order.date).label("period")
+    stmt = (
+        select(
+            period_expr,
+            func.count(func.distinct(Order.order_id)).label("order_count"),
+            func.coalesce(func.sum(LineItem.quantity), 0).label("units_sold"),
+        )
+        .select_from(Order)
+        .join(LineItem, Order.order_id == LineItem.order_id)
+        .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
+    )
+    if country and country.strip():
+        cc = country.strip().upper()[:2]
+        if cc == "US":
+            stmt = stmt.where(Order.country.in_(["US", "PR", "VI"]))
+        else:
+            stmt = stmt.where(Order.country == cc)
+    if sku and sku.strip():
+        stmt = stmt.where(LineItem.sku == sku.strip())
+
+    stmt = stmt.group_by(period_expr).order_by(period_expr)
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    series = []
+    total_orders = 0
+    total_units = 0
+    for row in rows:
+        period_val = row.period
+        if hasattr(period_val, "date"):
+            period_val = period_val.date()
+        period_str = period_val.isoformat() if hasattr(period_val, "isoformat") else str(period_val)
+        order_count = int(row.order_count)
+        units_sold = int(row.units_sold)
+        series.append(
+            AnalyticsSummaryPoint(period=period_str, order_count=order_count, units_sold=units_sold)
+        )
+        total_orders += order_count
+        total_units += units_sold
+
+    return AnalyticsSummaryResponse(
+        series=series,
+        totals={"order_count": total_orders, "units_sold": total_units},
+    )
+
+
+class AnalyticsBySkuPoint(BaseModel):
+    sku_code: str
+    quantity_sold: int
+    profit_per_unit: Optional[Decimal]
+    profit: Decimal
+
+
+@router.get("/analytics/by-sku", response_model=List[AnalyticsBySkuPoint])
+async def get_analytics_by_sku(
+    from_date: date = Query(..., alias="from", description="Start date (YYYY-MM-DD)"),
+    to_date: date = Query(..., alias="to", description="End date (YYYY-MM-DD)"),
+    country: Optional[str] = Query(None, description="Filter by order country (2-letter code)"),
+    sku: Optional[str] = Query(None, description="Filter by line item SKU"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sales by SKU: quantity sold and profit (quantity_sold * profit_per_unit from SKU manager)."""
+    if from_date > to_date:
+        raise HTTPException(status_code=400, detail="from must be <= to")
+
+    stmt = (
+        select(
+            LineItem.sku.label("sku_code"),
+            func.coalesce(func.sum(LineItem.quantity), 0).label("quantity_sold"),
+            func.max(SKU.profit_per_unit).label("profit_per_unit"),
+        )
+        .select_from(Order)
+        .join(LineItem, Order.order_id == LineItem.order_id)
+        .outerjoin(SKU, LineItem.sku == SKU.sku_code)
+        .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
+    )
+    if country and country.strip():
+        cc = country.strip().upper()[:2]
+        if cc == "US":
+            stmt = stmt.where(Order.country.in_(["US", "PR", "VI"]))
+        else:
+            stmt = stmt.where(Order.country == cc)
+    if sku and sku.strip():
+        stmt = stmt.where(LineItem.sku == sku.strip())
+    stmt = stmt.group_by(LineItem.sku).order_by(func.sum(LineItem.quantity).desc())
+
+    result = await db.execute(stmt)
+    rows = result.all()
+    out = []
+    for row in rows:
+        qty = int(row.quantity_sold)
+        ppu = row.profit_per_unit
+        profit = (qty * ppu) if ppu is not None else Decimal("0")
+        out.append(
+            AnalyticsBySkuPoint(
+                sku_code=row.sku_code,
+                quantity_sold=qty,
+                profit_per_unit=ppu,
+                profit=profit,
+            )
+        )
+    return out
+
+
+# === Stock Planning (SM04) ===
+
+class VelocityResponse(BaseModel):
+    sku: str
+    units_sold: int
+    days: int
+    units_per_day: float
+
+
+@router.get("/planning/velocity", response_model=VelocityResponse)
+async def get_sales_velocity(
+    sku: str = Query(..., description="SKU code"),
+    from_date: date = Query(..., alias="from"),
+    to_date: date = Query(..., alias="to"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sales velocity for a SKU over a date range (units per day). Used for stock planning (SM04)."""
+    if from_date > to_date:
+        raise HTTPException(status_code=400, detail="from must be <= to")
+    days = (to_date - from_date).days + 1
+    if days <= 0:
+        raise HTTPException(status_code=400, detail="Invalid date range")
+
+    stmt = (
+        select(func.coalesce(func.sum(LineItem.quantity), 0).label("units"))
+        .select_from(LineItem)
+        .join(Order, Order.order_id == LineItem.order_id)
+        .where(
+            LineItem.sku == sku.strip(),
+            Order.date >= from_date,
+            Order.date <= to_date,
+            _not_canceled(),
+        )
+    )
+    result = await db.execute(stmt)
+    units_sold = int(result.scalar_one())
+    return VelocityResponse(
+        sku=sku.strip(),
+        units_sold=units_sold,
+        days=days,
+        units_per_day=round(units_sold / days, 2) if days else 0,
     )
 
 
@@ -504,4 +730,130 @@ async def delete_sku(sku_code: str, db: AsyncSession = Depends(get_db)):
     if not sku:
         raise HTTPException(status_code=404, detail="SKU not found")
     await db.delete(sku)
+    await db.commit()
+
+
+# === Purchase Orders (SM06-SM07) ===
+
+class POLineItemCreate(BaseModel):
+    sku_code: str = Field(..., max_length=100)
+    quantity: int = Field(..., ge=1)
+
+
+class POCreate(BaseModel):
+    order_date: date
+    order_value: Decimal = Field(..., ge=0)
+    lead_time_days: int = Field(default=90, ge=0)
+    status: str = Field(default="In Progress", max_length=20)
+    line_items: List[POLineItemCreate] = Field(..., min_length=1)
+
+
+class POLineItemResponse(BaseModel):
+    id: int
+    sku_code: str
+    quantity: int
+
+    model_config = {"from_attributes": True}
+
+
+class POResponse(BaseModel):
+    id: int
+    status: str
+    order_date: date
+    order_value: Decimal
+    lead_time_days: int
+    actual_delivery_date: Optional[date]
+    line_items: List[POLineItemResponse]
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/purchase-orders", response_model=List[POResponse])
+async def list_purchase_orders(
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status"),
+    db: AsyncSession = Depends(get_db),
+):
+    """List purchase orders (SM06-SM07)."""
+    q = (
+        select(PurchaseOrder)
+        .options(selectinload(PurchaseOrder.line_items))
+        .order_by(PurchaseOrder.order_date.desc())
+    )
+    if status_filter and status_filter.strip():
+        q = q.where(PurchaseOrder.status == status_filter.strip())
+    result = await db.execute(q)
+    return list(result.scalars().all())
+
+
+@router.post("/purchase-orders", response_model=POResponse, status_code=status.HTTP_201_CREATED)
+async def create_purchase_order(body: POCreate, db: AsyncSession = Depends(get_db)):
+    """Create a purchase order with line items."""
+    for li in body.line_items:
+        r = await db.execute(select(SKU).where(SKU.sku_code == li.sku_code))
+        if not r.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail=f"SKU not found: {li.sku_code}")
+
+    po = PurchaseOrder(
+        order_date=body.order_date,
+        order_value=body.order_value,
+        lead_time_days=body.lead_time_days,
+        status=body.status.strip() or "In Progress",
+    )
+    db.add(po)
+    await db.flush()
+    for li in body.line_items:
+        pol = POLineItem(po_id=po.id, sku_code=li.sku_code, quantity=li.quantity)
+        db.add(pol)
+    await db.commit()
+    result = await db.execute(
+        select(PurchaseOrder).where(PurchaseOrder.id == po.id).options(selectinload(PurchaseOrder.line_items))
+    )
+    return result.scalar_one()
+
+
+@router.get("/purchase-orders/{po_id}", response_model=POResponse)
+async def get_purchase_order(po_id: int, db: AsyncSession = Depends(get_db)):
+    """Get one purchase order."""
+    result = await db.execute(
+        select(PurchaseOrder)
+        .where(PurchaseOrder.id == po_id)
+        .options(selectinload(PurchaseOrder.line_items))
+    )
+    po = result.scalar_one_or_none()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    return po
+
+
+@router.put("/purchase-orders/{po_id}", response_model=POResponse)
+async def update_purchase_order(
+    po_id: int,
+    status: Optional[str] = Query(None),
+    actual_delivery_date: Optional[date] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update purchase order status and/or actual delivery date."""
+    result = await db.execute(select(PurchaseOrder).where(PurchaseOrder.id == po_id))
+    po = result.scalar_one_or_none()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    if status is not None and status.strip():
+        po.status = status.strip()
+    if actual_delivery_date is not None:
+        po.actual_delivery_date = actual_delivery_date
+    await db.commit()
+    result = await db.execute(
+        select(PurchaseOrder).where(PurchaseOrder.id == po_id).options(selectinload(PurchaseOrder.line_items))
+    )
+    return result.scalar_one()
+
+
+@router.delete("/purchase-orders/{po_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_purchase_order(po_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete a purchase order and its line items."""
+    result = await db.execute(select(PurchaseOrder).where(PurchaseOrder.id == po_id))
+    po = result.scalar_one_or_none()
+    if not po:
+        raise HTTPException(status_code=404, detail="Purchase order not found")
+    await db.delete(po)
     await db.commit()

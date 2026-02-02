@@ -10,13 +10,16 @@ import httpx
 from app.core.config import settings
 
 
-# OAuth scope for reading orders (Fulfillment API)
-EBAY_SCOPE = "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly"
+# OAuth scopes: orders (Fulfillment) and messaging (Message API)
+EBAY_SCOPE_FULFILLMENT = "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly"
+EBAY_SCOPE_MESSAGE = "https://api.ebay.com/oauth/api_scope/commerce.message"
+EBAY_SCOPES = f"{EBAY_SCOPE_FULFILLMENT} {EBAY_SCOPE_MESSAGE}"
 
 
 def get_authorization_url(state: Optional[str] = None) -> str:
     """
     Build the eBay OAuth consent URL. User is redirected here to log in and grant access.
+    Requests both fulfillment (orders) and commerce.message (messaging) scopes.
     """
     state = state or secrets.token_urlsafe(32)
     # Strip whitespace so .env typos don't break (eBay rejects redirect_uri with spaces)
@@ -25,7 +28,7 @@ def get_authorization_url(state: Optional[str] = None) -> str:
         "client_id": (settings.EBAY_APP_ID or "").strip(),
         "response_type": "code",
         "redirect_uri": redirect_uri,
-        "scope": EBAY_SCOPE,
+        "scope": EBAY_SCOPES,
         "state": state,
     }
     q = urlencode(params)
@@ -192,6 +195,10 @@ def parse_orders_to_import(api_response: Dict[str, Any]) -> List[Dict[str, Any]]
             last_modified = _naive_utc(last_modified)
 
         country = _order_country(o)
+        buyer_username = (o.get("buyer") or {}).get("username")
+        cancel_status = (o.get("cancelStatus") or {}).get("cancelState")
+        if cancel_status not in ("CANCELED", "IN_PROGRESS", "NONE_REQUESTED"):
+            cancel_status = "NONE_REQUESTED"
         line_items = []
         for li in o.get("lineItems") or []:
             line_items.append({
@@ -207,6 +214,8 @@ def parse_orders_to_import(api_response: Dict[str, Any]) -> List[Dict[str, Any]]
             "date": creation_date,
             "country": country,
             "last_modified": last_modified,
+            "cancel_status": cancel_status,
+            "buyer_username": buyer_username,
             "line_items": line_items,
         })
     return result
@@ -264,3 +273,129 @@ async def fetch_orders_modified_since(
         if offset >= (data.get("total") or 0):
             break
     return all_orders
+
+
+# --- Message API (commerce/message/v1) ---
+
+MESSAGE_API_BASE = "/commerce/message/v1"
+
+
+async def fetch_message_conversations_page(
+    access_token: str,
+    conversation_type: str = "FROM_MEMBERS",
+    conversation_status: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """
+    Fetch one page of conversations from eBay Message API.
+    conversation_type is required: FROM_MEMBERS (member-to-member) or FROM_EBAY.
+    start_time/end_time (ISO 8601) filter by conversation activity for FROM_MEMBERS.
+    """
+    params: Dict[str, Any] = {
+        "conversation_type": conversation_type,
+        "limit": min(limit, 50),
+        "offset": offset,
+    }
+    if conversation_status:
+        params["conversation_status"] = conversation_status
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{settings.EBAY_API_URL}{MESSAGE_API_BASE}/conversation",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            params=params,
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+async def fetch_conversation_messages_page(
+    access_token: str,
+    conversation_id: str,
+    conversation_type: str = "FROM_MEMBERS",
+    limit: int = 50,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """Fetch one page of messages for a conversation."""
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{settings.EBAY_API_URL}{MESSAGE_API_BASE}/conversation/{conversation_id}",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            params={
+                "conversation_type": conversation_type,
+                "limit": min(limit, 50),
+                "offset": offset,
+            },
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+async def fetch_all_conversation_messages(
+    access_token: str,
+    conversation_id: str,
+    conversation_type: str = "FROM_MEMBERS",
+    page_size: int = 50,
+) -> List[Dict[str, Any]]:
+    """Fetch all messages in a conversation, paginating as needed."""
+    all_messages: List[Dict[str, Any]] = []
+    offset = 0
+    while True:
+        data = await fetch_conversation_messages_page(
+            access_token,
+            conversation_id,
+            conversation_type=conversation_type,
+            limit=page_size,
+            offset=offset,
+        )
+        messages = data.get("messages") or []
+        all_messages.extend(messages)
+        if not data.get("next") or offset + len(messages) >= (data.get("total") or 0):
+            break
+        offset += page_size
+    return all_messages
+
+
+async def send_message(
+    access_token: str,
+    conversation_id: str,
+    message_text: str,
+    reference_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Send a message in an existing conversation via eBay REST Message API.
+    Returns the created message details including messageId.
+    Max message_text length: 2000 characters.
+    """
+    payload: Dict[str, Any] = {
+        "conversationId": conversation_id,
+        "messageText": message_text[:2000],  # eBay enforces 2000 char limit
+    }
+    if reference_id:
+        payload["reference"] = {
+            "referenceId": reference_id,
+            "referenceType": "LISTING",
+        }
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{settings.EBAY_API_URL}{MESSAGE_API_BASE}/send_message",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        r.raise_for_status()
+        return r.json()

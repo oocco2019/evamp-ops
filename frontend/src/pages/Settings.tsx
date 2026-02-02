@@ -86,8 +86,11 @@ export default function Settings() {
 function CredentialsTab() {
   const queryClient = useQueryClient()
   const [serviceName, setServiceName] = useState('')
-  const [keyName, setKeyName] = useState('')
   const [keyValue, setKeyValue] = useState('')
+
+  // For AI providers (anthropic, openai), key_name is always "api_key"
+  const isAIProvider = serviceName === 'anthropic' || serviceName === 'openai'
+  const keyName = isAIProvider ? 'api_key' : ''
 
   const { data: credentials, isLoading } = useQuery({
     queryKey: ['credentials'],
@@ -102,7 +105,6 @@ function CredentialsTab() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['credentials'] })
       setServiceName('')
-      setKeyName('')
       setKeyValue('')
     },
   })
@@ -127,16 +129,16 @@ function CredentialsTab() {
     <div className="bg-white shadow rounded-lg p-6">
       <h2 className="text-xl font-semibold mb-4">API Credentials</h2>
       <p className="text-gray-600 mb-6">
-        Securely store API keys for AI providers. eBay credentials are configured in the .env file. All values are encrypted.
+        Store API keys for AI providers (Anthropic, OpenAI). eBay credentials are configured in the .env file. All values are encrypted.
       </p>
 
       {/* Add credential form */}
       <form onSubmit={handleSubmit} className="mb-8 bg-gray-50 p-4 rounded-lg">
-        <h3 className="font-medium mb-4">Add New Credential</h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <h3 className="font-medium mb-4">Add AI Provider API Key</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Service
+              Provider
             </label>
             <select
               value={serviceName}
@@ -144,44 +146,37 @@ function CredentialsTab() {
               className="w-full border border-gray-300 rounded-md px-3 py-2"
               required
             >
-              <option value="">Select service...</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="openai">OpenAI</option>
+              <option value="">Select provider...</option>
+              <option value="anthropic">Anthropic (Claude)</option>
+              <option value="openai">OpenAI (GPT)</option>
             </select>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Key Name
-            </label>
-            <input
-              type="text"
-              value={keyName}
-              onChange={(e) => setKeyName(e.target.value)}
-              placeholder="e.g., api_key, app_id"
-              className="w-full border border-gray-300 rounded-md px-3 py-2"
-              required
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Value
+              API Key
             </label>
             <input
               type="password"
               value={keyValue}
               onChange={(e) => setKeyValue(e.target.value)}
-              placeholder="API key value"
+              placeholder={serviceName === 'anthropic' ? 'sk-ant-...' : serviceName === 'openai' ? 'sk-...' : 'Select a provider first'}
               className="w-full border border-gray-300 rounded-md px-3 py-2"
               required
+              disabled={!serviceName}
             />
           </div>
         </div>
+        <p className="mt-2 text-sm text-gray-500">
+          {serviceName === 'anthropic' && 'Get your API key from console.anthropic.com'}
+          {serviceName === 'openai' && 'Get your API key from platform.openai.com'}
+          {!serviceName && 'Select a provider to add its API key'}
+        </p>
         <button
           type="submit"
-          disabled={createMutation.isPending}
+          disabled={createMutation.isPending || !serviceName}
           className="mt-4 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
         >
-          {createMutation.isPending ? 'Adding...' : 'Add Credential'}
+          {createMutation.isPending ? 'Adding...' : 'Add API Key'}
         </button>
       </form>
 
@@ -239,6 +234,14 @@ function AIModelsTab() {
     },
   })
 
+  const { data: credentials } = useQuery({
+    queryKey: ['credentials'],
+    queryFn: async () => {
+      const response = await settingsAPI.listCredentials()
+      return response.data
+    },
+  })
+
   const createMutation = useMutation({
     mutationFn: settingsAPI.createAIModel,
     onSuccess: () => {
@@ -276,12 +279,22 @@ function AIModelsTab() {
 
   const modelOptions: Record<string, string[]> = {
     anthropic: [
-      'claude-3-5-sonnet-20241022',
-      'claude-3-opus-20240229',
+      'claude-sonnet-4-5-20250929',
+      'claude-haiku-4-5-20251001',
+      'claude-opus-4-5-20251101',
       'claude-3-haiku-20240307',
     ],
     openai: ['gpt-4-turbo-preview', 'gpt-4', 'gpt-3.5-turbo'],
   }
+
+  // Check if there's a default model and matching credentials
+  const defaultModel = models?.find((m: AIModelSetting) => m.is_default)
+  const hasMatchingCredential = defaultModel
+    ? credentials?.some(
+        (c: APICredential) => c.service_name === defaultModel.provider && c.key_name === 'api_key' && c.is_active
+      )
+    : false
+  const isAIReady = defaultModel && hasMatchingCredential
 
   return (
     <div className="bg-white shadow rounded-lg p-6">
@@ -289,6 +302,28 @@ function AIModelsTab() {
       <p className="text-gray-600 mb-6">
         Configure which AI model to use for message drafting and translation.
       </p>
+
+      {/* Status indicator */}
+      <div className={`mb-6 p-4 rounded-lg border ${isAIReady ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}`}>
+        <h3 className={`font-medium ${isAIReady ? 'text-green-800' : 'text-amber-800'}`}>
+          AI Status: {isAIReady ? 'Ready' : 'Not configured'}
+        </h3>
+        {!isAIReady && (
+          <ul className="mt-2 text-sm text-amber-700 list-disc list-inside">
+            {!defaultModel && <li>Add an AI model and set it as default (below)</li>}
+            {defaultModel && !hasMatchingCredential && (
+              <li>
+                Add {defaultModel.provider} API key in the <strong>API Credentials</strong> tab
+              </li>
+            )}
+          </ul>
+        )}
+        {isAIReady && (
+          <p className="mt-1 text-sm text-green-700">
+            Using {defaultModel.provider} / {defaultModel.model_name}. AI drafting is enabled.
+          </p>
+        )}
+      </div>
 
       {/* Add model form */}
       <form onSubmit={handleSubmit} className="mb-8 bg-gray-50 p-4 rounded-lg">
@@ -550,7 +585,20 @@ function EbayTab() {
         {statusLoading ? (
           <p className="text-gray-500">Checking...</p>
         ) : status?.connected ? (
-          <p className="text-green-700 font-medium">Connected</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-green-700 font-medium">Connected</p>
+            <button
+              type="button"
+              onClick={() => connectMutation.mutate()}
+              disabled={connectMutation.isPending}
+              className="text-blue-600 hover:text-blue-800 underline disabled:opacity-50"
+            >
+              {connectMutation.isPending ? 'Redirecting...' : 'Reconnect eBay'}
+            </button>
+            <span className="text-gray-500 text-sm">
+              (Use to refresh permissions, e.g. after adding message scope)
+            </span>
+          </div>
         ) : (
           <p className="text-gray-600">Not connected</p>
         )}
@@ -599,10 +647,10 @@ function EbayTab() {
           </div>
           {importMutation.data?.data && (
             <div className="mt-3 p-3 bg-gray-50 rounded-lg text-sm">
-              <p>Orders added: {importMutation.data.data.orders_added}</p>
-              <p>Orders updated: {importMutation.data.data.orders_updated}</p>
-              <p>Line items added: {importMutation.data.data.line_items_added}</p>
-              <p>Line items updated: {importMutation.data.data.line_items_updated}</p>
+              <p>Orders added: {importMutation.data.data.orders_added} (new orders from eBay)</p>
+              <p>Orders updated: {importMutation.data.data.orders_updated} (existing orders refreshed from eBay)</p>
+              <p>Line items added: {importMutation.data.data.line_items_added} (new line items)</p>
+              <p>Line items updated: {importMutation.data.data.line_items_updated} (existing line items refreshed)</p>
               {importMutation.data.data.error && (
                 <p className="text-red-600">Error: {importMutation.data.data.error}</p>
               )}

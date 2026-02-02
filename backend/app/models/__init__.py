@@ -3,7 +3,7 @@ Database models
 """
 from app.models.settings import APICredential, AIModelSetting, Warehouse
 from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem
-from app.models.messages import MessageThread, Message, AIInstruction
+from app.models.messages import MessageThread, Message, AIInstruction, SyncMetadata
 
 __all__ = [
     # Settings
@@ -20,4 +20,5 @@ __all__ = [
     "MessageThread",
     "Message",
     "AIInstruction",
+    "SyncMetadata",
 ]

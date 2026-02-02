@@ -1,142 +1,166 @@
 """
-Anthropic Claude AI provider implementation
+Anthropic Claude AI provider implementation (httpx-based to avoid SDK/Pydantic serialization issues).
 """
-from typing import Dict, Any
-from anthropic import AsyncAnthropic
+from typing import Dict, Any, List
+import httpx
 from app.services.ai_providers.base import AIProvider
 
 
+API_URL = "https://api.anthropic.com/v1/messages"
+
+
 class AnthropicProvider(AIProvider):
-    """Implementation for Anthropic Claude models"""
-    
-    def __init__(self, api_key: str, model_name: str, **kwargs):
-        super().__init__(api_key, model_name, **kwargs)
-        self.client = AsyncAnthropic(api_key=api_key)
-    
-    async def generate_message(
-        self, 
-        prompt: str, 
-        context: Dict[str, Any]
-    ) -> str:
-        """
-        Generate a customer service message using Claude.
-        
-        Context keys:
-            - thread_history: List of previous messages
-            - global_instructions: Global AI instructions
-            - sku_instructions: SKU-specific instructions
-            - knowledge_base: Relevant past conversations
-        """
-        # Build system prompt
-        system_prompt = self.system_prompt_override or self._build_system_prompt(context)
-        
-        # Build user message with context
-        user_message = self._build_user_message(prompt, context)
-        
-        # Call Claude API
-        response = await self.client.messages.create(
-            model=self.model_name,
-            max_tokens=self.max_tokens,
-            temperature=self.temperature,
-            system=system_prompt,
-            messages=[
-                {"role": "user", "content": user_message}
-            ]
-        )
-        
-        return response.content[0].text
-    
-    async def detect_language(self, text: str) -> str:
-        """Detect language using Claude"""
-        response = await self.client.messages.create(
-            model=self.model_name,
-            max_tokens=10,
-            temperature=0,
-            messages=[{
-                "role": "user",
-                "content": f"What is the ISO 639-1 language code of this text? "
-                          f"Respond with ONLY the 2-letter code, nothing else.\n\nText: {text[:500]}"
-            }]
-        )
-        
-        return response.content[0].text.strip().lower()[:2]
-    
-    async def translate(
-        self, 
-        text: str, 
-        source_lang: str,
-        target_lang: str
-    ) -> Dict[str, str]:
-        """Translate text with back-translation for verification"""
-        # Forward translation
-        forward_response = await self.client.messages.create(
-            model=self.model_name,
-            max_tokens=self.max_tokens,
-            temperature=0.3,
-            messages=[{
-                "role": "user",
-                "content": f"Translate the following text from {source_lang} to {target_lang}. "
-                          f"Preserve URLs, order IDs, and technical terms unchanged. "
-                          f"Return ONLY the translated text, no explanations.\n\n{text}"
-            }]
-        )
-        translated = forward_response.content[0].text
-        
-        # Back translation for verification
-        back_response = await self.client.messages.create(
-            model=self.model_name,
-            max_tokens=self.max_tokens,
-            temperature=0.3,
-            messages=[{
-                "role": "user",
-                "content": f"Translate the following text from {target_lang} to {source_lang}. "
-                          f"Return ONLY the translated text, no explanations.\n\n{translated}"
-            }]
-        )
-        back_translated = back_response.content[0].text
-        
-        return {
-            "translated": translated,
-            "back_translated": back_translated
-        }
-    
+    """Implementation for Anthropic Claude models using raw HTTP (no SDK)."""
+
     def _build_system_prompt(self, context: Dict[str, Any]) -> str:
-        """Build system prompt from context"""
+        """Build system prompt from context."""
+        if self.system_prompt_override:
+            return self.system_prompt_override
         parts = [
-            "You are a professional customer service assistant for an eBay seller.",
-            "Your goal is to provide helpful, accurate, and courteous responses.",
+            "You are a professional eBay seller customer service assistant.",
+            "Your role is to draft helpful, polite, and professional responses to buyers.",
+            "Keep responses concise but thorough. Be empathetic and solution-focused.",
         ]
-        
-        # Add global instructions
         if context.get("global_instructions"):
-            parts.append(f"\nGlobal Guidelines:\n{context['global_instructions']}")
-        
-        # Add SKU-specific instructions
+            parts.append(f"\n\nGlobal instructions from the seller:\n{context['global_instructions']}")
         if context.get("sku_instructions"):
-            parts.append(f"\nProduct-Specific Information:\n{context['sku_instructions']}")
-        
+            parts.append(f"\n\nProduct-specific instructions (SKU):\n{context['sku_instructions']}")
         return "\n".join(parts)
-    
-    def _build_user_message(self, prompt: str, context: Dict[str, Any]) -> str:
-        """Build user message with context"""
-        parts = []
-        
-        # Add thread history
-        if context.get("thread_history"):
-            parts.append("Previous conversation:")
-            for msg in context["thread_history"]:
-                sender = msg.get("sender", "Unknown")
-                content = msg.get("content", "")
-                parts.append(f"{sender}: {content}")
-            parts.append("")
-        
-        # Add knowledge base examples
-        if context.get("knowledge_base"):
-            parts.append("Relevant past interactions:")
-            parts.append(context["knowledge_base"])
-            parts.append("")
-        
-        # Add the actual prompt
-        parts.append(prompt)
-        
-        return "\n".join(parts)
+
+    def _format_thread_history(self, thread_history: List[Dict[str, Any]]) -> str:
+        """Format thread history for the prompt (expects 'role' and 'content' keys)."""
+        if not thread_history:
+            return "No previous messages."
+        lines = []
+        for msg in thread_history:
+            role = "Buyer" if msg.get("role") == "buyer" else "Seller"
+            content = (msg.get("content") or "").strip()
+            lines.append(f"[{role}]: {content}")
+        return "\n\n".join(lines)
+
+    async def generate_message(self, prompt: str, context: Dict[str, Any]) -> str:
+        """Generate a customer service message using Claude via REST API."""
+        system = self._build_system_prompt(context)
+        thread_history = context.get("thread_history", [])
+        user_content = f"""Here is the conversation history:
+
+{self._format_thread_history(thread_history)}
+
+---
+
+{prompt}
+
+Draft a response to the buyer. Do not include any preamble or explanation - just provide the message text that should be sent to the buyer."""
+
+        payload = {
+            "model": self.model_name,
+            "max_tokens": self.max_tokens,
+            "temperature": float(self.temperature),
+            "system": system,
+            "messages": [{"role": "user", "content": user_content}],
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                API_URL,
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+                timeout=60.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+        content = data.get("content", [])
+        if content and len(content) > 0:
+            return (content[0].get("text") or "").strip()
+        return ""
+
+    async def detect_language(self, text: str) -> str:
+        """Detect language using Claude."""
+        payload = {
+            "model": self.model_name,
+            "max_tokens": 10,
+            "temperature": 0,
+            "messages": [{
+                "role": "user",
+                "content": f"Detect the language of this text and respond with only the ISO 639-1 two-letter code (e.g., 'en', 'de', 'fr'):\n\n{text[:500]}",
+            }],
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                API_URL,
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+                timeout=30.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+        content = data.get("content", [])
+        if content and len(content) > 0:
+            return (content[0].get("text", "en") or "en").strip().lower()[:2]
+        return "en"
+
+    async def translate(
+        self,
+        text: str,
+        source_lang: str,
+        target_lang: str,
+    ) -> Dict[str, str]:
+        """Translate text with back-translation for verification."""
+        payload_fwd = {
+            "model": self.model_name,
+            "max_tokens": self.max_tokens,
+            "temperature": 0.3,
+            "messages": [{
+                "role": "user",
+                "content": f"Translate the following text from {source_lang} to {target_lang}. Preserve the meaning and tone. Do not add any explanation - just provide the translation:\n\n{text}",
+            }],
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                API_URL,
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload_fwd,
+                timeout=60.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+        content = data.get("content", [])
+        translated = content[0].get("text", "").strip() if content else text
+
+        payload_back = {
+            "model": self.model_name,
+            "max_tokens": self.max_tokens,
+            "temperature": 0.3,
+            "messages": [{
+                "role": "user",
+                "content": f"Translate the following text from {target_lang} back to {source_lang}. This is for verification. Do not add any explanation - just provide the translation:\n\n{translated}",
+            }],
+        }
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                API_URL,
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload_back,
+                timeout=60.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+        content = data.get("content", [])
+        back_translated = content[0].get("text", "").strip() if content else translated
+
+        return {"translated": translated, "back_translated": back_translated}

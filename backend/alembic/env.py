@@ -2,6 +2,14 @@
 Alembic environment configuration for async migrations
 """
 import asyncio
+import sys
+from pathlib import Path
+
+# Ensure project root is on path (e.g. when running via docker compose run backend alembic ...)
+_project_root = Path(__file__).resolve().parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
 from logging.config import fileConfig
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection

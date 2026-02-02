@@ -22,8 +22,10 @@ class AIProvider(ABC):
         """
         self.api_key = api_key
         self.model_name = model_name
-        self.temperature = kwargs.get("temperature", 0.7)
-        self.max_tokens = kwargs.get("max_tokens", 2000)
+        t = kwargs.get("temperature")
+        self.temperature = t if t is not None else 0.7
+        m = kwargs.get("max_tokens")
+        self.max_tokens = m if m is not None else 2000
         self.system_prompt_override = kwargs.get("system_prompt_override")
     
     @abstractmethod

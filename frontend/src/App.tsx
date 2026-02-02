@@ -3,7 +3,9 @@ import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom'
 
 const Settings = lazy(() => import('./pages/Settings'))
 const SalesAnalytics = lazy(() => import('./pages/SalesAnalytics'))
+const StockPlanning = lazy(() => import('./pages/StockPlanning'))
 const SKUManager = lazy(() => import('./pages/SKUManager'))
+const SupplierOrders = lazy(() => import('./pages/SupplierOrders'))
 const MessageDashboard = lazy(() => import('./pages/MessageDashboard'))
 
 function App() {
@@ -26,10 +28,22 @@ function App() {
                     Sales Analytics
                   </Link>
                   <Link
+                    to="/planning"
+                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+                  >
+                    Stock Planning
+                  </Link>
+                  <Link
                     to="/skus"
                     className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                   >
                     SKUs
+                  </Link>
+                  <Link
+                    to="/supplier-orders"
+                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+                  >
+                    Supplier Orders
                   </Link>
                   <Link
                     to="/messages"
@@ -55,7 +69,9 @@ function App() {
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/analytics" element={<SalesAnalytics />} />
+              <Route path="/planning" element={<StockPlanning />} />
               <Route path="/skus" element={<SKUManager />} />
+              <Route path="/supplier-orders" element={<SupplierOrders />} />
               <Route path="/messages" element={<MessageDashboard />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>

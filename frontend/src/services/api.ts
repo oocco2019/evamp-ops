@@ -115,6 +115,47 @@ export interface ImportResult {
   error?: string
 }
 
+export interface AnalyticsSummaryPoint {
+  period: string
+  order_count: number
+  units_sold: number
+}
+
+export interface AnalyticsSummary {
+  series: AnalyticsSummaryPoint[]
+  totals: { order_count: number; units_sold: number }
+}
+
+export interface AnalyticsBySkuPoint {
+  sku_code: string
+  quantity_sold: number
+  profit_per_unit: number | null
+  profit: string
+}
+
+export interface VelocityResult {
+  sku: string
+  units_sold: number
+  days: number
+  units_per_day: number
+}
+
+export interface POLineItemResp {
+  id: number
+  sku_code: string
+  quantity: number
+}
+
+export interface PurchaseOrder {
+  id: number
+  status: string
+  order_date: string
+  order_value: string
+  lead_time_days: number
+  actual_delivery_date: string | null
+  line_items: POLineItemResp[]
+}
+
 export const stockAPI = {
   getEbayAuthUrl: () => api.get<{ url: string; state: string }>('/api/stock/ebay/auth-url'),
   getEbayStatus: () => api.get<{ connected: boolean }>('/api/stock/ebay/status'),
@@ -131,6 +172,118 @@ export const stockAPI = {
   updateSKU: (sku_code: string, data: Partial<SKU>) =>
     api.put<SKU>(`/api/stock/skus/${sku_code}`, data),
   deleteSKU: (sku_code: string) => api.delete(`/api/stock/skus/${sku_code}`),
+
+  getAnalyticsFilterOptions: () =>
+    api.get<{ countries: string[]; skus: string[] }>('/api/stock/analytics/filter-options'),
+
+  getAnalyticsSummary: (params: {
+    from: string
+    to: string
+    group_by?: 'day' | 'week' | 'month'
+    country?: string
+    sku?: string
+  }) => api.get<AnalyticsSummary>('/api/stock/analytics/summary', { params }),
+
+  getAnalyticsBySku: (params: {
+    from: string
+    to: string
+    country?: string
+    sku?: string
+  }) => api.get<AnalyticsBySkuPoint[]>('/api/stock/analytics/by-sku', { params }),
+
+  getVelocity: (sku: string, from: string, to: string) =>
+    api.get<VelocityResult>('/api/stock/planning/velocity', {
+      params: { sku, from, to },
+    }),
+
+  listPurchaseOrders: (status?: string) =>
+    api.get<PurchaseOrder[]>('/api/stock/purchase-orders', {
+      params: status ? { status } : {},
+    }),
+  createPurchaseOrder: (data: {
+    order_date: string
+    order_value: string
+    lead_time_days?: number
+    status?: string
+    line_items: { sku_code: string; quantity: number }[]
+  }) => api.post<PurchaseOrder>('/api/stock/purchase-orders', data),
+  getPurchaseOrder: (id: number) =>
+    api.get<PurchaseOrder>(`/api/stock/purchase-orders/${id}`),
+  updatePurchaseOrder: (
+    id: number,
+    params?: { status?: string; actual_delivery_date?: string }
+  ) => api.put<PurchaseOrder>(`/api/stock/purchase-orders/${id}`, null, { params }),
+  deletePurchaseOrder: (id: number) =>
+    api.delete(`/api/stock/purchase-orders/${id}`),
+}
+
+// Messages API (Phase 4-6)
+export interface MessageResp {
+  message_id: string
+  thread_id: string
+  sender_type: string
+  sender_username: string | null
+  subject: string | null
+  content: string
+  is_read: boolean
+  detected_language: string | null
+  translated_content: string | null
+  ebay_created_at: string
+  created_at: string
+}
+
+export interface ThreadSummary {
+  thread_id: string
+  buyer_username: string | null
+  ebay_order_id: string | null
+  ebay_item_id: string | null
+  sku: string | null
+  created_at: string
+  message_count: number
+  unread_count: number
+  is_flagged: boolean
+  last_message_preview: string | null
+}
+
+export interface ThreadDetail {
+  thread_id: string
+  buyer_username: string | null
+  ebay_order_id: string | null
+  ebay_item_id: string | null
+  sku: string | null
+  tracking_number: string | null
+  is_flagged: boolean
+  created_at: string
+  messages: MessageResp[]
+}
+
+export const messagesAPI = {
+  getSendingEnabled: () =>
+    api.get<{ sending_enabled: boolean }>('/api/messages/sending-enabled'),
+  listThreads: (filter?: 'unread' | 'flagged') =>
+    api.get<ThreadSummary[]>('/api/messages/threads', {
+      params: filter ? { filter } : {},
+    }),
+  getThread: (threadId: string) =>
+    api.get<ThreadDetail>(`/api/messages/threads/${threadId}`),
+  draftReply: (threadId: string, extra_instructions?: string) =>
+    api.post<{ draft: string }>(`/api/messages/threads/${threadId}/draft`, {
+      extra_instructions: extra_instructions || undefined,
+    }),
+  sendReply: (threadId: string, content: string) =>
+    api.post<{ success: boolean; message: string }>(
+      `/api/messages/threads/${threadId}/send`,
+      { content }
+    ),
+  sync: (timeoutMs = 90000) =>
+    api.post<{ message: string; synced: number }>('/api/messages/sync', {}, { timeout: timeoutMs }),
+  toggleFlag: (threadId: string, isFlagged: boolean) =>
+    api.patch<{ thread_id: string; is_flagged: boolean }>(
+      `/api/messages/threads/${threadId}/flag`,
+      { is_flagged: isFlagged }
+    ),
+  getFlaggedCount: () =>
+    api.get<{ flagged_count: number }>('/api/messages/flagged-count'),
 }
 
 // Health check

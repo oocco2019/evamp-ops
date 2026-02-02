@@ -11,6 +11,7 @@ from app.core.config import settings
 from app.core.database import init_db, close_db
 from app.api import settings as settings_api
 from app.api import stock as stock_api
+from app.api import messages as messages_api
 
 # Configure logging
 logging.basicConfig(
@@ -101,6 +102,11 @@ app.include_router(
     stock_api.router,
     prefix="/api/stock",
     tags=["stock"]
+)
+app.include_router(
+    messages_api.router,
+    prefix="/api/messages",
+    tags=["messages"]
 )
 
 

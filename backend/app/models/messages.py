@@ -16,10 +16,12 @@ class MessageThread(Base):
     __tablename__ = "message_threads"
     
     thread_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    buyer_username: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, comment="eBay buyer username for display as thread title")
     ebay_item_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     ebay_order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     sku: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     tracking_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    is_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
     
     # Relationship to messages
     messages: Mapped[List["Message"]] = relationship(
@@ -63,9 +65,8 @@ class Message(Base):
     subject: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     
-    # Status flags (CS02, CS10)
+    # Status flags (CS02)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
     
     # Language detection (CS07)
     detected_language: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
@@ -137,3 +138,12 @@ class AIInstruction(Base):
         if self.type == "global":
             return "<AIInstruction global>"
         return f"<AIInstruction SKU={self.sku_code}>"
+
+
+class SyncMetadata(Base):
+    """Key-value store for sync state (e.g. last message sync time for incremental fetch)."""
+    __tablename__ = "sync_metadata"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

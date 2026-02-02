@@ -64,13 +64,29 @@ class AIService:
         # Decrypt API key
         api_key = encryption_service.decrypt(credential.encrypted_value)
         
+        # Normalize optional numeric fields so the SDK never gets None (avoids Pydantic/serialization errors)
+        temperature = model_setting.temperature if model_setting.temperature is not None else 0.7
+        max_tokens = model_setting.max_tokens if model_setting.max_tokens is not None else 2000
+        
+        # Map retired Anthropic model IDs to current replacements (API returns error for retired models)
+        model_name = model_setting.model_name
+        if model_setting.provider.lower() == "anthropic":
+            retired_anthropic = {
+                "claude-3-5-sonnet-20241022": "claude-sonnet-4-5-20250929",
+                "claude-3-5-sonnet-20240620": "claude-sonnet-4-5-20250929",
+                "claude-3-opus-20240229": "claude-opus-4-5-20251101",
+                "claude-3-7-sonnet-20250219": "claude-sonnet-4-5-20250929",
+                "claude-3-5-haiku-20241022": "claude-haiku-4-5-20251001",
+            }
+            model_name = retired_anthropic.get(model_name, model_name)
+        
         # Create provider instance
         self._provider = self._create_provider(
             provider_name=model_setting.provider,
             api_key=api_key,
-            model_name=model_setting.model_name,
-            temperature=model_setting.temperature,
-            max_tokens=model_setting.max_tokens,
+            model_name=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
             system_prompt_override=model_setting.system_prompt_override
         )
         

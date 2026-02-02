@@ -24,6 +24,14 @@ class Order(Base):
     date: Mapped[date] = mapped_column(Date, nullable=False)
     country: Mapped[str] = mapped_column(String(2), nullable=False)
     last_modified: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    cancel_status: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True,
+        comment="eBay cancelStatus.cancelState: CANCELED, IN_PROGRESS, NONE_REQUESTED",
+    )
+    buyer_username: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True,
+        comment="eBay buyer.username (buyer user ID)",
+    )
     
     # Relationship to line items
     line_items: Mapped[List["LineItem"]] = relationship(
