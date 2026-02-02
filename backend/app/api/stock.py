@@ -16,7 +16,7 @@ from decimal import Decimal
 from app.core.database import get_db
 from app.core.config import settings as app_settings
 from app.core.security import encryption_service
-from app.models.settings import APICredential
+from app.models.settings import APICredential, Warehouse
 from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem
 from app.services.ebay_client import (
     get_authorization_url,
@@ -857,3 +857,77 @@ async def delete_purchase_order(po_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Purchase order not found")
     await db.delete(po)
     await db.commit()
+
+
+# === Supplier Order Message (SM06) ===
+
+class OrderLineItem(BaseModel):
+    sku_code: str
+    title: str
+    quantity: int
+
+
+class GenerateOrderMessageRequest(BaseModel):
+    items: List[OrderLineItem] = Field(..., min_length=1)
+
+
+class GenerateOrderMessageResponse(BaseModel):
+    message: str
+    total_units: int
+    countries: List[str]
+
+
+@router.post("/generate-order-message", response_model=GenerateOrderMessageResponse)
+async def generate_order_message(
+    body: GenerateOrderMessageRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generate a supplier order message (SM06).
+    Groups items by country code (first 2 letters of SKU), includes warehouse addresses.
+    """
+    from collections import defaultdict
+    
+    # Group items by country code (first 2 letters of SKU)
+    by_country: dict[str, list[OrderLineItem]] = defaultdict(list)
+    for item in body.items:
+        country_code = item.sku_code[:2].upper() if len(item.sku_code) >= 2 else "XX"
+        by_country[country_code].append(item)
+    
+    # Fetch warehouses
+    warehouse_result = await db.execute(select(Warehouse))
+    warehouses = {w.country_code.upper(): w for w in warehouse_result.scalars().all()}
+    
+    # Build message
+    lines = []
+    total_units = 0
+    countries_list = sorted(by_country.keys())
+    
+    for country in countries_list:
+        items = sorted(by_country[country], key=lambda x: x.sku_code)
+        lines.append(f"=== {country} ===")
+        lines.append("")
+        for item in items:
+            lines.append(f"{item.sku_code}\t{item.title}\t{item.quantity}")
+            total_units += item.quantity
+        lines.append("")
+        
+        # Add warehouse address if available
+        warehouse = warehouses.get(country)
+        if warehouse:
+            lines.append(f"Ship to: {warehouse.shortname}")
+            lines.append(warehouse.address)
+        else:
+            lines.append(f"Ship to: [No warehouse configured for {country}]")
+        lines.append("")
+        lines.append("")
+    
+    # Summary
+    lines.append("---")
+    lines.append(f"Total: {total_units} units across {len(countries_list)} countries")
+    
+    return GenerateOrderMessageResponse(
+        message="\n".join(lines),
+        total_units=total_units,
+        countries=countries_list,
+    )

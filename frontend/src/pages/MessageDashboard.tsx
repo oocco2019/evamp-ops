@@ -16,12 +16,15 @@ export default function MessageDashboard() {
   const [threads, setThreads] = useState<ThreadSummary[]>([])
   const [selectedThread, setSelectedThread] = useState<ThreadDetail | null>(null)
   const [sendingEnabled, setSendingEnabled] = useState(false)
-  const [draft, setDraft] = useState('')
+  const [_draft, setDraft] = useState('')
   const [replyContent, setReplyContent] = useState('')
   const [loading, setLoading] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<'all' | 'unread' | 'flagged'>('all')
+  const [senderType, setSenderType] = useState<'all' | 'customer' | 'ebay'>('all')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchInput, setSearchInput] = useState('')
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle')
   const [syncMessage, setSyncMessage] = useState<string>('')
   const [threadsStatus, setThreadsStatus] = useState<string>('')
@@ -50,10 +53,14 @@ export default function MessageDashboard() {
     setError(null)
     setThreadsStatus('Loading threads...')
     try {
-      const filterParam = filter === 'all' ? undefined : filter
-      const res = await messagesAPI.listThreads(filterParam)
+      const params: { filter?: 'unread' | 'flagged'; search?: string; sender_type?: 'customer' | 'ebay' } = {}
+      if (filter !== 'all') params.filter = filter
+      if (searchQuery.trim()) params.search = searchQuery.trim()
+      if (senderType !== 'all') params.sender_type = senderType
+      const res = await messagesAPI.listThreads(params)
       setThreads(res.data)
-      setThreadsStatus(`Loaded ${res.data.length} thread${res.data.length !== 1 ? 's' : ''}.`)
+      const searchNote = searchQuery.trim() ? ` matching "${searchQuery}"` : ''
+      setThreadsStatus(`Loaded ${res.data.length} thread${res.data.length !== 1 ? 's' : ''}${searchNote}.`)
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to load threads'
       setError(msg)
@@ -64,7 +71,7 @@ export default function MessageDashboard() {
     } finally {
       setLoading(false)
     }
-  }, [filter])
+  }, [filter, searchQuery, senderType])
 
   const loadThread = useCallback(async (threadId: string) => {
     setLoading(true)
@@ -215,7 +222,7 @@ export default function MessageDashboard() {
         </ul>
       </div>
 
-      <div className="flex flex-wrap gap-2 mb-4">
+      <div className="flex flex-wrap gap-2 mb-4 items-center">
         <button
           type="button"
           onClick={handleSync}
@@ -233,6 +240,15 @@ export default function MessageDashboard() {
           <option value="unread">Unread only</option>
           <option value="flagged">Flagged only ({totalFlaggedCount})</option>
         </select>
+        <select
+          value={senderType}
+          onChange={(e) => setSenderType(e.target.value as 'all' | 'customer' | 'ebay')}
+          className="px-3 py-2 border border-gray-300 rounded text-sm bg-white"
+        >
+          <option value="all">All senders</option>
+          <option value="customer">Customers only</option>
+          <option value="ebay">eBay only</option>
+        </select>
         {totalFlaggedCount > 0 && (
           <button
             type="button"
@@ -246,6 +262,41 @@ export default function MessageDashboard() {
             {totalFlaggedCount} flagged
           </button>
         )}
+        <div className="flex-1" />
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            setSearchQuery(searchInput)
+          }}
+          className="flex gap-1"
+        >
+          <input
+            type="text"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search messages..."
+            className="px-3 py-2 border border-gray-300 rounded text-sm w-48"
+          />
+          <button
+            type="submit"
+            className="px-3 py-2 bg-gray-100 border border-gray-300 rounded text-sm hover:bg-gray-200"
+          >
+            Search
+          </button>
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchInput('')
+                setSearchQuery('')
+              }}
+              className="px-3 py-2 bg-gray-100 border border-gray-300 rounded text-sm hover:bg-gray-200"
+              title="Clear search"
+            >
+              Clear
+            </button>
+          )}
+        </form>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

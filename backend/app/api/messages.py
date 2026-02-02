@@ -112,13 +112,17 @@ async def get_sending_enabled():
 @router.get("/threads", response_model=List[ThreadSummary])
 async def list_threads(
     filter: Optional[str] = None,
+    search: Optional[str] = None,
+    sender_type: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
 ):
     """
     List message threads. Optional filter: 'unread', 'flagged', or None (all).
+    Optional search: keyword search across content, subject, buyer username.
+    Optional sender_type: 'customer' or 'ebay' to filter by message source.
     Sorted by most recent message datetime.
     """
-    from sqlalchemy import func, exists
+    from sqlalchemy import func, exists, or_
     from sqlalchemy.orm import aliased
     
     # Subquery for last message datetime per thread
@@ -149,6 +153,29 @@ async def list_threads(
         q = q.where(MessageThread.is_flagged == True)
     elif filter == "unread":
         q = q.where(last_msg_subq.c.unread_count > 0)
+    
+    # Filter by sender type (customer vs eBay)
+    if sender_type == "customer":
+        q = q.where(MessageThread.buyer_username != "eBay")
+    elif sender_type == "ebay":
+        q = q.where(MessageThread.buyer_username == "eBay")
+    
+    # Search filter - find threads containing matching messages
+    if search and search.strip():
+        search_term = f"%{search.strip()}%"
+        matching_threads_subq = (
+            select(Message.thread_id)
+            .where(
+                or_(
+                    Message.content.ilike(search_term),
+                    Message.subject.ilike(search_term),
+                    Message.sender_username.ilike(search_term),
+                )
+            )
+            .distinct()
+            .subquery()
+        )
+        q = q.where(MessageThread.thread_id.in_(select(matching_threads_subq.c.thread_id)))
     
     result = await db.execute(q)
     rows = result.all()

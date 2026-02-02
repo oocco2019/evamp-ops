@@ -215,6 +215,12 @@ export const stockAPI = {
   ) => api.put<PurchaseOrder>(`/api/stock/purchase-orders/${id}`, null, { params }),
   deletePurchaseOrder: (id: number) =>
     api.delete(`/api/stock/purchase-orders/${id}`),
+
+  generateOrderMessage: (items: { sku_code: string; title: string; quantity: number }[]) =>
+    api.post<{ message: string; total_units: number; countries: string[] }>(
+      '/api/stock/generate-order-message',
+      { items }
+    ),
 }
 
 // Messages API (Phase 4-6)
@@ -260,9 +266,9 @@ export interface ThreadDetail {
 export const messagesAPI = {
   getSendingEnabled: () =>
     api.get<{ sending_enabled: boolean }>('/api/messages/sending-enabled'),
-  listThreads: (filter?: 'unread' | 'flagged') =>
+  listThreads: (params?: { filter?: 'unread' | 'flagged'; search?: string; sender_type?: 'customer' | 'ebay' }) =>
     api.get<ThreadSummary[]>('/api/messages/threads', {
-      params: filter ? { filter } : {},
+      params: params ?? {},
     }),
   getThread: (threadId: string) =>
     api.get<ThreadDetail>(`/api/messages/threads/${threadId}`),
