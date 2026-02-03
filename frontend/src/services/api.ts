@@ -334,6 +334,11 @@ export const messagesAPI = {
       source_lang,
       target_lang,
     }),
+  /** Translate all non-English messages in thread and persist to DB */
+  translateThread: (threadId: string) =>
+    api.post<{ translated_count: number; detected_language: string }>(
+      `/api/messages/threads/${threadId}/translate-all`
+    ),
 
   // AI Instructions (CS06)
   listAIInstructions: (type?: 'global' | 'sku') =>

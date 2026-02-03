@@ -32,7 +32,6 @@ export default function MessageDashboard() {
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplate[]>([])
   const [selectedEmailTemplate, setSelectedEmailTemplate] = useState<number | null>(null)
   const [showTranslation, setShowTranslation] = useState(false)
-  const [translatedMessages, setTranslatedMessages] = useState<Record<string, string>>({})
   const [translating, setTranslating] = useState(false)
   const [replyTranslation, setReplyTranslation] = useState<{ translated: string; backTranslated: string } | null>(null)
   const [translatingReply, setTranslatingReply] = useState(false)
@@ -98,9 +97,20 @@ export default function MessageDashboard() {
     setError(null)
     setDraft('')
     setReplyContent('')
+    setReplyTranslation(null)
     try {
       const res = await messagesAPI.getThread(threadId)
       setSelectedThread(res.data)
+      
+      // Check if translations exist in DB and auto-show them
+      const hasTranslations = res.data.messages.some((m) => m.translated_content)
+      setShowTranslation(hasTranslations)
+      
+      // Detect language from messages
+      const nonEnglishMsg = res.data.messages.find(
+        (m) => m.detected_language && m.detected_language !== 'en'
+      )
+      setDetectedLang(nonEnglishMsg?.detected_language || 'en')
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to load thread')
       setSelectedThread(null)
@@ -239,26 +249,12 @@ export default function MessageDashboard() {
     setTranslating(true)
     setError(null)
     try {
-      // Find first buyer message to detect language
-      const buyerMsg = selectedThread.messages.find(
-        (m) => m.sender_type === 'buyer' && m.content.trim().length > 10
-      )
-      if (buyerMsg) {
-        const langRes = await messagesAPI.detectLanguage(buyerMsg.content.slice(0, 500))
-        setDetectedLang(langRes.data.language_code)
-      }
-      // Translate all non-English messages
-      const translations: Record<string, string> = {}
-      for (const msg of selectedThread.messages) {
-        if (msg.content.trim().length < 5) continue
-        // Detect if message is non-English
-        const detectRes = await messagesAPI.detectLanguage(msg.content.slice(0, 200))
-        if (detectRes.data.language_code !== 'en') {
-          const translateRes = await messagesAPI.translate(msg.content, detectRes.data.language_code, 'en')
-          translations[msg.message_id] = translateRes.data.translated
-        }
-      }
-      setTranslatedMessages(translations)
+      // Call backend to translate all messages and persist to DB
+      const res = await messagesAPI.translateThread(selectedThread.thread_id)
+      setDetectedLang(res.data.detected_language)
+      
+      // Reload thread to get updated translations from DB
+      await loadThread(selectedThread.thread_id)
       setShowTranslation(true)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Translation failed')
@@ -569,7 +565,7 @@ export default function MessageDashboard() {
                   <MessageBubble 
                     key={m.message_id} 
                     message={m} 
-                    translation={showTranslation ? translatedMessages[m.message_id] : undefined}
+                    showTranslation={showTranslation}
                   />
                 ))}
               </div>
@@ -685,7 +681,7 @@ export default function MessageDashboard() {
   )
 }
 
-function MessageBubble({ message, translation }: { message: MessageResp; translation?: string }) {
+function MessageBubble({ message, showTranslation }: { message: MessageResp; showTranslation?: boolean }) {
   // Detect sender type
   const isEbay = message.sender_type === 'ebay'
   const isSeller =
@@ -707,19 +703,27 @@ function MessageBubble({ message, translation }: { message: MessageResp; transla
     subjectClass = 'text-white'
   }
 
+  // Use stored translation from DB
+  const translation = showTranslation ? message.translated_content : null
+
   return (
     <div className={`rounded-lg p-3 max-w-[85%] ${bubbleClass}`}>
       <p className={`text-xs mb-1 ${metaClass}`}>
         {message.sender_username || message.sender_type} · {message.ebay_created_at.slice(0, 16)}
+        {message.detected_language && message.detected_language !== 'en' && (
+          <span className="ml-2 px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] uppercase">
+            {message.detected_language}
+          </span>
+        )}
       </p>
       {message.subject && (
         <p className={`text-sm font-medium mb-1 ${subjectClass}`}>{message.subject}</p>
       )}
       <p className="text-sm whitespace-pre-wrap">{message.content}</p>
       {translation && (
-        <div className="mt-2 pt-2 border-t border-gray-300">
-          <p className="text-xs text-purple-600 mb-1">Translation (English):</p>
-          <p className="text-sm whitespace-pre-wrap text-gray-700">{translation}</p>
+        <div className={`mt-2 pt-2 border-t ${isSeller ? 'border-blue-300' : 'border-gray-300'}`}>
+          <p className={`text-xs mb-1 ${isSeller ? 'text-blue-200' : 'text-purple-600'}`}>Translation (English):</p>
+          <p className={`text-sm whitespace-pre-wrap ${isSeller ? 'text-white' : 'text-gray-700'}`}>{translation}</p>
         </div>
       )}
     </div>

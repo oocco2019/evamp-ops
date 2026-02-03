@@ -580,6 +580,76 @@ async def translate_text(
         )
 
 
+class TranslateThreadResponse(BaseModel):
+    translated_count: int
+    detected_language: str
+
+
+@router.post("/threads/{thread_id}/translate-all", response_model=TranslateThreadResponse)
+async def translate_thread_messages(
+    thread_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Translate all non-English messages in a thread and persist to DB.
+    Only translates messages that don't already have translated_content.
+    Returns the detected language and count of newly translated messages.
+    """
+    from app.services.ai_service import AIService
+    ai = AIService(db)
+    
+    result = await db.execute(
+        select(MessageThread)
+        .where(MessageThread.thread_id == thread_id)
+        .options(selectinload(MessageThread.messages))
+    )
+    thread = result.scalar_one_or_none()
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    
+    detected_lang = "en"
+    translated_count = 0
+    
+    try:
+        for msg in thread.messages:
+            # Skip very short messages
+            if len(msg.content.strip()) < 5:
+                continue
+            
+            # Skip if already translated
+            if msg.translated_content:
+                # Use existing detected language if available
+                if msg.detected_language and msg.detected_language != "en":
+                    detected_lang = msg.detected_language
+                continue
+            
+            # Detect language
+            lang = await ai.detect_language(msg.content[:500])
+            msg.detected_language = lang
+            
+            if lang != "en":
+                detected_lang = lang
+                # Translate to English
+                result = await ai.translate(msg.content, lang, "en")
+                msg.translated_content = result.get("translated", "")
+                translated_count += 1
+        
+        await db.commit()
+        
+    except Exception as e:
+        await db.rollback()
+        logger.exception("Thread translation failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Translation failed: {e!s}"
+        )
+    
+    return TranslateThreadResponse(
+        translated_count=translated_count,
+        detected_language=detected_lang,
+    )
+
+
 import re
 from html import unescape as html_unescape
 
