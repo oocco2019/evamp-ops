@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     EUR_TO_GBP_RATE: float = 0.86
     # Profit after tax: displayed profit = gross profit * (1 - PROFIT_TAX_RATE). E.g. 0.30 = 30% tax on profit (take-home 70%).
     PROFIT_TAX_RATE: float = 0.30
+    # Profit in EUR: multiply GBP profit by this. E.g. 1.16 = 1 GBP = 1.16 EUR.
+    GBP_TO_EUR_RATE: float = 1.16
 
     # AI Providers (can be set via UI)
     ANTHROPIC_API_KEY: str = ""

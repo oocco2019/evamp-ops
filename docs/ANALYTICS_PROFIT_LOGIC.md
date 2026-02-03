@@ -39,8 +39,9 @@ All profit values in Sales Analytics (by SKU, by country, total Profit card) use
 | `USD_TO_GBP_RATE` | Multiply USD amounts by this to get GBP | 0.79    |
 | `EUR_TO_GBP_RATE` | Multiply EUR amounts by this to get GBP | 0.86    |
 | `PROFIT_TAX_RATE` | Tax rate on profit (0–1). Displayed profit = gross × (1 - rate) | 0.30    |
+| `GBP_TO_EUR_RATE` | Multiply GBP profit by this to get EUR for display. E.g. 1.16 = 1 GBP = 1.16 EUR | 1.16    |
 
 ## When profit updates
 
-- **Order/earnings data** – from eBay import and backfill. Re-import or backfill to refresh.
+- **Order/earnings data** – from eBay import and backfill. Opening Sales Analytics triggers a background incremental import; when it completes, analytics refetches so figures stay up to date. Backfill is still available via the API if needed.
 - **SKU costs** – from SKU Manager (landed cost, postage in USD). Editing a SKU and saving invalidates the analytics query so Sales Analytics refetches when you view it (or when the page is already open and refetches on invalidation).

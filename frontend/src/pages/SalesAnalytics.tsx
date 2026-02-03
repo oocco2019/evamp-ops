@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useState, useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   BarChart,
   Bar,
@@ -10,7 +10,7 @@ import {
   ResponsiveContainer,
   Legend,
 } from 'recharts'
-import { stockAPI, type AnalyticsSummary, type AnalyticsBySkuPoint, type AnalyticsByCountryPoint, type OrderWithLines } from '../services/api'
+import { stockAPI, type AnalyticsSummary, type AnalyticsBySkuPoint, type AnalyticsByCountryPoint } from '../services/api'
 
 const last90DaysFrom = () => {
   const d = new Date()
@@ -18,22 +18,76 @@ const last90DaysFrom = () => {
   return d.toISOString().slice(0, 10)
 }
 const defaultTo = () => new Date().toISOString().slice(0, 10)
+const GBP_TO_EUR_RATE = 1.16
+
+const SKU_SORT_STORAGE_KEY = 'salesAnalytics.skuSort'
+const COUNTRY_SORT_STORAGE_KEY = 'salesAnalytics.countrySort'
+
+type SkuSortKey = 'sku_code' | 'quantity_sold' | 'profit'
+type CountrySortKey = 'country' | 'quantity_sold' | 'profit'
+
+function loadSkuSort(): { key: SkuSortKey; dir: 'asc' | 'desc' } {
+  try {
+    const raw = localStorage.getItem(SKU_SORT_STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as { key?: string; dir?: string }
+      const key = parsed?.key
+      const dir = parsed?.dir
+      if (
+        (key === 'sku_code' || key === 'quantity_sold' || key === 'profit') &&
+        (dir === 'asc' || dir === 'desc')
+      ) {
+        return { key, dir }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { key: 'quantity_sold', dir: 'desc' }
+}
+
+function loadCountrySort(): { key: CountrySortKey; dir: 'asc' | 'desc' } {
+  try {
+    const raw = localStorage.getItem(COUNTRY_SORT_STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as { key?: string; dir?: string }
+      const key = parsed?.key
+      const dir = parsed?.dir
+      if (
+        (key === 'country' || key === 'quantity_sold' || key === 'profit') &&
+        (dir === 'asc' || dir === 'desc')
+      ) {
+        return { key, dir }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { key: 'quantity_sold', dir: 'desc' }
+}
 
 export default function SalesAnalytics() {
+  const queryClient = useQueryClient()
   const [from, setFrom] = useState(last90DaysFrom)
   const [to, setTo] = useState(defaultTo)
   const [groupBy, setGroupBy] = useState<'day' | 'week' | 'month'>('day')
   const [country, setCountry] = useState('')
   const [sku, setSku] = useState('')
-  const [tableSort, setTableSort] = useState<{ key: 'sku_code' | 'quantity_sold' | 'profit'; dir: 'asc' | 'desc' }>({
-    key: 'quantity_sold',
-    dir: 'desc',
-  })
-  const [countrySort, setCountrySort] = useState<{ key: 'country' | 'quantity_sold' | 'profit'; dir: 'asc' | 'desc' }>({
-    key: 'quantity_sold',
-    dir: 'desc',
-  })
+  const [tableSort, setTableSort] = useState<{ key: SkuSortKey; dir: 'asc' | 'desc' }>(loadSkuSort)
+  const [countrySort, setCountrySort] = useState<{ key: CountrySortKey; dir: 'asc' | 'desc' }>(loadCountrySort)
   const [filterOptions, setFilterOptions] = useState<{ countries: string[]; skus: string[] } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    stockAPI.runImport('incremental').then(() => {
+      if (!cancelled) {
+        queryClient.invalidateQueries({ queryKey: ['analytics'] })
+      }
+    }).catch(() => {
+      // Background import failed; keep showing current data
+    })
+    return () => { cancelled = true }
+  }, [queryClient])
 
   const {
     data: analyticsData,
@@ -65,30 +119,6 @@ export default function SalesAnalytics() {
   const bySku = analyticsData?.bySku ?? null
   const byCountry = analyticsData?.byCountry ?? null
   const error = analyticsError ? (analyticsError instanceof Error ? analyticsError.message : 'Failed to load analytics') : null
-  const [latestOrders, setLatestOrders] = useState<OrderWithLines[] | null>(null)
-  const [latestOrdersLoading, setLatestOrdersLoading] = useState(false)
-  const [latestOrdersError, setLatestOrdersError] = useState<string | null>(null)
-  const [latestOrdersLimit, setLatestOrdersLimit] = useState(50)
-  const [backfillEarningsLoading, setBackfillEarningsLoading] = useState(false)
-  const [backfillEarningsResult, setBackfillEarningsResult] = useState<{ orders_updated: number; orders_skipped: number; error?: string } | null>(null)
-
-  const fetchLatestOrders = useCallback(async () => {
-    setLatestOrdersLoading(true)
-    setLatestOrdersError(null)
-    try {
-      const res = await stockAPI.getLatestOrders(latestOrdersLimit)
-      setLatestOrders(res.data)
-    } catch (e: unknown) {
-      setLatestOrders(null)
-      setLatestOrdersError(e instanceof Error ? e.message : 'Failed to load orders')
-    } finally {
-      setLatestOrdersLoading(false)
-    }
-  }, [latestOrdersLimit])
-
-  useEffect(() => {
-    fetchLatestOrders()
-  }, [fetchLatestOrders])
 
   useEffect(() => {
     let cancelled = false
@@ -111,11 +141,19 @@ export default function SalesAnalytics() {
     units: s.units_sold,
   })) ?? []
 
-  const handleSort = (key: 'sku_code' | 'quantity_sold' | 'profit') => {
-    setTableSort((prev) => ({
-      key,
-      dir: prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : (key === 'quantity_sold' || key === 'profit' ? 'desc' : 'asc'),
-    }))
+  const handleSort = (key: SkuSortKey) => {
+    setTableSort((prev) => {
+      const next = {
+        key,
+        dir: prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : (key === 'quantity_sold' || key === 'profit' ? 'desc' : 'asc'),
+      }
+      try {
+        localStorage.setItem(SKU_SORT_STORAGE_KEY, JSON.stringify(next))
+      } catch {
+        // ignore
+      }
+      return next
+    })
   }
 
   const sortedBySku = bySku
@@ -131,11 +169,19 @@ export default function SalesAnalytics() {
       })
     : []
 
-  const handleCountrySort = (key: 'country' | 'quantity_sold' | 'profit') => {
-    setCountrySort((prev) => ({
-      key,
-      dir: prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : 'desc',
-    }))
+  const handleCountrySort = (key: CountrySortKey) => {
+    setCountrySort((prev) => {
+      const next = {
+        key,
+        dir: prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : 'desc',
+      }
+      try {
+        localStorage.setItem(COUNTRY_SORT_STORAGE_KEY, JSON.stringify(next))
+      } catch {
+        // ignore
+      }
+      return next
+    })
   }
 
   const sortedByCountry = byCountry
@@ -237,11 +283,25 @@ export default function SalesAnalytics() {
               <p className="text-2xl font-bold text-gray-900">{data.totals.units_sold}</p>
             </div>
             <div className="bg-white shadow rounded-lg p-4">
-              <p className="text-sm text-gray-500" title="Total profit in the selected period (GBP), after 30% tax on profit.">Profit</p>
+              <p className="text-sm text-gray-500" title="Total profit in the selected period (GBP / EUR), after 30% tax on profit.">Profit</p>
               <p className="text-2xl font-bold text-gray-900">
-                {byCountry && byCountry.length > 0
-                  ? `£${(byCountry.reduce((sum, row) => sum + Number(row.profit), 0)).toFixed(2)}`
-                  : '—'}
+                {byCountry && byCountry.length > 0 ? (() => {
+                  const totalGbp = byCountry.reduce(
+                    (sum, row) => sum + (Number(row.profit) || 0),
+                    0
+                  )
+                  const totalEur = totalGbp * GBP_TO_EUR_RATE
+                  return (
+                    <>
+                      £{totalGbp.toFixed(2)}
+                      <span className="text-lg font-normal text-gray-600 ml-2">
+                        / €{totalEur.toFixed(2)}
+                      </span>
+                    </>
+                  )
+                })() : (
+                  '—'
+                )}
               </p>
             </div>
           </div>
@@ -310,7 +370,7 @@ export default function SalesAnalytics() {
                     <tr key={row.country} className="hover:bg-gray-50">
                       <td className="px-4 py-2 font-medium text-gray-900">{row.country}</td>
                       <td className="px-4 py-2 text-right text-gray-700">{row.quantity_sold}</td>
-                      <td className="px-4 py-2 text-right text-gray-700">{Number(row.profit).toFixed(2)}</td>
+                      <td className="px-4 py-2 text-right text-gray-700">£{Number(row.profit).toFixed(2)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -360,9 +420,7 @@ export default function SalesAnalytics() {
                       <td className="px-4 py-2 font-medium text-gray-900">{row.sku_code}</td>
                       <td className="px-4 py-2 text-right text-gray-700">{row.quantity_sold}</td>
                       <td className="px-4 py-2 text-right text-gray-700">
-                        {typeof row.profit === 'string'
-                          ? Number(row.profit).toFixed(2)
-                          : (row.profit ?? 0).toFixed(2)}
+                        £{(typeof row.profit === 'string' ? Number(row.profit) : (row.profit ?? 0)).toFixed(2)}
                       </td>
                     </tr>
                   ))}
@@ -372,145 +430,6 @@ export default function SalesAnalytics() {
           </div>
         </>
       )}
-
-      {/* Latest orders – all retrievable fields with explicit headers */}
-      <div className="bg-white shadow rounded-lg p-4 overflow-x-auto mb-6">
-        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
-          <h2 className="text-lg font-semibold text-gray-800">Latest orders</h2>
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              disabled={backfillEarningsLoading}
-              onClick={async () => {
-                setBackfillEarningsResult(null)
-                setBackfillEarningsLoading(true)
-                try {
-                  const res = await stockAPI.backfillOrderEarnings()
-                  setBackfillEarningsResult(res.data)
-                  await fetchLatestOrders()
-                } catch (e: unknown) {
-                  setBackfillEarningsResult({ orders_updated: 0, orders_skipped: 0, error: e instanceof Error ? e.message : 'Failed' })
-                } finally {
-                  setBackfillEarningsLoading(false)
-                }
-              }}
-              className="rounded border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-            >
-              {backfillEarningsLoading ? 'Backfilling...' : 'Backfill Order earnings'}
-            </button>
-            {backfillEarningsResult && (
-              <span className="text-sm text-gray-600">
-                Updated {backfillEarningsResult.orders_updated}, skipped {backfillEarningsResult.orders_skipped}
-                {backfillEarningsResult.error ? ` — ${backfillEarningsResult.error}` : ''}
-              </span>
-            )}
-            <div className="flex items-center gap-2">
-              <label className="text-sm text-gray-600">Show</label>
-              <select
-                value={latestOrdersLimit}
-                onChange={(e) => setLatestOrdersLimit(Number(e.target.value))}
-                className="rounded border border-gray-300 px-2 py-1 text-sm"
-              >
-                <option value={25}>25</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-              </select>
-              <span className="text-sm text-gray-600">orders</span>
-            </div>
-          </div>
-        </div>
-        {latestOrdersError && (
-          <p className="text-sm text-red-600 mb-2">{latestOrdersError}</p>
-        )}
-        {latestOrdersLoading ? (
-          <p className="text-gray-500 text-sm">Loading orders...</p>
-        ) : !latestOrders || latestOrders.length === 0 ? (
-          <p className="text-gray-500 text-sm">No orders.</p>
-        ) : (
-          <table className="min-w-full divide-y divide-gray-200 text-sm">
-            <thead>
-              <tr className="bg-gray-50">
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Order ID</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">eBay Order ID</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Order Date</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Country</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Last Modified</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Cancel Status</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Buyer Username</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Order Currency</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700 whitespace-nowrap">Price Subtotal</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700 whitespace-nowrap">Price Total</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700 whitespace-nowrap">Tax Total</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700 whitespace-nowrap">Delivery Cost</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700 whitespace-nowrap">Price Discount</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700 whitespace-nowrap">Fee Total</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700 whitespace-nowrap">Total Fee Basis Amount</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700 whitespace-nowrap">Total Marketplace Fee</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700 whitespace-nowrap">Total Due Seller (Order Earnings)</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Total Due Seller Currency</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700 whitespace-nowrap">Ad fees</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Ad fees breakdown</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Order Payment Status</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Sales Record Ref</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">eBay Collect and Remit Tax</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">Line items (all fields)</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {latestOrders.map((order) => (
-                <tr key={order.order_id} className="hover:bg-gray-50">
-                  <td className="px-3 py-2 font-mono text-gray-900">{order.order_id}</td>
-                  <td className="px-3 py-2 font-mono text-gray-900">{order.ebay_order_id}</td>
-                  <td className="px-3 py-2 text-gray-700">{order.date}</td>
-                  <td className="px-3 py-2 text-gray-700">{order.country}</td>
-                  <td className="px-3 py-2 text-gray-600">{order.last_modified.replace('T', ' ').slice(0, 19)}</td>
-                  <td className="px-3 py-2 text-gray-700">{order.cancel_status ?? '—'}</td>
-                  <td className="px-3 py-2 text-gray-700">{order.buyer_username ?? '—'}</td>
-                  <td className="px-3 py-2 text-gray-700">{order.order_currency ?? '—'}</td>
-                  <td className="px-3 py-2 text-right text-gray-700">{order.price_subtotal != null ? Number(order.price_subtotal).toFixed(2) : '—'}</td>
-                  <td className="px-3 py-2 text-right text-gray-700">{order.price_total != null ? Number(order.price_total).toFixed(2) : '—'}</td>
-                  <td className="px-3 py-2 text-right text-gray-700">{order.tax_total != null ? Number(order.tax_total).toFixed(2) : '—'}</td>
-                  <td className="px-3 py-2 text-right text-gray-700">{order.delivery_cost != null ? Number(order.delivery_cost).toFixed(2) : '—'}</td>
-                  <td className="px-3 py-2 text-right text-gray-700">{order.price_discount != null ? Number(order.price_discount).toFixed(2) : '—'}</td>
-                  <td className="px-3 py-2 text-right text-gray-700">{order.fee_total != null ? Number(order.fee_total).toFixed(2) : '—'}</td>
-                  <td className="px-3 py-2 text-right text-gray-700">{order.total_fee_basis_amount != null ? Number(order.total_fee_basis_amount).toFixed(2) : '—'}</td>
-                  <td className="px-3 py-2 text-right text-gray-700">{order.total_marketplace_fee != null ? Number(order.total_marketplace_fee).toFixed(2) : '—'}</td>
-                  <td className="px-3 py-2 text-right font-medium text-gray-900">{order.total_due_seller != null ? Number(order.total_due_seller).toFixed(2) : '—'}</td>
-                  <td className="px-3 py-2 text-gray-700">{order.total_due_seller_currency ?? '—'}</td>
-                  <td className="px-3 py-2 text-right font-medium text-gray-900" title="Ad fees (NON_SALE_CHARGE from Finances API). Run Backfill to populate.">
-                    {order.ad_fees_total != null ? `${Number(order.ad_fees_total).toFixed(2)} ${order.ad_fees_currency ?? ''}`.trim() : '—'}
-                  </td>
-                  <td className="px-3 py-2 text-gray-700 max-w-xs">
-                    {order.ad_fees_breakdown && order.ad_fees_breakdown.length > 0
-                      ? order.ad_fees_breakdown
-                          .map((b) => `${b.transaction_memo || b.fee_type || 'Fee'}: ${b.amount} ${(b.currency || '').trim()}`.trim())
-                          .join('; ')
-                      : '—'}
-                  </td>
-                  <td className="px-3 py-2 text-gray-700">{order.order_payment_status ?? '—'}</td>
-                  <td className="px-3 py-2 text-gray-700">{order.sales_record_reference ?? '—'}</td>
-                  <td className="px-3 py-2 text-gray-700">{order.ebay_collect_and_remit_tax == null ? '—' : order.ebay_collect_and_remit_tax ? 'Yes' : 'No'}</td>
-                  <td className="px-3 py-2 text-gray-700 max-w-md">
-                    {order.line_items.length === 0
-                      ? '—'
-                      : order.line_items.map((li) => [
-                          `ID: ${li.id}`,
-                          `eBay Line Item ID: ${li.ebay_line_item_id}`,
-                          `SKU: ${li.sku}`,
-                          `Quantity: ${li.quantity}`,
-                          li.currency != null ? `Currency: ${li.currency}` : null,
-                          li.line_item_cost != null ? `Line Item Cost: ${Number(li.line_item_cost).toFixed(2)}` : null,
-                          li.discounted_line_item_cost != null ? `Discounted Line Item Cost: ${Number(li.discounted_line_item_cost).toFixed(2)}` : null,
-                          li.line_total != null ? `Line Total: ${Number(li.line_total).toFixed(2)}` : null,
-                          li.tax_amount != null ? `Tax Amount: ${Number(li.tax_amount).toFixed(2)}` : null,
-                        ].filter(Boolean).join(' | ')).join('; ')}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
 
       {!data && !loading && !error && (
         <div className="bg-gray-50 border border-gray-200 rounded-lg p-6 text-center text-gray-500">

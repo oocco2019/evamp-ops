@@ -155,12 +155,14 @@ export interface AnalyticsBySkuPoint {
   quantity_sold: number
   profit_per_unit: number | null
   profit: string
+  profit_eur?: string | null
 }
 
 export interface AnalyticsByCountryPoint {
   country: string
   quantity_sold: number
   profit: string
+  profit_eur?: string | null
 }
 
 export interface OrderLineItemRow {

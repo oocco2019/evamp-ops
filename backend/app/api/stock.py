@@ -649,6 +649,7 @@ class AnalyticsBySkuPoint(BaseModel):
     quantity_sold: int
     profit_per_unit: Optional[Decimal] = None
     profit: Decimal
+    profit_eur: Optional[Decimal] = None
 
 
 @router.get("/analytics/by-sku", response_model=List[AnalyticsBySkuPoint])
@@ -686,6 +687,7 @@ async def get_analytics_by_sku(
     sku_result = await db.execute(select(SKU).where(SKU.sku_code.in_(sku_codes)))
     sku_map = {s.sku_code: s for s in sku_result.scalars().all()}
     usd_to_gbp = getattr(app_settings, "USD_TO_GBP_RATE", 0.79)
+    gbp_to_eur = getattr(app_settings, "GBP_TO_EUR_RATE", 1.16)
 
     sku_qty: dict = {}
     sku_profit: dict = {}
@@ -727,12 +729,14 @@ async def get_analytics_by_sku(
     for sku_code in sorted(sku_profit.keys(), key=lambda x: (-sku_qty.get(x, 0), x)):
         qty = sku_qty.get(sku_code, 0)
         profit = sku_profit.get(sku_code, Decimal(0))
+        profit_eur = profit * Decimal(str(gbp_to_eur))
         out.append(
             AnalyticsBySkuPoint(
                 sku_code=sku_code,
                 quantity_sold=qty,
                 profit_per_unit=None,
                 profit=profit,
+                profit_eur=profit_eur,
             )
         )
     return out
@@ -742,6 +746,7 @@ class AnalyticsByCountryPoint(BaseModel):
     country: str
     quantity_sold: int
     profit: Decimal
+    profit_eur: Optional[Decimal] = None
 
 
 def _country_group(country: Optional[str]) -> str:
@@ -783,6 +788,7 @@ async def get_analytics_by_country(
         sku_result = await db.execute(select(SKU).where(SKU.sku_code.in_(sku_codes)))
         sku_map = {s.sku_code: s for s in sku_result.scalars().all()}
     usd_to_gbp = getattr(app_settings, "USD_TO_GBP_RATE", 0.79)
+    gbp_to_eur = getattr(app_settings, "GBP_TO_EUR_RATE", 1.16)
 
     country_qty = {}
     country_profit = {}
@@ -814,14 +820,18 @@ async def get_analytics_by_country(
         country_qty[cg] = country_qty.get(cg, 0) + qty_for_country
         country_profit[cg] = country_profit.get(cg, Decimal(0)) + net_profit
 
-    out = [
-        AnalyticsByCountryPoint(
-            country=cg,
-            quantity_sold=country_qty.get(cg, 0),
-            profit=country_profit.get(cg, Decimal(0)),
+    out = []
+    for cg in sorted(country_profit.keys(), key=lambda x: (-country_qty.get(x, 0), x)):
+        profit = country_profit.get(cg, Decimal(0))
+        profit_eur = profit * Decimal(str(gbp_to_eur))
+        out.append(
+            AnalyticsByCountryPoint(
+                country=cg,
+                quantity_sold=country_qty.get(cg, 0),
+                profit=profit,
+                profit_eur=profit_eur,
+            )
         )
-        for cg in sorted(country_profit.keys(), key=lambda x: (-country_qty.get(x, 0), x))
-    ]
     return out
 
 
