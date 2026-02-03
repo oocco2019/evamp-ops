@@ -963,3 +963,177 @@ async def sync_messages(db: AsyncSession = Depends(get_db)):
         "ebay_threads_synced": ebay_threads_synced,
         "ebay_messages_synced": ebay_messages_synced,
     }
+
+
+# === AI Instructions CRUD (CS06) ===
+
+class AIInstructionCreate(BaseModel):
+    type: str = Field(..., pattern="^(global|sku)$", description="global or sku")
+    sku_code: Optional[str] = Field(None, max_length=100)
+    item_details: Optional[str] = None
+    instructions: str = Field(..., min_length=1)
+
+
+class AIInstructionUpdate(BaseModel):
+    item_details: Optional[str] = None
+    instructions: Optional[str] = Field(None, min_length=1)
+
+
+class AIInstructionResponse(BaseModel):
+    id: int
+    type: str
+    sku_code: Optional[str]
+    item_details: Optional[str]
+    instructions: str
+    created_at: str
+    updated_at: str
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/ai-instructions", response_model=List[AIInstructionResponse])
+async def list_ai_instructions(
+    type: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """List all AI instructions, optionally filtered by type (global/sku)."""
+    query = select(AIInstruction).order_by(AIInstruction.type, AIInstruction.sku_code)
+    if type:
+        query = query.where(AIInstruction.type == type)
+    result = await db.execute(query)
+    rows = result.scalars().all()
+    return [
+        AIInstructionResponse(
+            id=r.id,
+            type=r.type,
+            sku_code=r.sku_code,
+            item_details=r.item_details,
+            instructions=r.instructions,
+            created_at=r.created_at.isoformat() if r.created_at else "",
+            updated_at=r.updated_at.isoformat() if r.updated_at else "",
+        )
+        for r in rows
+    ]
+
+
+@router.post("/ai-instructions", response_model=AIInstructionResponse, status_code=status.HTTP_201_CREATED)
+async def create_ai_instruction(
+    body: AIInstructionCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new AI instruction (global or SKU-specific)."""
+    # Validate: global instructions must not have sku_code
+    if body.type == "global" and body.sku_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Global instructions must not have a sku_code",
+        )
+    # Validate: SKU instructions must have sku_code
+    if body.type == "sku" and not body.sku_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="SKU instructions must have a sku_code",
+        )
+    # Check for duplicates
+    if body.type == "global":
+        existing = await db.execute(
+            select(AIInstruction).where(AIInstruction.type == "global")
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Global instructions already exist. Update or delete the existing one.",
+            )
+    else:
+        existing = await db.execute(
+            select(AIInstruction).where(
+                AIInstruction.type == "sku",
+                AIInstruction.sku_code == body.sku_code,
+            )
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Instructions for SKU '{body.sku_code}' already exist. Update or delete the existing one.",
+            )
+    
+    instruction = AIInstruction(
+        type=body.type,
+        sku_code=body.sku_code if body.type == "sku" else None,
+        item_details=body.item_details,
+        instructions=body.instructions,
+    )
+    db.add(instruction)
+    await db.commit()
+    await db.refresh(instruction)
+    return AIInstructionResponse(
+        id=instruction.id,
+        type=instruction.type,
+        sku_code=instruction.sku_code,
+        item_details=instruction.item_details,
+        instructions=instruction.instructions,
+        created_at=instruction.created_at.isoformat() if instruction.created_at else "",
+        updated_at=instruction.updated_at.isoformat() if instruction.updated_at else "",
+    )
+
+
+@router.get("/ai-instructions/{instruction_id}", response_model=AIInstructionResponse)
+async def get_ai_instruction(
+    instruction_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a specific AI instruction by ID."""
+    instruction = await db.get(AIInstruction, instruction_id)
+    if not instruction:
+        raise HTTPException(status_code=404, detail="AI instruction not found")
+    return AIInstructionResponse(
+        id=instruction.id,
+        type=instruction.type,
+        sku_code=instruction.sku_code,
+        item_details=instruction.item_details,
+        instructions=instruction.instructions,
+        created_at=instruction.created_at.isoformat() if instruction.created_at else "",
+        updated_at=instruction.updated_at.isoformat() if instruction.updated_at else "",
+    )
+
+
+@router.put("/ai-instructions/{instruction_id}", response_model=AIInstructionResponse)
+async def update_ai_instruction(
+    instruction_id: int,
+    body: AIInstructionUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update an existing AI instruction."""
+    instruction = await db.get(AIInstruction, instruction_id)
+    if not instruction:
+        raise HTTPException(status_code=404, detail="AI instruction not found")
+    
+    if body.item_details is not None:
+        instruction.item_details = body.item_details
+    if body.instructions is not None:
+        instruction.instructions = body.instructions
+    
+    await db.commit()
+    await db.refresh(instruction)
+    return AIInstructionResponse(
+        id=instruction.id,
+        type=instruction.type,
+        sku_code=instruction.sku_code,
+        item_details=instruction.item_details,
+        instructions=instruction.instructions,
+        created_at=instruction.created_at.isoformat() if instruction.created_at else "",
+        updated_at=instruction.updated_at.isoformat() if instruction.updated_at else "",
+    )
+
+
+@router.delete("/ai-instructions/{instruction_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_ai_instruction(
+    instruction_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an AI instruction."""
+    instruction = await db.get(AIInstruction, instruction_id)
+    if not instruction:
+        raise HTTPException(status_code=404, detail="AI instruction not found")
+    await db.delete(instruction)
+    await db.commit()

@@ -287,6 +287,16 @@ export interface ThreadDetail {
   messages: MessageResp[]
 }
 
+export interface AIInstruction {
+  id: number
+  type: 'global' | 'sku'
+  sku_code: string | null
+  item_details: string | null
+  instructions: string
+  created_at: string
+  updated_at: string
+}
+
 export const messagesAPI = {
   getSendingEnabled: () =>
     api.get<{ sending_enabled: boolean }>('/api/messages/sending-enabled'),
@@ -324,6 +334,26 @@ export const messagesAPI = {
       source_lang,
       target_lang,
     }),
+
+  // AI Instructions (CS06)
+  listAIInstructions: (type?: 'global' | 'sku') =>
+    api.get<AIInstruction[]>('/api/messages/ai-instructions', {
+      params: type ? { type } : {},
+    }),
+  createAIInstruction: (data: {
+    type: 'global' | 'sku'
+    sku_code?: string
+    item_details?: string
+    instructions: string
+  }) => api.post<AIInstruction>('/api/messages/ai-instructions', data),
+  getAIInstruction: (id: number) =>
+    api.get<AIInstruction>(`/api/messages/ai-instructions/${id}`),
+  updateAIInstruction: (
+    id: number,
+    data: { item_details?: string; instructions?: string }
+  ) => api.put<AIInstruction>(`/api/messages/ai-instructions/${id}`, data),
+  deleteAIInstruction: (id: number) =>
+    api.delete(`/api/messages/ai-instructions/${id}`),
 }
 
 // Health check

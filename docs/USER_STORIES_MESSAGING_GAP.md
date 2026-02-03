@@ -79,10 +79,10 @@ This document maps the stated user stories to the current implementation and lis
 
 | Requirement | Current | Status |
 |-------------|---------|--------|
-| Dedicated "AI Instructions" tab | Backend has model; no UI | **Gap**: Add Settings tab |
-| Global Instructions | AIInstruction type=global | Expose in UI |
-| SKU-specific instructions | AIInstruction type=sku | Add CRUD UI |
-| Add/edit/delete SKU entries | Backend supports | Add UI |
+| Dedicated "AI Instructions" tab | Settings > AI Instructions tab | **OK** |
+| Global Instructions | CRUD UI with validation (only one allowed) | **OK** |
+| SKU-specific instructions | CRUD UI with SKU dropdown from catalog | **OK** |
+| Add/edit/delete SKU entries | Full CRUD with item_details field | **OK** |
 | AI pulls Global + SKU when drafting | Done | **OK** |
 
 ---
@@ -180,21 +180,21 @@ This document maps the stated user stories to the current implementation and lis
 | **Search**: Full-text, filters, clear button | **Done** |
 | **Warehouse email**: Email templates + mailto button | **Done** |
 | **Message styling**: Buyer/Seller/eBay distinct colors | **Done** |
+| **AI Instructions UI**: Global + SKU CRUD in Settings | **Done** |
+| **Send via REST API**: sendMessage, store result | **Done** |
 
 ### Remaining gaps
 
 | Priority | Feature | Effort |
 |----------|---------|--------|
-| 1 | **Send via REST API**: Implement `sendMessage`, store result | Medium |
-| 2 | **AI Instructions UI**: Global + SKU CRUD in Settings | Medium |
-| 3 | **Knowledge Base** + Redo flow | Large |
-| 4 | **Original Draft toggle** + local persistence | Small |
-| 5 | **Scheduled sync** (60-min job) | Small |
-| 6 | **Webhooks** (optional, if real-time needed) | Medium |
-| 7 | **Archived messages** protection | Small |
-| 8 | **Bi-directional read sync** | Small |
-| 9 | **10s delay / Cancel** on Send | Medium |
-| 10 | **Search snippet highlighting** | Small |
+| 1 | **Knowledge Base** + Redo flow | Large |
+| 2 | **Original Draft toggle** + local persistence | Small |
+| 3 | **Scheduled sync** (60-min job) | Small |
+| 4 | **Webhooks** (optional, if real-time needed) | Medium |
+| 5 | **Archived messages** protection | Small |
+| 6 | **Bi-directional read sync** | Small |
+| 7 | **10s delay / Cancel** on Send | Medium |
+| 8 | **Search snippet highlighting** | Small |
 
 ---
 
