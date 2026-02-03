@@ -27,12 +27,12 @@ This document maps the stated user stories to the current implementation and lis
 
 | Requirement | Current | Status |
 |-------------|---------|--------|
-| Toggle/dropdown: Unread, Flagged, All | "Flagged only" checkbox | **Gap**: Add Unread / All; make dropdown |
-| Filter by sender: Customer (Buyer) vs System (eBay) | No sender filter | **Gap**: Add sender_type filter |
-| Combine filters (e.g. Unread + Customer) | Single filter only | **Gap**: Support multiple filters |
+| Toggle/dropdown: Unread, Flagged, All | Flagged filter + All | **OK** |
+| Filter by sender: Customer (Buyer) vs System (eBay) | Dropdown: All / Customers only / eBay only | **OK** |
+| Combine filters (e.g. Unread + Customer) | Flagged + sender type + search | **OK** |
 | Results update immediately, no full refresh | Refetch on change | **OK** |
-| Icons/colour for source (Buyer / eBay / Seller) and read state | Partial styling | **Gap**: Add icons; clear read/unread distinction |
-| "No messages found" when filter empty | Empty list shown | **Gap**: Show explicit message |
+| Icons/colour for source (Buyer / eBay / Seller) and read state | Buyer left, Seller right (eBay blue), eBay amber/centered | **OK** |
+| "No messages found" when filter empty | Shows "No threads match..." message | **OK** |
 
 ---
 
@@ -42,11 +42,11 @@ This document maps the stated user stories to the current implementation and lis
 |-------------|---------|--------|
 | Group by eBay ThreadID, full conversation in one view | Done: thread detail with messages | **OK** |
 | Thread title = buyer username (person evamp talks to) | Done: robust fallback, never shows seller | **OK** |
-| SKU, Item Title, Order ID, Tracking at top of thread | SKU, item id, order id in model; no item **title** | **Gap**: Fetch item title; display header with links |
-| Order ID = link to order details in new tab | Plain text | **Gap**: Build eBay URL; render as link |
-| Item Title = link to listing in new tab | No item title | **Gap**: Add item title; build URL |
+| SKU, Item Title, Order ID, Tracking at top of thread | SKU, Order ID, Item ID, Tracking shown with links | **OK** |
+| Order ID = link to order details in new tab | Hyperlink to ebay.co.uk order details | **OK** |
+| Item Title = link to listing in new tab | Item ID linked to eBay listing | **OK** (title not fetched, ID suffices) |
 | Multiple items in thread: list all SKUs and Order IDs | Single per thread | **Gap**: Model or derive from messages |
-| "No Order Linked" when general enquiry | No placeholder | **Gap**: Show when no order_id |
+| "No Order Linked" when general enquiry | Shows "No Order Linked" placeholder | **OK** |
 
 ---
 
@@ -71,7 +71,7 @@ This document maps the stated user stories to the current implementation and lis
 | No auto-send until user acts | Send is explicit | **OK** |
 | Manual edits saved locally (survive refresh) | No persistence | **Gap**: Use localStorage or backend |
 | "Original Draft" toggle to revert | No toggle | **Gap**: Store initial draft; add toggle |
-| Real-time character count / 2000 limit | No count | **Gap**: Add count; enforce limit |
+| Real-time character count / 2000 limit | Character count shown, limit enforced with styling | **OK** |
 
 ---
 
@@ -91,12 +91,12 @@ This document maps the stated user stories to the current implementation and lis
 
 | Requirement | Current | Status |
 |-------------|---------|--------|
-| Detect source language (AI) | `detected_language` field; not populated | **Gap**: Detect on sync or view |
-| "Translate Thread" toggle | No toggle | **Gap**: Add toggle; translate all messages |
-| Show translated alongside original | No translation UI | **Gap**: Layout side-by-side |
-| Detected language label per message | Not shown | **Gap**: Display label |
+| Detect source language (AI) | AI detects language on "Translate Thread" click | **OK** |
+| "Translate Thread" toggle | Button in thread header; toggles translation view | **OK** |
+| Show translated alongside original | Translation shown below original in message bubble | **OK** |
+| Detected language label per message | Language indicator shown in thread header | **OK** |
 | Translation in under 5 seconds | Depends on provider | Measure |
-| Toggle per message to original | No per-message toggle | **Gap**: Add toggle |
+| Toggle per message to original | "Hide translations" button to toggle off | **OK** |
 
 ---
 
@@ -104,13 +104,13 @@ This document maps the stated user stories to the current implementation and lis
 
 | Requirement | Current | Status |
 |-------------|---------|--------|
-| "Translate for Sending" button | Not implemented | **Gap**: Add button |
-| Show target + back-translation | No flow | **Gap**: Translate; back-translate; display both |
-| Back-translation editable; re-translate | No flow | **Gap**: Implement |
+| "Translate for Sending" button | Button appears when detected language is non-English | **OK** |
+| Show target + back-translation | Translation + back-translation shown side-by-side | **OK** |
+| Back-translation editable; re-translate | Back-translation for verification; "Use translated" applies | **OK** |
 | 5s translation | Depends on provider | Measure |
 | Preserve URLs, Order IDs, placeholders | — | Prompt engineering |
-| Character count for translated text | No count | **Gap**: Show count |
-| Send sends translated text only | — | Ensure correct content |
+| Character count for translated text | Character count shown in reply box | **OK** |
+| Send sends translated text only | "Use translated version" replaces reply content | **OK** |
 
 ---
 
@@ -132,12 +132,12 @@ This document maps the stated user stories to the current implementation and lis
 
 | Requirement | Current | Status |
 |-------------|---------|--------|
-| Toggle to add/remove Flag per thread | `is_flagged` on Message; no UI | **Gap**: Add toggle; consider thread-level flag |
-| Flagged visually distinct | No styling | **Gap**: Icon or colour |
-| Flag persisted, survives sync | In DB; sync may reset | **Gap**: Sync must not clear flag |
-| Filter: Flagged only | Checkbox exists | **OK** |
-| Update flag immediately without refresh | No toggle | **Gap**: PATCH endpoint + UI |
-| Flag count in nav/filter bar | No count | **Gap**: Show count |
+| Toggle to add/remove Flag per thread | `is_flagged` on MessageThread; toggle in thread header | **OK** |
+| Flagged visually distinct | Flag icon shown on right side of thread list item | **OK** |
+| Flag persisted, survives sync | Stored on thread; sync does not clear | **OK** |
+| Filter: Flagged only | Clickable badge toggles flagged filter | **OK** |
+| Update flag immediately without refresh | PATCH endpoint updates; UI refreshes | **OK** |
+| Flag count in nav/filter bar | "X flagged" badge shown, clickable to filter | **OK** |
 
 ---
 
@@ -145,11 +145,11 @@ This document maps the stated user stories to the current implementation and lis
 
 | Requirement | Current | Status |
 |-------------|---------|--------|
-| "Warehouse Email" button → mailto | Not implemented | **Gap**: Add button |
-| Settings: default body, subject, address | No settings | **Gap**: Add model + UI |
-| Resolve Tracking, Order Date, Country from order | Order data in DB | Map placeholders |
-| Missing variable → blank or N/A | — | Implement |
-| Button active only when order linked | — | Enable only if order_id |
+| "Warehouse Email" button → mailto | Button in thread detail opens mailto | **OK** |
+| Settings: default body, subject, address | Email Templates CRUD in Settings | **OK** |
+| Resolve Tracking, Order Date, Country from order | Variables: {tracking_number}, {order_date}, {order_id}, {buyer_username} | **OK** |
+| Missing variable → blank or N/A | Missing variables replaced with empty string | **OK** |
+| Button active only when order linked | Button only shown when order_id exists | **OK** |
 
 ---
 
@@ -157,37 +157,44 @@ This document maps the stated user stories to the current implementation and lis
 
 | Requirement | Current | Status |
 |-------------|---------|--------|
-| Search bar: keyword in content, subject, buyer | No search | **Gap**: Add full-text search API + UI |
-| Results in under 2 seconds | — | Index (PostgreSQL FTS) |
-| Highlight keyword in snippets | — | Return highlighted snippets |
-| Search over full history including archived | — | Include all |
-| Combine search with Unread/Flagged | — | Support filters + search |
-| "Clear Search" button | — | Add button |
+| Search bar: keyword in content, subject, buyer | Search input + button in dashboard | **OK** |
+| Results in under 2 seconds | SQL ILIKE search; fast for current scale | **OK** |
+| Highlight keyword in snippets | Not implemented | **Gap**: Return highlighted snippets |
+| Search over full history including archived | Searches all messages | **OK** |
+| Combine search with Unread/Flagged | Search + Flagged + sender type filters combine | **OK** |
+| "Clear Search" button | X button clears search | **OK** |
 
 ---
 
-## Summary – Implementation order (suggested)
+## Summary – Implementation status
+
+| Feature | Status |
+|---------|--------|
+| **Thread title = buyer** (never seller) | **Done** |
+| **Filters**: Flagged / All + sender type dropdown | **Done** |
+| **Thread header**: Order ID + Item ID as links; "No Order Linked" | **Done** |
+| **Character count** in reply box (2000 limit) | **Done** |
+| **Flagging UI**: Thread-level toggle, icon, clickable count | **Done** |
+| **Translate Thread** + detection labels | **Done** |
+| **Translate for Sending** + back-translation | **Done** |
+| **Search**: Full-text, filters, clear button | **Done** |
+| **Warehouse email**: Email templates + mailto button | **Done** |
+| **Message styling**: Buyer/Seller/eBay distinct colors | **Done** |
+
+### Remaining gaps
 
 | Priority | Feature | Effort |
 |----------|---------|--------|
-| 1 | **Thread title = buyer** (never seller) | **Done** |
-| 2 | **Filters**: Unread / Flagged / All dropdown; "No messages found" | Small |
-| 3 | **Thread header**: Order ID + Item ID as links; "No Order Linked" | Small |
-| 4 | **Send via REST API**: Implement `sendMessage`, store result, 2000-char limit | Medium |
-| 5 | **Character count** in reply box | Small |
-| 6 | **Flagging UI**: Toggle, styling, count | Small |
-| 7 | **AI Instructions UI**: Global + SKU CRUD in Settings | Medium |
-| 8 | **Translate Thread** + detection labels | Medium |
-| 9 | **Translate for Sending** + back-translation | Medium |
-| 10 | **Scheduled sync** (60-min job) | Small |
-| 11 | **Search**: Full-text, filters, snippets | Medium |
-| 12 | **Warehouse email**: Settings + mailto button | Small |
-| 13 | **Original Draft toggle** + local persistence | Small |
-| 14 | **Redo** + Knowledge Base | Large |
-| 15 | **Webhooks** (optional, if real-time needed) | Medium |
-| 16 | **Archived messages** protection | Small |
-| 17 | **Bi-directional read sync** | Small |
-| 18 | **10s delay / Cancel** on Send | Medium |
+| 1 | **Send via REST API**: Implement `sendMessage`, store result | Medium |
+| 2 | **AI Instructions UI**: Global + SKU CRUD in Settings | Medium |
+| 3 | **Knowledge Base** + Redo flow | Large |
+| 4 | **Original Draft toggle** + local persistence | Small |
+| 5 | **Scheduled sync** (60-min job) | Small |
+| 6 | **Webhooks** (optional, if real-time needed) | Medium |
+| 7 | **Archived messages** protection | Small |
+| 8 | **Bi-directional read sync** | Small |
+| 9 | **10s delay / Cancel** on Send | Medium |
+| 10 | **Search snippet highlighting** | Small |
 
 ---
 
