@@ -63,6 +63,23 @@ Stop the tunnel in Terminal 2 with **Ctrl+C**.
 
 ---
 
+## Hot Reload (no restart needed)
+
+Both frontend and backend have **hot reload** enabled. When you edit code:
+
+- **Frontend** (React): Changes appear instantly in the browser
+- **Backend** (FastAPI): Server auto-restarts on file save
+
+You do **NOT** need to run `make down && make up` after code changes. Just save the file and refresh the browser if needed.
+
+**When you DO need to restart:**
+- After changing `docker-compose.yml`
+- After changing `Dockerfile`
+- After changing `.env` file
+- After adding new Python dependencies to `requirements.txt`
+
+---
+
 ## Quick reference
 
 | Task              | Command                    |

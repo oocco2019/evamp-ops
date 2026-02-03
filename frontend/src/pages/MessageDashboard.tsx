@@ -710,11 +710,6 @@ function MessageBubble({ message, showTranslation }: { message: MessageResp; sho
     <div className={`rounded-lg p-3 max-w-[85%] ${bubbleClass}`}>
       <p className={`text-xs mb-1 ${metaClass}`}>
         {message.sender_username || message.sender_type} · {message.ebay_created_at.slice(0, 16)}
-        {message.detected_language && message.detected_language !== 'en' && (
-          <span className="ml-2 px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-[10px] uppercase">
-            {message.detected_language}
-          </span>
-        )}
       </p>
       {message.subject && (
         <p className={`text-sm font-medium mb-1 ${subjectClass}`}>{message.subject}</p>
