@@ -5,8 +5,8 @@ from datetime import datetime, date
 from typing import Optional, List
 from decimal import Decimal
 from sqlalchemy import (
-    String, Integer, DateTime, Date, Numeric, 
-    ForeignKey, Text, UniqueConstraint
+    String, Integer, DateTime, Date, Numeric,
+    ForeignKey, Text, UniqueConstraint, JSON,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
@@ -16,6 +16,7 @@ class Order(Base):
     """
     eBay orders imported via API (SM02).
     Used for sales analytics (SM01).
+    All pricing/tax/fee fields from Fulfillment API (pricingSummary, totalMarketplaceFee, etc.).
     """
     __tablename__ = "orders"
     
@@ -32,7 +33,33 @@ class Order(Base):
         String(255), nullable=True,
         comment="eBay buyer.username (buyer user ID)",
     )
-    
+    order_currency: Mapped[Optional[str]] = mapped_column(String(3), nullable=True)
+    price_subtotal: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    price_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    tax_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    delivery_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    price_discount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    fee_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    total_fee_basis_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    total_marketplace_fee: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    order_payment_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    sales_record_reference: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    ebay_collect_and_remit_tax: Mapped[Optional[bool]] = mapped_column(nullable=True)
+    total_due_seller: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), nullable=True,
+        comment="paymentSummary.totalDueSeller (order earnings / payout to seller, often GBP)",
+    )
+    total_due_seller_currency: Mapped[Optional[str]] = mapped_column(String(3), nullable=True)
+    ad_fees_total: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(12, 2), nullable=True,
+        comment="Sum of NON_SALE_CHARGE (e.g. ad fees) from Finances API",
+    )
+    ad_fees_currency: Mapped[Optional[str]] = mapped_column(String(3), nullable=True)
+    ad_fees_breakdown: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True,
+        comment="List of {fee_type, transaction_memo, amount} from Finances API",
+    )
+
     # Relationship to line items
     line_items: Mapped[List["LineItem"]] = relationship(
         "LineItem",
@@ -52,6 +79,7 @@ class LineItem(Base):
     """
     Individual items within an order.
     Deduplication by OrderID + LineItemID (SM02).
+    Pricing/tax from Fulfillment API lineItems.
     """
     __tablename__ = "line_items"
     
@@ -60,6 +88,11 @@ class LineItem(Base):
     ebay_line_item_id: Mapped[str] = mapped_column(String(100), nullable=False)
     sku: Mapped[str] = mapped_column(String(100), nullable=False)
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    currency: Mapped[Optional[str]] = mapped_column(String(3), nullable=True)
+    line_item_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    discounted_line_item_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    line_total: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    tax_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
     
     # Relationship
     order: Mapped["Order"] = relationship("Order", back_populates="line_items")

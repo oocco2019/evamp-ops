@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, case
 from pydantic import BaseModel, Field
 from decimal import Decimal
 
@@ -24,6 +24,11 @@ from app.services.ebay_client import (
     refresh_access_token,
     fetch_all_orders,
     fetch_orders_modified_since,
+    fetch_order_by_id,
+    fetch_transactions_for_order,
+    parse_net_order_earnings_from_transactions,
+    parse_ad_fees_from_transactions,
+    _parse_total_due_seller,
 )
 from app.services.ebay_auth import get_ebay_access_token
 
@@ -277,6 +282,8 @@ async def run_import(
 ):
     """
     Run order import: full (last 90 days; eBay filter limit) or incremental (since last import).
+    Uses Fulfillment API batch data only (no per-order Finances calls). total_due_seller comes from
+    paymentSummary in the batch; for net earnings after ad fees, run the backfill-order-earnings endpoint separately.
     """
     if body.mode not in ("full", "incremental"):
         raise HTTPException(status_code=400, detail="mode must be 'full' or 'incremental'")
@@ -317,38 +324,50 @@ async def run_import(
 
         for order_batch in chunks:
             for o in order_batch:
+                # Use Fulfillment API data as-is (total_due_seller from batch). Use backfill endpoint to correct earnings with Finances API when needed.
                 result = await db.execute(
                     select(Order).where(Order.ebay_order_id == o["ebay_order_id"])
                 )
                 existing_order = result.scalar_one_or_none()
+                def _order_payload(o: dict) -> dict:
+                    return {
+                        "date": o["date"],
+                        "country": o["country"],
+                        "last_modified": o["last_modified"],
+                        "cancel_status": o.get("cancel_status"),
+                        "buyer_username": o.get("buyer_username"),
+                        "order_currency": o.get("order_currency"),
+                        "price_subtotal": o.get("price_subtotal"),
+                        "price_total": o.get("price_total"),
+                        "tax_total": o.get("tax_total"),
+                        "delivery_cost": o.get("delivery_cost"),
+                        "price_discount": o.get("price_discount"),
+                        "fee_total": o.get("fee_total"),
+                        "total_fee_basis_amount": o.get("total_fee_basis_amount"),
+                        "total_marketplace_fee": o.get("total_marketplace_fee"),
+                        "total_due_seller": o.get("total_due_seller"),
+                        "total_due_seller_currency": o.get("total_due_seller_currency"),
+                        "order_payment_status": o.get("order_payment_status"),
+                        "sales_record_reference": o.get("sales_record_reference"),
+                        "ebay_collect_and_remit_tax": o.get("ebay_collect_and_remit_tax"),
+                    }
+
                 if existing_order:
-                    order_changed = (
-                        existing_order.date != o["date"]
-                        or existing_order.country != o["country"]
-                        or existing_order.last_modified != o["last_modified"]
-                        or getattr(existing_order, "cancel_status", None) != o.get("cancel_status")
-                        or getattr(existing_order, "buyer_username", None) != o.get("buyer_username")
+                    payload = _order_payload(o)
+                    order_changed = any(
+                        getattr(existing_order, k, None) != payload.get(k)
+                        for k in payload
                     )
                     if order_changed:
-                        existing_order.date = o["date"]
-                        existing_order.country = o["country"]
-                        existing_order.last_modified = o["last_modified"]
-                        existing_order.cancel_status = o.get("cancel_status")
-                        existing_order.buyer_username = o.get("buyer_username")
+                        for k, v in payload.items():
+                            setattr(existing_order, k, v)
                         await db.flush()
                         orders_updated += 1
                     order_id = existing_order.order_id
                     result_li = await db.execute(select(LineItem).where(LineItem.order_id == order_id))
                     existing_items = {(li.ebay_line_item_id): li for li in result_li.scalars().all()}
                 else:
-                    new_order = Order(
-                        ebay_order_id=o["ebay_order_id"],
-                        date=o["date"],
-                        country=o["country"],
-                        last_modified=o["last_modified"],
-                        cancel_status=o.get("cancel_status"),
-                        buyer_username=o.get("buyer_username"),
-                    )
+                    new_order = Order(ebay_order_id=o["ebay_order_id"], **_order_payload(o))
                     db.add(new_order)
                     await db.flush()
                     orders_added += 1
@@ -357,21 +376,29 @@ async def run_import(
 
                 for li in o["line_items"]:
                     eid = li["ebay_line_item_id"]
+                    line_payload = {
+                        "sku": li["sku"],
+                        "quantity": li["quantity"],
+                        "currency": li.get("currency"),
+                        "line_item_cost": li.get("line_item_cost"),
+                        "discounted_line_item_cost": li.get("discounted_line_item_cost"),
+                        "line_total": li.get("line_total"),
+                        "tax_amount": li.get("tax_amount"),
+                    }
                     if eid in existing_items:
-                        line_changed = (
-                            existing_items[eid].sku != li["sku"]
-                            or existing_items[eid].quantity != li["quantity"]
+                        line_changed = any(
+                            getattr(existing_items[eid], k, None) != line_payload.get(k)
+                            for k in line_payload
                         )
                         if line_changed:
-                            existing_items[eid].sku = li["sku"]
-                            existing_items[eid].quantity = li["quantity"]
+                            for k, v in line_payload.items():
+                                setattr(existing_items[eid], k, v)
                             line_items_updated += 1
                     else:
                         db.add(LineItem(
                             order_id=order_id,
                             ebay_line_item_id=eid,
-                            sku=li["sku"],
-                            quantity=li["quantity"],
+                            **line_payload,
                         ))
                         line_items_added += 1
 
@@ -394,6 +421,67 @@ async def run_import(
         line_items_updated=line_items_updated,
         last_import=last_import,
     )
+
+
+class BackfillOrderEarningsResponse(BaseModel):
+    orders_updated: int
+    orders_skipped: int
+    error: Optional[str] = None
+
+
+@router.post("/orders/backfill-order-earnings", response_model=BackfillOrderEarningsResponse)
+async def backfill_order_earnings(
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(200, ge=1, le=500, description="Max orders to process per run"),
+):
+    """
+    Correct order earnings using eBay Finances API (net = after ad fees). Run after import when you need
+    earnings to match eBay UI. For each order, calls getTransactions by orderId; uses SALE minus fees.
+    Falls back to getOrder totalDueSeller if Finances returns nothing (e.g. 403). Processes orders with
+    null total_due_seller first, then up to `limit` total. Run multiple times to correct all.
+    """
+    try:
+        access_token = await get_ebay_access_token(db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        return BackfillOrderEarningsResponse(orders_updated=0, orders_skipped=0, error=str(e))
+
+    try:
+        marketplace_id = getattr(app_settings, "EBAY_MARKETPLACE_ID", None) or "EBAY_GB"
+        result = await db.execute(
+            select(Order).order_by(Order.total_due_seller.asc().nulls_first()).limit(limit)
+        )
+        orders = result.scalars().all()
+        updated = 0
+        skipped = 0
+        for o in orders:
+            tx_resp = await fetch_transactions_for_order(
+                access_token, o.ebay_order_id, marketplace_id
+            )
+            val, cc = parse_net_order_earnings_from_transactions(tx_resp)
+            if val is None:
+                raw = await fetch_order_by_id(access_token, o.ebay_order_id)
+                if raw:
+                    ps = raw.get("paymentSummary") or {}
+                    val, cc = _parse_total_due_seller(ps.get("totalDueSeller"))
+            if val is not None or cc is not None:
+                o.total_due_seller = val
+                o.total_due_seller_currency = cc
+                updated += 1
+            else:
+                skipped += 1
+            ad_total, ad_cc, ad_breakdown = parse_ad_fees_from_transactions(tx_resp)
+            if ad_total is not None or ad_breakdown:
+                o.ad_fees_total = ad_total
+                o.ad_fees_currency = ad_cc
+                o.ad_fees_breakdown = ad_breakdown if ad_breakdown else None
+        await db.commit()
+        return BackfillOrderEarningsResponse(orders_updated=updated, orders_skipped=skipped)
+    except Exception as e:
+        await db.rollback()
+        logger.exception("Backfill order earnings failed")
+        return BackfillOrderEarningsResponse(orders_updated=0, orders_skipped=0, error=str(e))
 
 
 # === Analytics (SM01) ===
@@ -513,10 +601,53 @@ async def get_analytics_summary(
     )
 
 
+def _order_currency_to_gbp_rate(order_currency: Optional[str]) -> float:
+    """Rate to multiply order-currency amount by to get GBP."""
+    if not order_currency:
+        return getattr(app_settings, "USD_TO_GBP_RATE", 0.79)
+    cc = (order_currency or "").strip().upper()[:3]
+    if cc == "GBP":
+        return 1.0
+    if cc == "EUR":
+        return getattr(app_settings, "EUR_TO_GBP_RATE", 0.86)
+    return getattr(app_settings, "USD_TO_GBP_RATE", 0.79)
+
+
+def _order_profit_gbp(
+    total_due_seller: Optional[Decimal],
+    price_total: Optional[Decimal],
+    tax_total: Optional[Decimal],
+    order_currency: Optional[str],
+    country: Optional[str],
+    line_cost_usd_total: Decimal,
+    usd_to_gbp: float,
+) -> Optional[Decimal]:
+    """
+    Profit (GBP) = Total Due Seller (GBP) - (landed+postage in USD converted to GBP)
+    - 2% of Price Total in GBP - (if UK: VAT/tax_total in GBP).
+    """
+    if total_due_seller is None:
+        return None
+    rate = _order_currency_to_gbp_rate(order_currency)
+    price_gbp = (price_total or Decimal(0)) * Decimal(str(rate))
+    tax_gbp = (tax_total or Decimal(0)) * Decimal(str(rate))
+    cost_gbp = line_cost_usd_total * Decimal(str(usd_to_gbp))
+    two_pct = Decimal("0.02") * price_gbp
+    is_uk = (country or "").strip().upper()[:2] == "GB"
+    vat_gbp = tax_gbp if is_uk else Decimal(0)
+    return total_due_seller - cost_gbp - two_pct - vat_gbp
+
+
+def _profit_after_tax(gross_profit: Decimal) -> Decimal:
+    """Apply profit tax (e.g. 30%): displayed profit = gross * (1 - rate). See docs/ANALYTICS_PROFIT_LOGIC.md."""
+    rate = getattr(app_settings, "PROFIT_TAX_RATE", 0.30)
+    return gross_profit * Decimal(str(1.0 - rate))
+
+
 class AnalyticsBySkuPoint(BaseModel):
     sku_code: str
     quantity_sold: int
-    profit_per_unit: Optional[Decimal]
+    profit_per_unit: Optional[Decimal] = None
     profit: Decimal
 
 
@@ -528,19 +659,13 @@ async def get_analytics_by_sku(
     sku: Optional[str] = Query(None, description="Filter by line item SKU"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Sales by SKU: quantity sold and profit (quantity_sold * profit_per_unit from SKU manager)."""
+    """Sales by SKU: quantity sold and profit. Profit = Total Due Seller (GBP) - (landed+postage USD->GBP) - 2%% price (GBP) - UK VAT if GB."""
     if from_date > to_date:
         raise HTTPException(status_code=400, detail="from must be <= to")
 
     stmt = (
-        select(
-            LineItem.sku.label("sku_code"),
-            func.coalesce(func.sum(LineItem.quantity), 0).label("quantity_sold"),
-            func.max(SKU.profit_per_unit).label("profit_per_unit"),
-        )
-        .select_from(Order)
-        .join(LineItem, Order.order_id == LineItem.order_id)
-        .outerjoin(SKU, LineItem.sku == SKU.sku_code)
+        select(Order)
+        .options(selectinload(Order.line_items))
         .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
     )
     if country and country.strip():
@@ -549,26 +674,283 @@ async def get_analytics_by_sku(
             stmt = stmt.where(Order.country.in_(["US", "PR", "VI"]))
         else:
             stmt = stmt.where(Order.country == cc)
-    if sku and sku.strip():
-        stmt = stmt.where(LineItem.sku == sku.strip())
-    stmt = stmt.group_by(LineItem.sku).order_by(func.sum(LineItem.quantity).desc())
-
     result = await db.execute(stmt)
-    rows = result.all()
+    orders = result.scalars().unique().all()
+    sku_codes = set()
+    for o in orders:
+        for li in o.line_items:
+            if li.sku and (not sku or li.sku == sku.strip()):
+                sku_codes.add(li.sku)
+    if not sku_codes:
+        return []
+    sku_result = await db.execute(select(SKU).where(SKU.sku_code.in_(sku_codes)))
+    sku_map = {s.sku_code: s for s in sku_result.scalars().all()}
+    usd_to_gbp = getattr(app_settings, "USD_TO_GBP_RATE", 0.79)
+
+    sku_qty: dict = {}
+    sku_profit: dict = {}
+    for o in orders:
+        price_total = o.price_total or Decimal(0)
+        if price_total == 0:
+            continue
+        line_cost_usd = Decimal(0)
+        line_proportions = []
+        for li in o.line_items:
+            if sku and li.sku != sku.strip():
+                continue
+            s = sku_map.get(li.sku) if li.sku else None
+            landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
+            postage = (s.postage_price or Decimal(0)) if s else Decimal(0)
+            qty = li.quantity or 0
+            line_cost_usd += (landed + postage) * qty
+            line_total = li.line_total or Decimal(0)
+            line_proportions.append((li.sku or "", qty, line_total / price_total))
+        if sku and not line_proportions:
+            continue
+        order_profit = _order_profit_gbp(
+            o.total_due_seller,
+            o.price_total,
+            o.tax_total,
+            o.order_currency,
+            o.country,
+            line_cost_usd,
+            usd_to_gbp,
+        )
+        if order_profit is None:
+            continue
+        net_profit = _profit_after_tax(order_profit)
+        for sku_code, qty, prop in line_proportions:
+            sku_qty[sku_code] = sku_qty.get(sku_code, 0) + qty
+            sku_profit[sku_code] = sku_profit.get(sku_code, Decimal(0)) + net_profit * prop
+
     out = []
-    for row in rows:
-        qty = int(row.quantity_sold)
-        ppu = row.profit_per_unit
-        profit = (qty * ppu) if ppu is not None else Decimal("0")
+    for sku_code in sorted(sku_profit.keys(), key=lambda x: (-sku_qty.get(x, 0), x)):
+        qty = sku_qty.get(sku_code, 0)
+        profit = sku_profit.get(sku_code, Decimal(0))
         out.append(
             AnalyticsBySkuPoint(
-                sku_code=row.sku_code,
+                sku_code=sku_code,
                 quantity_sold=qty,
-                profit_per_unit=ppu,
+                profit_per_unit=None,
                 profit=profit,
             )
         )
     return out
+
+
+class AnalyticsByCountryPoint(BaseModel):
+    country: str
+    quantity_sold: int
+    profit: Decimal
+
+
+def _country_group(country: Optional[str]) -> str:
+    if not country:
+        return "Unknown"
+    cc = country.strip().upper()[:2]
+    if cc in ("PR", "VI"):
+        return "US"
+    return cc
+
+
+@router.get("/analytics/by-country", response_model=List[AnalyticsByCountryPoint])
+async def get_analytics_by_country(
+    from_date: date = Query(..., alias="from", description="Start date (YYYY-MM-DD)"),
+    to_date: date = Query(..., alias="to", description="End date (YYYY-MM-DD)"),
+    sku: Optional[str] = Query(None, description="Filter by line item SKU"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Sales by country: quantity sold and profit. Profit = Total Due Seller (GBP) - costs - 2%% price - UK VAT if GB. PR/VI merged into US."""
+    if from_date > to_date:
+        raise HTTPException(status_code=400, detail="from must be <= to")
+
+    stmt = (
+        select(Order)
+        .options(selectinload(Order.line_items))
+        .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
+    )
+    result = await db.execute(stmt)
+    orders = result.scalars().unique().all()
+    if sku and sku.strip():
+        orders = [o for o in orders if any(li.sku == sku.strip() for li in o.line_items)]
+    sku_codes = set()
+    for o in orders:
+        for li in o.line_items:
+            if li.sku:
+                sku_codes.add(li.sku)
+    sku_map = {}
+    if sku_codes:
+        sku_result = await db.execute(select(SKU).where(SKU.sku_code.in_(sku_codes)))
+        sku_map = {s.sku_code: s for s in sku_result.scalars().all()}
+    usd_to_gbp = getattr(app_settings, "USD_TO_GBP_RATE", 0.79)
+
+    country_qty = {}
+    country_profit = {}
+    for o in orders:
+        line_cost_usd = Decimal(0)
+        qty_for_country = 0
+        for li in o.line_items:
+            if sku and li.sku != sku.strip():
+                continue
+            s = sku_map.get(li.sku) if li.sku else None
+            landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
+            postage = (s.postage_price or Decimal(0)) if s else Decimal(0)
+            qty = li.quantity or 0
+            line_cost_usd += (landed + postage) * qty
+            qty_for_country += qty
+        order_profit = _order_profit_gbp(
+            o.total_due_seller,
+            o.price_total,
+            o.tax_total,
+            o.order_currency,
+            o.country,
+            line_cost_usd,
+            usd_to_gbp,
+        )
+        if order_profit is None:
+            continue
+        net_profit = _profit_after_tax(order_profit)
+        cg = _country_group(o.country)
+        country_qty[cg] = country_qty.get(cg, 0) + qty_for_country
+        country_profit[cg] = country_profit.get(cg, Decimal(0)) + net_profit
+
+    out = [
+        AnalyticsByCountryPoint(
+            country=cg,
+            quantity_sold=country_qty.get(cg, 0),
+            profit=country_profit.get(cg, Decimal(0)),
+        )
+        for cg in sorted(country_profit.keys(), key=lambda x: (-country_qty.get(x, 0), x))
+    ]
+    return out
+
+
+# === Debug: raw eBay order (paymentSummary / Order earnings) ===
+
+@router.get("/orders/{ebay_order_id}/ebay-raw")
+async def get_order_ebay_raw(
+    ebay_order_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Fetch one order from eBay via getOrder and return paymentSummary and pricingSummary.
+    Use to verify what eBay returns for Order earnings (totalDueSeller).
+    Example: GET /api/stock/orders/11-14176-11233/ebay-raw
+    """
+    try:
+        access_token = await get_ebay_access_token(db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    raw = await fetch_order_by_id(access_token, ebay_order_id)
+    if not raw:
+        raise HTTPException(status_code=404, detail="Order not found on eBay")
+    return {
+        "orderId": raw.get("orderId"),
+        "paymentSummary": raw.get("paymentSummary"),
+        "pricingSummary": raw.get("pricingSummary"),
+    }
+
+
+# === Last orders (all Fulfillment API fields we store) ===
+
+class LineItemRow(BaseModel):
+    id: int
+    ebay_line_item_id: str
+    sku: str
+    quantity: int
+    currency: Optional[str] = None
+    line_item_cost: Optional[Decimal] = None
+    discounted_line_item_cost: Optional[Decimal] = None
+    line_total: Optional[Decimal] = None
+    tax_amount: Optional[Decimal] = None
+
+
+class OrderWithLinesResponse(BaseModel):
+    order_id: int
+    ebay_order_id: str
+    date: date
+    country: str
+    last_modified: datetime
+    cancel_status: Optional[str] = None
+    buyer_username: Optional[str] = None
+    order_currency: Optional[str] = None
+    price_subtotal: Optional[Decimal] = None
+    price_total: Optional[Decimal] = None
+    tax_total: Optional[Decimal] = None
+    delivery_cost: Optional[Decimal] = None
+    price_discount: Optional[Decimal] = None
+    fee_total: Optional[Decimal] = None
+    total_fee_basis_amount: Optional[Decimal] = None
+    total_marketplace_fee: Optional[Decimal] = None
+    total_due_seller: Optional[Decimal] = None
+    total_due_seller_currency: Optional[str] = None
+    ad_fees_total: Optional[Decimal] = None
+    ad_fees_currency: Optional[str] = None
+    ad_fees_breakdown: Optional[List[dict]] = None
+    order_payment_status: Optional[str] = None
+    sales_record_reference: Optional[str] = None
+    ebay_collect_and_remit_tax: Optional[bool] = None
+    line_items: List[LineItemRow]
+
+
+@router.get("/orders/latest", response_model=List[OrderWithLinesResponse])
+async def get_latest_orders(
+    limit: int = Query(10, ge=1, le=100, description="Number of orders to return"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Last N orders with all Fulfillment API fields we store (pricing, tax, fees)."""
+    result = await db.execute(
+        select(Order)
+        .options(selectinload(Order.line_items))
+        .order_by(Order.last_modified.desc())
+        .limit(limit)
+    )
+    orders = result.scalars().all()
+    return [
+        OrderWithLinesResponse(
+            order_id=o.order_id,
+            ebay_order_id=o.ebay_order_id,
+            date=o.date,
+            country=o.country,
+            last_modified=o.last_modified,
+            cancel_status=o.cancel_status,
+            buyer_username=o.buyer_username,
+            order_currency=o.order_currency,
+            price_subtotal=o.price_subtotal,
+            price_total=o.price_total,
+            tax_total=o.tax_total,
+            delivery_cost=o.delivery_cost,
+            price_discount=o.price_discount,
+            fee_total=o.fee_total,
+            total_fee_basis_amount=o.total_fee_basis_amount,
+            total_marketplace_fee=o.total_marketplace_fee,
+            total_due_seller=o.total_due_seller,
+            total_due_seller_currency=o.total_due_seller_currency,
+            ad_fees_total=o.ad_fees_total,
+            ad_fees_currency=o.ad_fees_currency,
+            ad_fees_breakdown=o.ad_fees_breakdown,
+            order_payment_status=o.order_payment_status,
+            sales_record_reference=o.sales_record_reference,
+            ebay_collect_and_remit_tax=o.ebay_collect_and_remit_tax,
+            line_items=[
+                LineItemRow(
+                    id=li.id,
+                    ebay_line_item_id=li.ebay_line_item_id,
+                    sku=li.sku,
+                    quantity=li.quantity,
+                    currency=li.currency,
+                    line_item_cost=li.line_item_cost,
+                    discounted_line_item_cost=li.discounted_line_item_cost,
+                    line_total=li.line_total,
+                    tax_amount=li.tax_amount,
+                )
+                for li in o.line_items
+            ],
+        )
+        for o in orders
+    ]
 
 
 # === Stock Planning (SM04) ===

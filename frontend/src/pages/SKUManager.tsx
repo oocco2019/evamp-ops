@@ -11,11 +11,9 @@ export default function SKUManager() {
     title: '',
     landed_cost: '',
     postage_price: '',
-    profit_per_unit: '',
-    currency: 'USD',
   })
   const [editingCode, setEditingCode] = useState<string | null>(null)
-  const [editForm, setEditForm] = useState<Partial<SKU>>({})
+  const [editForm, setEditForm] = useState<Pick<SKU, 'title' | 'landed_cost' | 'postage_price'>>({})
 
   const { data: skus, isLoading } = useQuery({
     queryKey: ['skus', search],
@@ -29,14 +27,13 @@ export default function SKUManager() {
     mutationFn: stockAPI.createSKU,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['skus'] })
+      queryClient.invalidateQueries({ queryKey: ['analytics'] })
       setAdding(false)
       setNewSku({
         sku_code: '',
         title: '',
         landed_cost: '',
         postage_price: '',
-        profit_per_unit: '',
-        currency: 'USD',
       })
     },
   })
@@ -46,6 +43,7 @@ export default function SKUManager() {
       stockAPI.updateSKU(sku_code, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['skus'] })
+      queryClient.invalidateQueries({ queryKey: ['analytics'] })
       setEditingCode(null)
       setEditForm({})
     },
@@ -55,6 +53,7 @@ export default function SKUManager() {
     mutationFn: stockAPI.deleteSKU,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['skus'] })
+      queryClient.invalidateQueries({ queryKey: ['analytics'] })
     },
   })
 
@@ -65,8 +64,6 @@ export default function SKUManager() {
       title: newSku.title.trim(),
       landed_cost: newSku.landed_cost ? Number(newSku.landed_cost) : undefined,
       postage_price: newSku.postage_price ? Number(newSku.postage_price) : undefined,
-      profit_per_unit: newSku.profit_per_unit ? Number(newSku.profit_per_unit) : undefined,
-      currency: newSku.currency || 'USD',
     })
   }
 
@@ -76,8 +73,6 @@ export default function SKUManager() {
       title: sku.title,
       landed_cost: sku.landed_cost,
       postage_price: sku.postage_price,
-      profit_per_unit: sku.profit_per_unit,
-      currency: sku.currency,
     })
   }
 
@@ -139,7 +134,7 @@ export default function SKUManager() {
                 type="number"
                 step="0.01"
                 min="0"
-                placeholder="Landed cost"
+                placeholder="Landed cost (USD)"
                 value={newSku.landed_cost}
                 onChange={(e) => setNewSku((s) => ({ ...s, landed_cost: e.target.value }))}
                 className="border border-gray-300 rounded-md px-3 py-2"
@@ -148,29 +143,11 @@ export default function SKUManager() {
                 type="number"
                 step="0.01"
                 min="0"
-                placeholder="Postage"
+                placeholder="Postage (USD)"
                 value={newSku.postage_price}
                 onChange={(e) => setNewSku((s) => ({ ...s, postage_price: e.target.value }))}
                 className="border border-gray-300 rounded-md px-3 py-2"
               />
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                placeholder="Profit/unit"
-                value={newSku.profit_per_unit}
-                onChange={(e) => setNewSku((s) => ({ ...s, profit_per_unit: e.target.value }))}
-                className="border border-gray-300 rounded-md px-3 py-2"
-              />
-              <select
-                value={newSku.currency}
-                onChange={(e) => setNewSku((s) => ({ ...s, currency: e.target.value }))}
-                className="border border-gray-300 rounded-md px-3 py-2"
-              >
-                <option value="USD">USD</option>
-                <option value="EUR">EUR</option>
-                <option value="GBP">GBP</option>
-              </select>
             </div>
             <div className="mt-3 flex gap-2">
               <button type="submit" disabled={createMutation.isPending} className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50">
@@ -193,10 +170,8 @@ export default function SKUManager() {
                 <tr>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">SKU</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Title</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Landed cost</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Postage</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Profit/unit</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Currency</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Landed cost (USD)</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Postage (USD)</th>
                   <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
                 </tr>
               </thead>
@@ -235,27 +210,6 @@ export default function SKUManager() {
                               className="border border-gray-300 rounded px-2 py-1 w-24"
                             />
                           </td>
-                          <td className="px-4 py-2">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={editForm.profit_per_unit ?? ''}
-                              onChange={(e) => setEditForm((f) => ({ ...f, profit_per_unit: e.target.value ? Number(e.target.value) : undefined }))}
-                              className="border border-gray-300 rounded px-2 py-1 w-24"
-                            />
-                          </td>
-                          <td className="px-4 py-2">
-                            <select
-                              value={editForm.currency ?? 'USD'}
-                              onChange={(e) => setEditForm((f) => ({ ...f, currency: e.target.value }))}
-                              className="border border-gray-300 rounded px-2 py-1"
-                            >
-                              <option value="USD">USD</option>
-                              <option value="EUR">EUR</option>
-                              <option value="GBP">GBP</option>
-                            </select>
-                          </td>
                           <td className="px-4 py-2 text-right">
                             <button
                               type="button"
@@ -276,8 +230,6 @@ export default function SKUManager() {
                           <td className="px-4 py-2 text-sm text-gray-700">{sku.title}</td>
                           <td className="px-4 py-2 text-sm text-gray-700">{sku.landed_cost != null ? Number(sku.landed_cost) : '-'}</td>
                           <td className="px-4 py-2 text-sm text-gray-700">{sku.postage_price != null ? Number(sku.postage_price) : '-'}</td>
-                          <td className="px-4 py-2 text-sm text-gray-700">{sku.profit_per_unit != null ? Number(sku.profit_per_unit) : '-'}</td>
-                          <td className="px-4 py-2 text-sm text-gray-700">{sku.currency}</td>
                           <td className="px-4 py-2 text-right">
                             <button type="button" onClick={() => startEdit(sku)} className="text-blue-600 hover:text-blue-800 mr-2">
                               Edit
@@ -298,7 +250,7 @@ export default function SKUManager() {
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={7} className="px-4 py-8 text-center text-gray-500">
+                    <td colSpan={5} className="px-4 py-8 text-center text-gray-500">
                       No SKUs yet. Add one above or import orders from eBay first.
                     </td>
                   </tr>

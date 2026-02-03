@@ -184,8 +184,13 @@ export default function MessageDashboard() {
     setLoading(true)
     setError(null)
     try {
-      await messagesAPI.sendReply(selectedThread.thread_id, replyContent.trim())
+      await messagesAPI.sendReply(
+        selectedThread.thread_id,
+        replyContent.trim(),
+        _draft ? _draft : undefined
+      )
       setReplyContent('')
+      setDraft('')
       loadThread(selectedThread.thread_id)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Send failed')

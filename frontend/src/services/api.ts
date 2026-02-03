@@ -157,6 +157,52 @@ export interface AnalyticsBySkuPoint {
   profit: string
 }
 
+export interface AnalyticsByCountryPoint {
+  country: string
+  quantity_sold: number
+  profit: string
+}
+
+export interface OrderLineItemRow {
+  id: number
+  ebay_line_item_id: string
+  sku: string
+  quantity: number
+  currency: string | null
+  line_item_cost: number | null
+  discounted_line_item_cost: number | null
+  line_total: number | null
+  tax_amount: number | null
+}
+
+export interface OrderWithLines {
+  order_id: number
+  ebay_order_id: string
+  date: string
+  country: string
+  last_modified: string
+  cancel_status: string | null
+  buyer_username: string | null
+  order_currency: string | null
+  price_subtotal: number | null
+  price_total: number | null
+  tax_total: number | null
+  delivery_cost: number | null
+  price_discount: number | null
+  fee_total: number | null
+  total_fee_basis_amount: number | null
+  total_marketplace_fee: number | null
+  total_due_seller: number | null
+  total_due_seller_currency: string | null
+  ad_fees_total: number | null
+  ad_fees_currency: string | null
+  ad_fees_breakdown: { fee_type?: string; transaction_memo?: string; amount?: string; currency?: string }[] | null
+  order_payment_status: string | null
+  sales_record_reference: string | null
+  ebay_collect_and_remit_tax: boolean | null
+  line_items: OrderLineItemRow[]
+}
+
 export interface VelocityResult {
   sku: string
   units_sold: number
@@ -214,6 +260,20 @@ export const stockAPI = {
     country?: string
     sku?: string
   }) => api.get<AnalyticsBySkuPoint[]>('/api/stock/analytics/by-sku', { params }),
+
+  getAnalyticsByCountry: (params: {
+    from: string
+    to: string
+    sku?: string
+  }) => api.get<AnalyticsByCountryPoint[]>('/api/stock/analytics/by-country', { params }),
+
+  getLatestOrders: (limit = 10) =>
+    api.get<OrderWithLines[]>('/api/stock/orders/latest', { params: { limit } }),
+
+  backfillOrderEarnings: () =>
+    api.post<{ orders_updated: number; orders_skipped: number; error?: string }>(
+      '/api/stock/orders/backfill-order-earnings'
+    ),
 
   getVelocity: (sku: string, from: string, to: string) =>
     api.get<VelocityResult>('/api/stock/planning/velocity', {
@@ -310,10 +370,10 @@ export const messagesAPI = {
     api.post<{ draft: string }>(`/api/messages/threads/${threadId}/draft`, {
       extra_instructions: extra_instructions || undefined,
     }),
-  sendReply: (threadId: string, content: string) =>
+  sendReply: (threadId: string, content: string, draftContent?: string) =>
     api.post<{ success: boolean; message: string }>(
       `/api/messages/threads/${threadId}/send`,
-      { content }
+      { content, draft_content: draftContent ?? undefined }
     ),
   sync: (timeoutMs = 90000) =>
     api.post<{ message: string; synced: number }>('/api/messages/sync', {}, { timeout: timeoutMs }),
@@ -359,6 +419,11 @@ export const messagesAPI = {
   ) => api.put<AIInstruction>(`/api/messages/ai-instructions/${id}`, data),
   deleteAIInstruction: (id: number) =>
     api.delete(`/api/messages/ai-instructions/${id}`),
+  /** Generate global instruction from message history; result appears in list. */
+  generateGlobalInstruction: () =>
+    api.post<{ success: boolean; message: string; instructions?: string }>(
+      '/api/messages/generate-global-instruction'
+    ),
 }
 
 // Health check

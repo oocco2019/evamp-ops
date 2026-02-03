@@ -147,3 +147,88 @@ class SyncMetadata(Base):
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class StyleProfile(Base):
+    """
+    Extracted communication style from user's message history.
+    AI analyzes sent messages and stores patterns here.
+    """
+    __tablename__ = "style_profiles"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    
+    # Extracted style elements (JSON-like text fields for flexibility)
+    greeting_patterns: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="Common greetings used")
+    closing_patterns: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="Common sign-offs used")
+    tone_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="Overall tone: friendly, professional, etc.")
+    empathy_patterns: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="How empathy is expressed")
+    solution_approach: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="How solutions are offered")
+    common_phrases: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="Frequently used phrases")
+    response_length: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, comment="short/medium/long")
+    
+    # Full style summary for AI prompt
+    style_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="Complete style guide for AI")
+    
+    # Analysis metadata
+    messages_analyzed: Mapped[int] = mapped_column(Integer, default=0)
+    is_approved: Mapped[bool] = mapped_column(Boolean, default=False, comment="User approved this profile")
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Procedure(Base):
+    """
+    Customer service procedures extracted or defined.
+    E.g., "proof_of_fault", "return_request", "shipping_delay"
+    """
+    __tablename__ = "procedures"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, comment="e.g. proof_of_fault")
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False, comment="e.g. Ask for Proof of Fault")
+    
+    # Trigger phrases for auto-detection or voice commands
+    trigger_phrases: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="Comma-separated phrases that trigger this procedure")
+    
+    # The procedure steps/instructions
+    steps: Mapped[str] = mapped_column(Text, nullable=False, comment="What to do/say in this situation")
+    
+    # Example messages (extracted from history)
+    example_messages: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="JSON array of example message IDs")
+    
+    # Status
+    is_auto_extracted: Mapped[bool] = mapped_column(Boolean, default=False, comment="True if AI extracted this")
+    is_approved: Mapped[bool] = mapped_column(Boolean, default=False, comment="User approved this procedure")
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class DraftFeedback(Base):
+    """
+    Tracks AI drafts and user corrections for learning.
+    When user edits a draft before sending, we store both versions.
+    """
+    __tablename__ = "draft_feedback"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    thread_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    
+    # The AI-generated draft
+    ai_draft: Mapped[str] = mapped_column(Text, nullable=False)
+    
+    # What the user actually sent (NULL if they used AI draft as-is)
+    final_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    
+    # Was the draft edited?
+    was_edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    
+    # Procedure used (if any)
+    procedure_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    
+    # Context for learning
+    buyer_message_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="What the buyer asked")
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

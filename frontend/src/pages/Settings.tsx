@@ -151,7 +151,7 @@ function CredentialsTab() {
     <div className="bg-white shadow rounded-lg p-6">
       <h2 className="text-xl font-semibold mb-4">API Credentials</h2>
       <p className="text-gray-600 mb-6">
-        Store API keys for AI providers (Anthropic, OpenAI). eBay credentials are configured in the .env file. All values are encrypted.
+        Store API keys for AI providers (Anthropic, OpenAI). eBay app keys (App ID, Cert, etc.) are in .env; the eBay OAuth token (refresh_token) is stored here after you use Connect with eBay and persists across <code className="bg-gray-200 px-1 rounded">make down</code> / <code className="bg-gray-200 px-1 rounded">make up</code> (database volume is kept). All values are encrypted.
       </p>
 
       {/* Add credential form */}
@@ -544,6 +544,27 @@ function AIInstructionsTab() {
   const globalInstruction = allInstructions?.find((i) => i.type === 'global')
   const skuInstructions = allInstructions?.filter((i) => i.type === 'sku') || []
 
+  const [generating, setGenerating] = useState(false)
+  const [generateError, setGenerateError] = useState<string | null>(null)
+  const generateMutation = useMutation({
+    mutationFn: () => messagesAPI.generateGlobalInstruction(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['ai-instructions'] })
+      setGenerateError(null)
+    },
+    onError: (e: unknown) => {
+      const ax = e as { response?: { data?: { detail?: string } } }
+      setGenerateError(ax.response?.data?.detail || (e instanceof Error ? e.message : 'Generation failed'))
+    },
+    onSettled: () => setGenerating(false),
+  })
+
+  const handleGenerateFromHistory = () => {
+    setGenerateError(null)
+    setGenerating(true)
+    generateMutation.mutate()
+  }
+
   return (
     <div className="bg-white shadow rounded-lg p-6">
       <h2 className="text-xl font-semibold mb-4">AI Instructions</h2>
@@ -666,7 +687,20 @@ function AIInstructionsTab() {
         <div className="space-y-6">
           {/* Global instruction */}
           <div>
-            <h3 className="font-medium text-gray-800 mb-2">Global Instruction</h3>
+            <div className="flex items-center gap-3 mb-2 flex-wrap">
+              <h3 className="font-medium text-gray-800">Global Instruction</h3>
+              <button
+                type="button"
+                onClick={handleGenerateFromHistory}
+                disabled={generating}
+                className="px-3 py-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 text-sm"
+              >
+                {generating ? 'Generating...' : 'Generate from history'}
+              </button>
+              {generateError && (
+                <span className="text-red-600 text-sm">{generateError}</span>
+              )}
+            </div>
             {globalInstruction ? (
               <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
                 <div className="flex justify-between items-start">
@@ -820,6 +854,25 @@ function EbayTab() {
         error: response.data.error,
       })
     },
+    onError: (err: unknown) => {
+      const msg =
+        err && typeof err === 'object' && 'response' in err
+          ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+          : null
+      const errorStr =
+        typeof msg === 'string'
+          ? msg
+          : err instanceof Error
+            ? err.message
+            : 'Import request failed'
+      setImportResult({
+        orders_added: 0,
+        orders_updated: 0,
+        line_items_added: 0,
+        line_items_updated: 0,
+        error: errorStr,
+      })
+    },
   })
 
   const [urlParams] = useState(() => new URLSearchParams(typeof window !== 'undefined' ? window.location.search : ''))
@@ -957,14 +1010,14 @@ function EbayTab() {
               Incremental import
             </button>
           </div>
-          {importMutation.data?.data && (
+          {importResult && (
             <div className="mt-3 p-3 bg-gray-50 rounded-lg text-sm">
-              <p>Orders added: {importMutation.data.data.orders_added} (new orders from eBay)</p>
-              <p>Orders updated: {importMutation.data.data.orders_updated} (existing orders refreshed from eBay)</p>
-              <p>Line items added: {importMutation.data.data.line_items_added} (new line items)</p>
-              <p>Line items updated: {importMutation.data.data.line_items_updated} (existing line items refreshed)</p>
-              {importMutation.data.data.error && (
-                <p className="text-red-600">Error: {importMutation.data.data.error}</p>
+              <p>Orders added: {importResult.orders_added} (new orders from eBay)</p>
+              <p>Orders updated: {importResult.orders_updated} (existing orders refreshed from eBay)</p>
+              <p>Line items added: {importResult.line_items_added} (new line items)</p>
+              <p>Line items updated: {importResult.line_items_updated} (existing line items refreshed)</p>
+              {importResult.error && (
+                <p className="text-red-600 mt-2">Error: {importResult.error}</p>
               )}
             </div>
           )}

@@ -14,7 +14,7 @@ import httpx
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.models.messages import MessageThread, Message, AIInstruction, SyncMetadata
+from app.models.messages import MessageThread, Message, AIInstruction, SyncMetadata, StyleProfile, Procedure, DraftFeedback
 from app.models.stock import Order
 from app.services.ai_service import AIService
 from app.services.ebay_auth import get_ebay_access_token
@@ -77,6 +77,7 @@ class ThreadDetail(BaseModel):
 
 class DraftRequest(BaseModel):
     extra_instructions: Optional[str] = Field(None, max_length=2000)
+    procedure: Optional[str] = Field(None, description="Procedure name to apply (e.g., 'proof_of_fault')")
 
 
 class DraftResponse(BaseModel):
@@ -85,6 +86,7 @@ class DraftResponse(BaseModel):
 
 class SendRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=8000)
+    draft_content: Optional[str] = Field(None, max_length=8000, description="AI draft they started from; used to record feedback for learning")
 
 
 class SendResponse(BaseModel):
@@ -322,7 +324,7 @@ async def draft_reply(
     body: DraftRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate an AI draft reply for the thread. Does not send."""
+    """Generate an AI draft reply for the thread. Uses style profile and procedures if available."""
     ai = AIService(db)
     result = await db.execute(
         select(MessageThread)
@@ -337,6 +339,7 @@ async def draft_reply(
         {"role": m.sender_type, "content": (m.subject or "") + "\n" + (m.content or "")}
         for m in msgs
     ]
+    
     # Load AI instructions (global + SKU if any)
     global_result = await db.execute(
         select(AIInstruction).where(AIInstruction.type == "global")
@@ -355,12 +358,57 @@ async def draft_reply(
         sku_row = sku_result.scalar_one_or_none()
         if sku_row and sku_row.instructions:
             sku_instructions = sku_row.instructions
-    prompt = "Draft a professional, helpful seller reply to this buyer message."
+    
+    # Load approved style profile
+    style_profile_text = ""
+    style_result = await db.execute(
+        select(StyleProfile)
+        .where(StyleProfile.is_approved == True)
+        .order_by(StyleProfile.created_at.desc())
+        .limit(1)
+    )
+    style_profile = style_result.scalar_one_or_none()
+    if style_profile and style_profile.style_summary:
+        style_profile_text = f"""
+COMMUNICATION STYLE (mimic this exactly):
+{style_profile.style_summary}
+
+Greeting style: {style_profile.greeting_patterns or 'Use appropriate greeting'}
+Closing style: {style_profile.closing_patterns or 'Use appropriate sign-off'}
+Tone: {style_profile.tone_description or 'Professional and friendly'}
+"""
+    
+    # Load procedure if specified
+    procedure_text = ""
+    if body.procedure:
+        proc_result = await db.execute(
+            select(Procedure).where(Procedure.name == body.procedure)
+        )
+        procedure = proc_result.scalar_one_or_none()
+        if procedure:
+            procedure_text = f"""
+PROCEDURE TO FOLLOW ({procedure.display_name}):
+{procedure.steps}
+"""
+    
+    # Build the prompt
+    prompt = "Draft a reply to this customer message."
+    
+    if style_profile_text:
+        prompt += f"\n\n{style_profile_text}"
+    
+    if procedure_text:
+        prompt += f"\n\n{procedure_text}"
+    
     if body.extra_instructions:
         prompt += f"\n\nAdditional instructions: {body.extra_instructions}"
+    
+    if not style_profile_text:
+        prompt += "\n\nBe professional, helpful, and concise."
+    
     context = {
         "thread_history": thread_history,
-        "global_instructions": global_instructions or "Be polite and concise.",
+        "global_instructions": global_instructions or "",
         "sku_instructions": sku_instructions,
     }
     try:
@@ -476,6 +524,25 @@ async def send_reply(
         ebay_created_at=ebay_created,
     )
     db.add(new_msg)
+
+    # Record draft feedback for auto-learning (draft vs final)
+    if body.draft_content is not None and body.draft_content.strip():
+        draft_text = body.draft_content.strip()
+        was_edited = content != draft_text
+        buyer_summary = None
+        for m in sorted(thread.messages, key=lambda x: x.ebay_created_at, reverse=True):
+            if m.sender_type != "seller" and (m.content or "").strip():
+                buyer_summary = (m.content or "").strip()[:500]
+                break
+        feedback = DraftFeedback(
+            thread_id=thread_id,
+            ai_draft=draft_text,
+            final_message=content,
+            was_edited=was_edited,
+            buyer_message_summary=buyer_summary,
+        )
+        db.add(feedback)
+
     await db.commit()
     return SendResponse(success=True, message=f"Message sent. ID: {ebay_message_id}")
 
@@ -1206,4 +1273,418 @@ async def delete_ai_instruction(
     if not instruction:
         raise HTTPException(status_code=404, detail="AI instruction not found")
     await db.delete(instruction)
+    await db.commit()
+
+
+class GenerateGlobalInstructionResponse(BaseModel):
+    success: bool
+    message: str
+    instructions: Optional[str] = None
+
+
+@router.post("/generate-global-instruction", response_model=GenerateGlobalInstructionResponse)
+async def generate_global_instruction_from_history_endpoint(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generate the global AI instruction from your message history (seller messages
+    from up to 100 threads, plus draft feedback). Creates or updates the global
+    instruction. Result appears in Settings > AI Instructions.
+    """
+    from app.services.global_instruction_from_history import generate_global_instruction_from_history
+    out = await generate_global_instruction_from_history(db)
+    if not out["success"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=out["message"],
+        )
+    return GenerateGlobalInstructionResponse(
+        success=True,
+        message=out["message"],
+        instructions=out.get("instructions"),
+    )
+
+
+# === AI Learning: Style & Procedures ===
+
+class StyleProfileResponse(BaseModel):
+    id: int
+    greeting_patterns: Optional[str]
+    closing_patterns: Optional[str]
+    tone_description: Optional[str]
+    empathy_patterns: Optional[str]
+    solution_approach: Optional[str]
+    common_phrases: Optional[str]
+    response_length: Optional[str]
+    style_summary: Optional[str]
+    messages_analyzed: int
+    is_approved: bool
+    created_at: str
+    updated_at: str
+
+
+class ProcedureResponse(BaseModel):
+    id: int
+    name: str
+    display_name: str
+    trigger_phrases: Optional[str]
+    steps: str
+    example_messages: Optional[str]
+    is_auto_extracted: bool
+    is_approved: bool
+    created_at: str
+    updated_at: str
+
+
+class AnalyzeResponse(BaseModel):
+    success: bool
+    message: str
+    style_profile: Optional[StyleProfileResponse] = None
+    procedures: Optional[List[ProcedureResponse]] = None
+
+
+@router.post("/analyze-style", response_model=AnalyzeResponse)
+async def analyze_style(db: AsyncSession = Depends(get_db)):
+    """
+    Analyze all seller messages and extract communication style.
+    AI reads your sent messages and identifies your patterns.
+    """
+    from sqlalchemy import func
+    
+    # Fetch seller messages (most recent 200 for analysis)
+    result = await db.execute(
+        select(Message)
+        .where(Message.sender_type == "seller")
+        .order_by(Message.ebay_created_at.desc())
+        .limit(200)
+    )
+    seller_messages = result.scalars().all()
+    
+    if len(seller_messages) < 10:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Not enough seller messages to analyze. Found {len(seller_messages)}, need at least 10."
+        )
+    
+    # Prepare messages for AI analysis
+    messages_text = "\n\n---\n\n".join([
+        f"Message {i+1}:\n{msg.content}"
+        for i, msg in enumerate(seller_messages[:100])  # Sample 100 for prompt
+    ])
+    
+    ai = AIService(db)
+    
+    prompt = f"""Analyze these customer service messages and extract the communication style patterns.
+
+MESSAGES TO ANALYZE:
+{messages_text}
+
+Extract and provide in this EXACT format (use these exact headings):
+
+GREETING_PATTERNS:
+[List the common greeting phrases used, e.g., "Hi", "Hello", "Thank you for your message"]
+
+CLOSING_PATTERNS:
+[List the common sign-off phrases used, e.g., "Kind regards", "Best wishes", "Thanks"]
+
+TONE_DESCRIPTION:
+[Describe the overall tone: friendly, professional, casual, formal, empathetic, etc.]
+
+EMPATHY_PATTERNS:
+[How does this person express understanding and empathy? Quote specific phrases.]
+
+SOLUTION_APPROACH:
+[How do they offer solutions? Direct? Options-based? Step-by-step?]
+
+COMMON_PHRASES:
+[List frequently used phrases or expressions unique to this person's style]
+
+RESPONSE_LENGTH:
+[short/medium/long - typical response length]
+
+STYLE_SUMMARY:
+[Write a 2-3 paragraph summary that an AI could use to mimic this communication style. Be specific about word choices, sentence structure, and approach.]
+"""
+
+    try:
+        response = await ai.generate_message(prompt, {})
+    except Exception as e:
+        logger.exception("Style analysis failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"AI analysis failed: {e!s}"
+        )
+    
+    # Parse the response
+    def extract_section(text: str, section: str) -> str:
+        import re
+        pattern = rf"{section}:\s*\n(.*?)(?=\n[A-Z_]+:|$)"
+        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        return match.group(1).strip() if match else ""
+    
+    greeting = extract_section(response, "GREETING_PATTERNS")
+    closing = extract_section(response, "CLOSING_PATTERNS")
+    tone = extract_section(response, "TONE_DESCRIPTION")
+    empathy = extract_section(response, "EMPATHY_PATTERNS")
+    solution = extract_section(response, "SOLUTION_APPROACH")
+    phrases = extract_section(response, "COMMON_PHRASES")
+    length = extract_section(response, "RESPONSE_LENGTH")
+    summary = extract_section(response, "STYLE_SUMMARY")
+    
+    # Delete old profiles, keep only latest
+    await db.execute(select(StyleProfile).where(True))
+    old_profiles = await db.execute(select(StyleProfile))
+    for old in old_profiles.scalars().all():
+        await db.delete(old)
+    
+    # Create new profile
+    profile = StyleProfile(
+        greeting_patterns=greeting or None,
+        closing_patterns=closing or None,
+        tone_description=tone or None,
+        empathy_patterns=empathy or None,
+        solution_approach=solution or None,
+        common_phrases=phrases or None,
+        response_length=length[:50] if length else None,
+        style_summary=summary or response,  # Fallback to full response
+        messages_analyzed=len(seller_messages),
+        is_approved=False,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(profile)
+    await db.commit()
+    await db.refresh(profile)
+    
+    return AnalyzeResponse(
+        success=True,
+        message=f"Analyzed {len(seller_messages)} messages. Style profile extracted.",
+        style_profile=StyleProfileResponse(
+            id=profile.id,
+            greeting_patterns=profile.greeting_patterns,
+            closing_patterns=profile.closing_patterns,
+            tone_description=profile.tone_description,
+            empathy_patterns=profile.empathy_patterns,
+            solution_approach=profile.solution_approach,
+            common_phrases=profile.common_phrases,
+            response_length=profile.response_length,
+            style_summary=profile.style_summary,
+            messages_analyzed=profile.messages_analyzed,
+            is_approved=profile.is_approved,
+            created_at=profile.created_at.isoformat(),
+            updated_at=profile.updated_at.isoformat(),
+        )
+    )
+
+
+@router.post("/analyze-procedures", response_model=AnalyzeResponse)
+async def analyze_procedures(db: AsyncSession = Depends(get_db)):
+    """
+    Analyze message threads and extract common procedures/patterns.
+    AI identifies situations like "proof of fault", "return requests", etc.
+    """
+    # Fetch threads with their messages
+    result = await db.execute(
+        select(MessageThread)
+        .options(selectinload(MessageThread.messages))
+        .order_by(MessageThread.created_at.desc())
+        .limit(50)
+    )
+    threads = result.scalars().all()
+    
+    if len(threads) < 5:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Not enough threads to analyze. Found {len(threads)}, need at least 5."
+        )
+    
+    # Prepare conversations for AI analysis
+    conversations = []
+    for thread in threads:
+        seller_msgs = [m for m in thread.messages if m.sender_type == "seller"]
+        buyer_msgs = [m for m in thread.messages if m.sender_type == "buyer"]
+        if seller_msgs and buyer_msgs:
+            conv = f"Buyer: {buyer_msgs[0].content[:500]}\nSeller: {seller_msgs[0].content[:500]}"
+            conversations.append(conv)
+    
+    conversations_text = "\n\n===\n\n".join(conversations[:30])
+    
+    ai = AIService(db)
+    
+    prompt = f"""Analyze these customer service conversations and identify common PROCEDURES that the seller uses.
+
+A procedure is a specific way of handling a type of situation, like:
+- Asking for proof of fault (photos/videos of defects)
+- Processing return requests
+- Handling shipping delays
+- Answering product questions
+- Resolving complaints
+
+CONVERSATIONS:
+{conversations_text}
+
+Identify 3-8 distinct procedures you see. For each, provide in this EXACT format:
+
+PROCEDURE: [short_name_with_underscores]
+DISPLAY_NAME: [Human Readable Name]
+TRIGGER_PHRASES: [comma-separated phrases that indicate this procedure applies]
+STEPS: [Step-by-step what the seller does in this situation]
+
+---
+
+List each procedure separated by "---"
+"""
+
+    try:
+        response = await ai.generate_message(prompt, {})
+    except Exception as e:
+        logger.exception("Procedure analysis failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"AI analysis failed: {e!s}"
+        )
+    
+    # Parse procedures from response
+    import re
+    procedure_blocks = re.split(r'\n---\n', response)
+    
+    extracted_procedures = []
+    for block in procedure_blocks:
+        name_match = re.search(r'PROCEDURE:\s*(\S+)', block)
+        display_match = re.search(r'DISPLAY_NAME:\s*(.+?)(?=\n|$)', block)
+        triggers_match = re.search(r'TRIGGER_PHRASES:\s*(.+?)(?=\nSTEPS:|$)', block, re.DOTALL)
+        steps_match = re.search(r'STEPS:\s*(.+?)$', block, re.DOTALL)
+        
+        if name_match and steps_match:
+            name = name_match.group(1).strip().lower().replace(" ", "_")[:100]
+            display = display_match.group(1).strip() if display_match else name.replace("_", " ").title()
+            triggers = triggers_match.group(1).strip() if triggers_match else ""
+            steps = steps_match.group(1).strip()
+            
+            # Check if procedure exists
+            existing = await db.execute(
+                select(Procedure).where(Procedure.name == name)
+            )
+            if not existing.scalar_one_or_none():
+                proc = Procedure(
+                    name=name,
+                    display_name=display[:200],
+                    trigger_phrases=triggers or None,
+                    steps=steps,
+                    is_auto_extracted=True,
+                    is_approved=False,
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
+                db.add(proc)
+                extracted_procedures.append(proc)
+    
+    await db.commit()
+    
+    # Refresh and build response
+    procedure_responses = []
+    for proc in extracted_procedures:
+        await db.refresh(proc)
+        procedure_responses.append(ProcedureResponse(
+            id=proc.id,
+            name=proc.name,
+            display_name=proc.display_name,
+            trigger_phrases=proc.trigger_phrases,
+            steps=proc.steps,
+            example_messages=proc.example_messages,
+            is_auto_extracted=proc.is_auto_extracted,
+            is_approved=proc.is_approved,
+            created_at=proc.created_at.isoformat(),
+            updated_at=proc.updated_at.isoformat(),
+        ))
+    
+    return AnalyzeResponse(
+        success=True,
+        message=f"Analyzed {len(threads)} threads. Found {len(extracted_procedures)} procedures.",
+        procedures=procedure_responses,
+    )
+
+
+@router.get("/style-profile", response_model=Optional[StyleProfileResponse])
+async def get_style_profile(db: AsyncSession = Depends(get_db)):
+    """Get the current style profile (if any)."""
+    result = await db.execute(
+        select(StyleProfile).order_by(StyleProfile.created_at.desc()).limit(1)
+    )
+    profile = result.scalar_one_or_none()
+    if not profile:
+        return None
+    return StyleProfileResponse(
+        id=profile.id,
+        greeting_patterns=profile.greeting_patterns,
+        closing_patterns=profile.closing_patterns,
+        tone_description=profile.tone_description,
+        empathy_patterns=profile.empathy_patterns,
+        solution_approach=profile.solution_approach,
+        common_phrases=profile.common_phrases,
+        response_length=profile.response_length,
+        style_summary=profile.style_summary,
+        messages_analyzed=profile.messages_analyzed,
+        is_approved=profile.is_approved,
+        created_at=profile.created_at.isoformat(),
+        updated_at=profile.updated_at.isoformat(),
+    )
+
+
+@router.post("/style-profile/approve")
+async def approve_style_profile(db: AsyncSession = Depends(get_db)):
+    """Approve the current style profile."""
+    result = await db.execute(
+        select(StyleProfile).order_by(StyleProfile.created_at.desc()).limit(1)
+    )
+    profile = result.scalar_one_or_none()
+    if not profile:
+        raise HTTPException(status_code=404, detail="No style profile found. Run analysis first.")
+    profile.is_approved = True
+    await db.commit()
+    return {"success": True, "message": "Style profile approved"}
+
+
+@router.get("/procedures", response_model=List[ProcedureResponse])
+async def list_procedures(db: AsyncSession = Depends(get_db)):
+    """List all procedures."""
+    result = await db.execute(
+        select(Procedure).order_by(Procedure.display_name)
+    )
+    procedures = result.scalars().all()
+    return [
+        ProcedureResponse(
+            id=p.id,
+            name=p.name,
+            display_name=p.display_name,
+            trigger_phrases=p.trigger_phrases,
+            steps=p.steps,
+            example_messages=p.example_messages,
+            is_auto_extracted=p.is_auto_extracted,
+            is_approved=p.is_approved,
+            created_at=p.created_at.isoformat(),
+            updated_at=p.updated_at.isoformat(),
+        )
+        for p in procedures
+    ]
+
+
+@router.post("/procedures/{procedure_id}/approve")
+async def approve_procedure(procedure_id: int, db: AsyncSession = Depends(get_db)):
+    """Approve a procedure."""
+    proc = await db.get(Procedure, procedure_id)
+    if not proc:
+        raise HTTPException(status_code=404, detail="Procedure not found")
+    proc.is_approved = True
+    await db.commit()
+    return {"success": True, "message": f"Procedure '{proc.display_name}' approved"}
+
+
+@router.delete("/procedures/{procedure_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_procedure(procedure_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete a procedure."""
+    proc = await db.get(Procedure, procedure_id)
+    if not proc:
+        raise HTTPException(status_code=404, detail="Procedure not found")
+    await db.delete(proc)
     await db.commit()

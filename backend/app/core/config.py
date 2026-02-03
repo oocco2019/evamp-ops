@@ -44,11 +44,19 @@ class Settings(BaseSettings):
     # Tunnel URL (e.g. https://xxx.localhost.run) so the app can show the full callback URL to paste in eBay
     CALLBACK_BASE_URL: str = ""
     EBAY_API_URL: str = "https://api.ebay.com"
+    # Marketplace for Finances API (required header). E.g. EBAY_GB, EBAY_US.
+    EBAY_MARKETPLACE_ID: str = "EBAY_GB"
     EBAY_AUTH_URL: str = "https://auth.ebay.com/oauth2"
     EBAY_IDENTITY_URL: str = "https://api.ebay.com/identity/v1/oauth2"
     # Optional: seller eBay username for classifying message sender_type (buyer vs seller)
     EBAY_SELLER_USERNAME: str = ""
-    
+
+    # Sales Analytics profit: convert USD/EUR to GBP (landed cost, postage; order amounts)
+    USD_TO_GBP_RATE: float = 0.79
+    EUR_TO_GBP_RATE: float = 0.86
+    # Profit after tax: displayed profit = gross profit * (1 - PROFIT_TAX_RATE). E.g. 0.30 = 30% tax on profit (take-home 70%).
+    PROFIT_TAX_RATE: float = 0.30
+
     # AI Providers (can be set via UI)
     ANTHROPIC_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
