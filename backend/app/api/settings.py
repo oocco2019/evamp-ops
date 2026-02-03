@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.core.database import get_db
 from app.core.security import encryption_service
-from app.models.settings import APICredential, AIModelSetting, Warehouse
+from app.models.settings import APICredential, AIModelSetting, Warehouse, EmailTemplate
 
 router = APIRouter()
 
@@ -403,4 +403,100 @@ async def delete_warehouse(
         )
     
     await db.delete(warehouse)
+    await db.commit()
+
+
+# === Email Template Endpoints (CS11) ===
+
+class EmailTemplateCreate(BaseModel):
+    """Schema for email template creation"""
+    name: str = Field(..., max_length=100)
+    recipient_email: str = Field(..., max_length=255)
+    subject: str = Field(..., max_length=500)
+    body: str
+
+
+class EmailTemplateResponse(BaseModel):
+    """Schema for email template response"""
+    id: int
+    name: str
+    recipient_email: str
+    subject: str
+    body: str
+    
+    model_config = {"from_attributes": True}
+
+
+@router.post("/email-templates", response_model=EmailTemplateResponse, status_code=status.HTTP_201_CREATED)
+async def create_email_template(
+    template: EmailTemplateCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Create an email template (CS11)"""
+    db_template = EmailTemplate(
+        name=template.name,
+        recipient_email=template.recipient_email,
+        subject=template.subject,
+        body=template.body,
+    )
+    db.add(db_template)
+    try:
+        await db.commit()
+        await db.refresh(db_template)
+    except Exception:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Template with this name already exists"
+        )
+    return db_template
+
+
+@router.get("/email-templates", response_model=List[EmailTemplateResponse])
+async def list_email_templates(db: AsyncSession = Depends(get_db)):
+    """List all email templates"""
+    result = await db.execute(select(EmailTemplate))
+    return list(result.scalars().all())
+
+
+@router.get("/email-templates/{template_id}", response_model=EmailTemplateResponse)
+async def get_email_template(template_id: int, db: AsyncSession = Depends(get_db)):
+    """Get a specific email template"""
+    result = await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))
+    template = result.scalar_one_or_none()
+    if not template:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
+    return template
+
+
+@router.put("/email-templates/{template_id}", response_model=EmailTemplateResponse)
+async def update_email_template(
+    template_id: int,
+    template_update: EmailTemplateCreate,
+    db: AsyncSession = Depends(get_db)
+):
+    """Update an email template"""
+    result = await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))
+    db_template = result.scalar_one_or_none()
+    if not db_template:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
+    
+    db_template.name = template_update.name
+    db_template.recipient_email = template_update.recipient_email
+    db_template.subject = template_update.subject
+    db_template.body = template_update.body
+    
+    await db.commit()
+    await db.refresh(db_template)
+    return db_template
+
+
+@router.delete("/email-templates/{template_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_email_template(template_id: int, db: AsyncSession = Depends(get_db)):
+    """Delete an email template"""
+    result = await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))
+    template = result.scalar_one_or_none()
+    if not template:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
+    await db.delete(template)
     await db.commit()

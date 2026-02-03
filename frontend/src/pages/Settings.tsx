@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { settingsAPI, stockAPI, type AIModelSetting, type APICredential, type Warehouse } from '../services/api'
+import { settingsAPI, stockAPI, type AIModelSetting, type APICredential, type Warehouse, type EmailTemplate } from '../services/api'
 
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState<'credentials' | 'ai-models' | 'ebay' | 'warehouses'>('credentials')
+  const [activeTab, setActiveTab] = useState<'credentials' | 'ai-models' | 'ebay' | 'warehouses' | 'email-templates'>('credentials')
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -71,6 +71,16 @@ export default function Settings() {
           >
             Warehouses
           </button>
+          <button
+            onClick={() => setActiveTab('email-templates')}
+            className={`${
+              activeTab === 'email-templates'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
+          >
+            Email Templates
+          </button>
         </nav>
       </div>
 
@@ -78,6 +88,7 @@ export default function Settings() {
       {activeTab === 'credentials' && <CredentialsTab />}
       {activeTab === 'ai-models' && <AIModelsTab />}
       {activeTab === 'ebay' && <EbayTab />}
+      {activeTab === 'email-templates' && <EmailTemplatesTab />}
       {activeTab === 'warehouses' && <WarehousesTab />}
     </div>
   )
@@ -794,6 +805,212 @@ function WarehousesTab() {
           ) : (
             <p className="text-gray-500 text-center py-4">
               No warehouses configured yet. Add one above to get started.
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function EmailTemplatesTab() {
+  const queryClient = useQueryClient()
+  const [name, setName] = useState('')
+  const [recipientEmail, setRecipientEmail] = useState('')
+  const [subject, setSubject] = useState('')
+  const [body, setBody] = useState('')
+  const [editingId, setEditingId] = useState<number | null>(null)
+
+  const { data: templates, isLoading } = useQuery({
+    queryKey: ['email-templates'],
+    queryFn: async () => {
+      const response = await settingsAPI.listEmailTemplates()
+      return response.data
+    },
+  })
+
+  const createMutation = useMutation({
+    mutationFn: settingsAPI.createEmailTemplate,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['email-templates'] })
+      resetForm()
+    },
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: { name: string; recipient_email: string; subject: string; body: string } }) =>
+      settingsAPI.updateEmailTemplate(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['email-templates'] })
+      resetForm()
+    },
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: settingsAPI.deleteEmailTemplate,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['email-templates'] })
+    },
+  })
+
+  const resetForm = () => {
+    setName('')
+    setRecipientEmail('')
+    setSubject('')
+    setBody('')
+    setEditingId(null)
+  }
+
+  const handleEdit = (template: EmailTemplate) => {
+    setName(template.name)
+    setRecipientEmail(template.recipient_email)
+    setSubject(template.subject)
+    setBody(template.body)
+    setEditingId(template.id)
+  }
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    const data = { name, recipient_email: recipientEmail, subject, body }
+    if (editingId) {
+      updateMutation.mutate({ id: editingId, data })
+    } else {
+      createMutation.mutate(data)
+    }
+  }
+
+  return (
+    <div className="bg-white shadow rounded-lg p-6">
+      <h2 className="text-xl font-semibold mb-4">Email Templates</h2>
+      <p className="text-gray-600 mb-6">
+        Create email templates for warehouse inquiries. Use variables: {'{tracking_number}'}, {'{order_date}'}, {'{delivery_country}'}, {'{order_id}'}, {'{buyer_username}'}
+      </p>
+
+      {/* Add/Edit template form */}
+      <form onSubmit={handleSubmit} className="mb-8 bg-gray-50 p-4 rounded-lg">
+        <h3 className="font-medium mb-4">{editingId ? 'Edit Template' : 'Add Template'}</h3>
+        <div className="grid grid-cols-1 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Template Name
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g., Warehouse Status Inquiry"
+              className="w-full border border-gray-300 rounded-md px-3 py-2"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Recipient Email
+            </label>
+            <input
+              type="email"
+              value={recipientEmail}
+              onChange={(e) => setRecipientEmail(e.target.value)}
+              placeholder="warehouse@example.com"
+              className="w-full border border-gray-300 rounded-md px-3 py-2"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Subject
+            </label>
+            <input
+              type="text"
+              value={subject}
+              onChange={(e) => setSubject(e.target.value)}
+              placeholder="Order Status Inquiry - {order_id}"
+              className="w-full border border-gray-300 rounded-md px-3 py-2"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Body
+            </label>
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              placeholder="Hi,&#10;&#10;Could you please provide the status for order {order_id}?&#10;&#10;Tracking: {tracking_number}&#10;Country: {delivery_country}&#10;&#10;Thanks"
+              rows={6}
+              className="w-full border border-gray-300 rounded-md px-3 py-2"
+              required
+            />
+          </div>
+        </div>
+        <div className="flex gap-2 mt-4">
+          <button
+            type="submit"
+            disabled={createMutation.isPending || updateMutation.isPending}
+            className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
+          >
+            {createMutation.isPending || updateMutation.isPending
+              ? 'Saving...'
+              : editingId
+              ? 'Update Template'
+              : 'Add Template'}
+          </button>
+          {editingId && (
+            <button
+              type="button"
+              onClick={resetForm}
+              className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-300"
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+      </form>
+
+      {/* Templates list */}
+      {isLoading ? (
+        <p>Loading templates...</p>
+      ) : (
+        <div className="space-y-3">
+          {templates && templates.length > 0 ? (
+            templates.map((template: EmailTemplate) => (
+              <div
+                key={template.id}
+                className="p-4 bg-gray-50 rounded-lg"
+              >
+                <div className="flex justify-between items-start">
+                  <div>
+                    <div className="font-medium">{template.name}</div>
+                    <div className="text-sm text-gray-600 mt-1">
+                      To: {template.recipient_email}
+                    </div>
+                    <div className="text-sm text-gray-600">
+                      Subject: {template.subject}
+                    </div>
+                    <div className="text-sm text-gray-500 mt-2 whitespace-pre-wrap max-h-20 overflow-hidden">
+                      {template.body.slice(0, 200)}{template.body.length > 200 ? '...' : ''}
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleEdit(template)}
+                      className="text-blue-600 hover:text-blue-800 text-sm"
+                    >
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => deleteMutation.mutate(template.id)}
+                      className="text-red-600 hover:text-red-800 text-sm"
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))
+          ) : (
+            <p className="text-gray-500 text-center py-4">
+              No email templates configured yet. Add one above to get started.
             </p>
           )}
         </div>

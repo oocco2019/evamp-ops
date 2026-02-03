@@ -506,6 +506,80 @@ async def get_flagged_count(db: AsyncSession = Depends(get_db)):
     return {"flagged_count": count}
 
 
+# === Translation Endpoints (CS07, CS08) ===
+
+class DetectLanguageRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5000)
+
+
+class DetectLanguageResponse(BaseModel):
+    language_code: str
+    language_name: str
+
+
+class TranslateRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=10000)
+    source_lang: str = Field(..., min_length=2, max_length=5)
+    target_lang: str = Field(..., min_length=2, max_length=5)
+
+
+class TranslateResponse(BaseModel):
+    translated: str
+    back_translated: str
+
+
+LANGUAGE_NAMES = {
+    "en": "English", "de": "German", "fr": "French", "es": "Spanish",
+    "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "pl": "Polish",
+    "ru": "Russian", "zh": "Chinese", "ja": "Japanese", "ko": "Korean",
+    "ar": "Arabic", "hi": "Hindi", "tr": "Turkish", "sv": "Swedish",
+    "da": "Danish", "no": "Norwegian", "fi": "Finnish", "el": "Greek",
+    "cs": "Czech", "hu": "Hungarian", "ro": "Romanian", "uk": "Ukrainian",
+}
+
+
+@router.post("/detect-language", response_model=DetectLanguageResponse)
+async def detect_language(
+    body: DetectLanguageRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Detect the language of a text (CS07)."""
+    from app.services.ai_service import AIService
+    ai = AIService(db)
+    try:
+        lang_code = await ai.detect_language(body.text)
+        lang_name = LANGUAGE_NAMES.get(lang_code, lang_code.upper())
+        return DetectLanguageResponse(language_code=lang_code, language_name=lang_name)
+    except Exception as e:
+        logger.exception("Language detection failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Language detection failed: {e!s}"
+        )
+
+
+@router.post("/translate", response_model=TranslateResponse)
+async def translate_text(
+    body: TranslateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Translate text with back-translation for verification (CS07, CS08)."""
+    from app.services.ai_service import AIService
+    ai = AIService(db)
+    try:
+        result = await ai.translate(body.text, body.source_lang, body.target_lang)
+        return TranslateResponse(
+            translated=result.get("translated", ""),
+            back_translated=result.get("back_translated", ""),
+        )
+    except Exception as e:
+        logger.exception("Translation failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Translation failed: {e!s}"
+        )
+
+
 import re
 from html import unescape as html_unescape
 

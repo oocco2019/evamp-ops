@@ -87,3 +87,26 @@ class Warehouse(Base):
     
     def __repr__(self) -> str:
         return f"<Warehouse {self.shortname} ({self.country_code})>"
+
+
+class EmailTemplate(Base):
+    """
+    Email templates for warehouse inquiries (CS11).
+    Variables: {tracking_number}, {order_date}, {delivery_country}, {order_id}, {buyer_username}
+    """
+    __tablename__ = "email_templates"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    recipient_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(500), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, 
+        default=datetime.utcnow, 
+        onupdate=datetime.utcnow
+    )
+    
+    def __repr__(self) -> str:
+        return f"<EmailTemplate {self.name}>"

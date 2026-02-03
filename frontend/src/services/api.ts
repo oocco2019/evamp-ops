@@ -36,6 +36,14 @@ export interface Warehouse {
   country_code: string
 }
 
+export interface EmailTemplate {
+  id: number
+  name: string
+  recipient_email: string
+  subject: string
+  body: string
+}
+
 // Settings API
 export const settingsAPI = {
   // API Credentials
@@ -94,6 +102,22 @@ export const settingsAPI = {
 
   deleteWarehouse: (id: number) =>
     api.delete(`/api/settings/warehouses/${id}`),
+
+  // Email Templates (CS11)
+  listEmailTemplates: () =>
+    api.get<EmailTemplate[]>('/api/settings/email-templates'),
+  createEmailTemplate: (data: {
+    name: string
+    recipient_email: string
+    subject: string
+    body: string
+  }) => api.post<EmailTemplate>('/api/settings/email-templates', data),
+  updateEmailTemplate: (
+    id: number,
+    data: { name: string; recipient_email: string; subject: string; body: string }
+  ) => api.put<EmailTemplate>(`/api/settings/email-templates/${id}`, data),
+  deleteEmailTemplate: (id: number) =>
+    api.delete(`/api/settings/email-templates/${id}`),
 }
 
 // Stock API (eBay + SKUs)
@@ -290,6 +314,16 @@ export const messagesAPI = {
     ),
   getFlaggedCount: () =>
     api.get<{ flagged_count: number }>('/api/messages/flagged-count'),
+
+  // Translation (CS07, CS08)
+  detectLanguage: (text: string) =>
+    api.post<{ language_code: string; language_name: string }>('/api/messages/detect-language', { text }),
+  translate: (text: string, source_lang: string, target_lang: string) =>
+    api.post<{ translated: string; back_translated: string }>('/api/messages/translate', {
+      text,
+      source_lang,
+      target_lang,
+    }),
 }
 
 // Health check

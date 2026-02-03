@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { messagesAPI, type ThreadSummary, type ThreadDetail, type MessageResp } from '../services/api'
+import { messagesAPI, settingsAPI, type ThreadSummary, type ThreadDetail, type MessageResp, type EmailTemplate } from '../services/api'
 
 /** Thread title: the buyer (person evamp talks to). Never show seller; fallback to order ID or "Unknown Buyer". */
 function _threadTitle(
@@ -29,6 +29,14 @@ export default function MessageDashboard() {
   const [syncMessage, setSyncMessage] = useState<string>('')
   const [threadsStatus, setThreadsStatus] = useState<string>('')
   const [totalFlaggedCount, setTotalFlaggedCount] = useState(0)
+  const [emailTemplates, setEmailTemplates] = useState<EmailTemplate[]>([])
+  const [selectedEmailTemplate, setSelectedEmailTemplate] = useState<number | null>(null)
+  const [showTranslation, setShowTranslation] = useState(false)
+  const [translatedMessages, setTranslatedMessages] = useState<Record<string, string>>({})
+  const [translating, setTranslating] = useState(false)
+  const [replyTranslation, setReplyTranslation] = useState<{ translated: string; backTranslated: string } | null>(null)
+  const [translatingReply, setTranslatingReply] = useState(false)
+  const [detectedLang, setDetectedLang] = useState<string>('en')
 
   const loadFlaggedCount = useCallback(async () => {
     try {
@@ -38,6 +46,18 @@ export default function MessageDashboard() {
       // ignore
     }
   }, [])
+
+  const loadEmailTemplates = useCallback(async () => {
+    try {
+      const res = await settingsAPI.listEmailTemplates()
+      setEmailTemplates(res.data)
+      if (res.data.length > 0 && selectedEmailTemplate === null) {
+        setSelectedEmailTemplate(res.data[0].id)
+      }
+    } catch {
+      // ignore
+    }
+  }, [selectedEmailTemplate])
 
   const loadSendingEnabled = useCallback(async () => {
     try {
@@ -167,7 +187,8 @@ export default function MessageDashboard() {
   useEffect(() => {
     loadSendingEnabled()
     loadFlaggedCount()
-  }, [loadSendingEnabled, loadFlaggedCount])
+    loadEmailTemplates()
+  }, [loadSendingEnabled, loadFlaggedCount, loadEmailTemplates])
 
   useEffect(() => {
     loadThreads()
@@ -185,6 +206,88 @@ export default function MessageDashboard() {
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to toggle flag')
     }
+  }
+
+  const handleWarehouseEmail = () => {
+    if (!selectedThread || !selectedEmailTemplate) return
+    const template = emailTemplates.find((t) => t.id === selectedEmailTemplate)
+    if (!template) return
+
+    // Replace variables in subject and body
+    const variables: Record<string, string> = {
+      '{tracking_number}': selectedThread.tracking_number || 'N/A',
+      '{order_date}': selectedThread.created_at?.slice(0, 10) || 'N/A',
+      '{delivery_country}': 'N/A', // Would need to get from order
+      '{order_id}': selectedThread.ebay_order_id || 'N/A',
+      '{buyer_username}': selectedThread.buyer_username || 'N/A',
+    }
+
+    let subject = template.subject
+    let body = template.body
+    for (const [key, value] of Object.entries(variables)) {
+      subject = subject.replace(new RegExp(key.replace(/[{}]/g, '\\$&'), 'g'), value)
+      body = body.replace(new RegExp(key.replace(/[{}]/g, '\\$&'), 'g'), value)
+    }
+
+    // Create mailto link
+    const mailto = `mailto:${encodeURIComponent(template.recipient_email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+    window.open(mailto)
+  }
+
+  const handleTranslateThread = async () => {
+    if (!selectedThread || translating) return
+    setTranslating(true)
+    setError(null)
+    try {
+      // Find first buyer message to detect language
+      const buyerMsg = selectedThread.messages.find(
+        (m) => m.sender_type === 'buyer' && m.content.trim().length > 10
+      )
+      if (buyerMsg) {
+        const langRes = await messagesAPI.detectLanguage(buyerMsg.content.slice(0, 500))
+        setDetectedLang(langRes.data.language_code)
+      }
+      // Translate all non-English messages
+      const translations: Record<string, string> = {}
+      for (const msg of selectedThread.messages) {
+        if (msg.content.trim().length < 5) continue
+        // Detect if message is non-English
+        const detectRes = await messagesAPI.detectLanguage(msg.content.slice(0, 200))
+        if (detectRes.data.language_code !== 'en') {
+          const translateRes = await messagesAPI.translate(msg.content, detectRes.data.language_code, 'en')
+          translations[msg.message_id] = translateRes.data.translated
+        }
+      }
+      setTranslatedMessages(translations)
+      setShowTranslation(true)
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Translation failed')
+    } finally {
+      setTranslating(false)
+    }
+  }
+
+  const handleTranslateReply = async () => {
+    if (!replyContent.trim() || translatingReply || detectedLang === 'en') return
+    setTranslatingReply(true)
+    setError(null)
+    try {
+      const res = await messagesAPI.translate(replyContent, 'en', detectedLang)
+      setReplyTranslation({
+        translated: res.data.translated,
+        backTranslated: res.data.back_translated,
+      })
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Translation failed')
+    } finally {
+      setTranslatingReply(false)
+    }
+  }
+
+  const handleSendTranslated = async () => {
+    if (!replyTranslation || !selectedThread) return
+    setReplyContent(replyTranslation.translated)
+    setReplyTranslation(null)
   }
 
   return (
@@ -365,17 +468,42 @@ export default function MessageDashboard() {
                     {selectedThread.is_flagged && <span className="text-amber-500">&#9873;</span>}
                     {_threadTitle(selectedThread.buyer_username, selectedThread.ebay_order_id, selectedThread.thread_id)}
                   </h2>
-                  <button
-                    type="button"
-                    onClick={() => handleToggleFlag(selectedThread.thread_id, selectedThread.is_flagged)}
-                    className={`px-3 py-1.5 text-sm rounded font-medium ${
-                      selectedThread.is_flagged
-                        ? 'bg-amber-100 text-amber-700 hover:bg-amber-200'
-                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                    }`}
-                  >
-                    {selectedThread.is_flagged ? 'Unflag thread' : 'Flag thread'}
-                  </button>
+                  <div className="flex gap-2">
+                    {emailTemplates.length > 0 && selectedThread.ebay_order_id && (
+                      <div className="flex gap-1">
+                        <select
+                          value={selectedEmailTemplate ?? ''}
+                          onChange={(e) => setSelectedEmailTemplate(Number(e.target.value))}
+                          className="text-sm border border-gray-300 rounded px-2 py-1"
+                        >
+                          {emailTemplates.map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {t.name}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={handleWarehouseEmail}
+                          className="px-3 py-1.5 text-sm rounded font-medium bg-green-100 text-green-700 hover:bg-green-200"
+                          title="Open email in mail app"
+                        >
+                          Warehouse Email
+                        </button>
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleToggleFlag(selectedThread.thread_id, selectedThread.is_flagged)}
+                      className={`px-3 py-1.5 text-sm rounded font-medium ${
+                        selectedThread.is_flagged
+                          ? 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                      }`}
+                    >
+                      {selectedThread.is_flagged ? 'Unflag thread' : 'Flag thread'}
+                    </button>
+                  </div>
                 </div>
                 <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-600">
                   {selectedThread.ebay_order_id ? (
@@ -411,10 +539,38 @@ export default function MessageDashboard() {
                     <span>Tracking: {selectedThread.tracking_number}</span>
                   )}
                 </div>
+                <div className="flex items-center gap-2 mt-2">
+                  <button
+                    type="button"
+                    onClick={handleTranslateThread}
+                    disabled={translating}
+                    className="px-3 py-1 text-xs bg-purple-100 text-purple-700 rounded hover:bg-purple-200 disabled:opacity-50"
+                  >
+                    {translating ? 'Translating...' : showTranslation ? 'Refresh Translation' : 'Translate Thread'}
+                  </button>
+                  {showTranslation && (
+                    <button
+                      type="button"
+                      onClick={() => setShowTranslation(false)}
+                      className="px-3 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
+                    >
+                      Hide Translation
+                    </button>
+                  )}
+                  {detectedLang !== 'en' && (
+                    <span className="text-xs text-purple-600">
+                      Detected: {detectedLang.toUpperCase()}
+                    </span>
+                  )}
+                </div>
               </div>
               <div className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[40vh]">
                 {selectedThread.messages.map((m) => (
-                  <MessageBubble key={m.message_id} message={m} />
+                  <MessageBubble 
+                    key={m.message_id} 
+                    message={m} 
+                    translation={showTranslation ? translatedMessages[m.message_id] : undefined}
+                  />
                 ))}
               </div>
               <div className="p-4 border-t border-gray-200 space-y-3">
@@ -451,6 +607,53 @@ export default function MessageDashboard() {
                     {replyContent.length}/2000
                   </span>
                 </div>
+                {/* Translation for sending */}
+                {detectedLang !== 'en' && replyContent.trim() && (
+                  <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-medium text-purple-700">
+                        Translate reply to {detectedLang.toUpperCase()} before sending
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleTranslateReply}
+                        disabled={translatingReply}
+                        className="px-2 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50"
+                      >
+                        {translatingReply ? 'Translating...' : 'Translate for Sending'}
+                      </button>
+                    </div>
+                    {replyTranslation && (
+                      <div className="space-y-2 text-sm">
+                        <div>
+                          <p className="text-xs text-purple-600 font-medium">Translated ({detectedLang.toUpperCase()}):</p>
+                          <p className="text-gray-800 bg-white p-2 rounded border">{replyTranslation.translated}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-purple-600 font-medium">Back-translation (for verification):</p>
+                          <p className="text-gray-600 bg-white p-2 rounded border">{replyTranslation.backTranslated}</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={handleSendTranslated}
+                            className="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
+                          >
+                            Use translated version
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setReplyTranslation(null)}
+                            className="px-3 py-1 text-xs bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="flex justify-between items-center">
                   <span className="text-xs text-gray-500">
                     {sendingEnabled
@@ -482,7 +685,7 @@ export default function MessageDashboard() {
   )
 }
 
-function MessageBubble({ message }: { message: MessageResp }) {
+function MessageBubble({ message, translation }: { message: MessageResp; translation?: string }) {
   // Detect sender type
   const isEbay = message.sender_type === 'ebay'
   const isSeller =
@@ -513,6 +716,12 @@ function MessageBubble({ message }: { message: MessageResp }) {
         <p className={`text-sm font-medium mb-1 ${subjectClass}`}>{message.subject}</p>
       )}
       <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+      {translation && (
+        <div className="mt-2 pt-2 border-t border-gray-300">
+          <p className="text-xs text-purple-600 mb-1">Translation (English):</p>
+          <p className="text-sm whitespace-pre-wrap text-gray-700">{translation}</p>
+        </div>
+      )}
     </div>
   )
 }
