@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { messagesAPI, settingsAPI, type ThreadSummary, type ThreadDetail, type MessageResp, type EmailTemplate } from '../services/api'
 
 /** Thread title: the buyer (person evamp talks to). Never show seller; fallback to order ID or "Unknown Buyer". */
@@ -10,6 +10,24 @@ function _threadTitle(
   const buyer = (buyerUsername || '').trim()
   if (buyer && !buyer.toLowerCase().startsWith('evamp_')) return buyer
   return ebayOrderId || 'Unknown Buyer'
+}
+
+const REPLY_HEIGHT_STORAGE_KEY = 'evamp_reply_height'
+const REPLY_HEIGHT_MIN = 80
+const REPLY_HEIGHT_MAX = 320
+const REPLY_HEIGHT_DEFAULT = 120
+
+function getStoredReplyHeight(): number {
+  try {
+    const v = localStorage.getItem(REPLY_HEIGHT_STORAGE_KEY)
+    if (v != null) {
+      const n = parseInt(v, 10)
+      if (!Number.isNaN(n)) return Math.min(REPLY_HEIGHT_MAX, Math.max(REPLY_HEIGHT_MIN, n))
+    }
+  } catch {
+    /* ignore */
+  }
+  return REPLY_HEIGHT_DEFAULT
 }
 
 export default function MessageDashboard() {
@@ -36,6 +54,13 @@ export default function MessageDashboard() {
   const [replyTranslation, setReplyTranslation] = useState<{ translated: string; backTranslated: string } | null>(null)
   const [translatingReply, setTranslatingReply] = useState(false)
   const [detectedLang, setDetectedLang] = useState<string>('en')
+  const syncingRef = useRef(false)
+  const [replyHeight, setReplyHeight] = useState(getStoredReplyHeight)
+  const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const resizeEdgeRef = useRef<'top' | 'bottom' | null>(null)
+  const resizeStartYRef = useRef(0)
+  const resizeStartHeightRef = useRef(0)
+  const lastReplyHeightRef = useRef(0)
 
   const loadFlaggedCount = useCallback(async () => {
     try {
@@ -101,25 +126,26 @@ export default function MessageDashboard() {
     try {
       const res = await messagesAPI.getThread(threadId)
       setSelectedThread(res.data)
-      
-      // Check if translations exist in DB and auto-show them
       const hasTranslations = res.data.messages.some((m) => m.translated_content)
       setShowTranslation(hasTranslations)
-      
-      // Detect language from messages
       const nonEnglishMsg = res.data.messages.find(
         (m) => m.detected_language && m.detected_language !== 'en'
       )
       setDetectedLang(nonEnglishMsg?.detected_language || 'en')
+      messagesAPI.markThreadRead(threadId).catch(() => {})
+      loadFlaggedCount()
+      loadThreads()
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to load thread')
       setSelectedThread(null)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [loadFlaggedCount, loadThreads])
 
-  const handleSync = async () => {
+  const handleSync = useCallback(async () => {
+    if (syncingRef.current) return
+    syncingRef.current = true
     setSyncing(true)
     setError(null)
     setSyncStatus('syncing')
@@ -137,16 +163,23 @@ export default function MessageDashboard() {
       const statusCode = ax.response?.status ?? ''
       const errMsg = e instanceof Error ? e.message : 'Sync failed'
       const isTimeout = errMsg.toLowerCase().includes('timeout') || ax.code === 'ECONNABORTED'
+      const isConflict = statusCode === 409
+      const isAlreadySyncing = statusCode === 503
       setSyncMessage(
         isTimeout
-          ? 'Sync failed: Request timed out (90s). Backend may be unreachable or slow. Check backend is running and logs.'
-          : `Sync failed: ${errMsg}${statusCode ? ` [HTTP ${statusCode}]` : ''}${detail ? ` — ${detail}` : ''}`
+          ? 'Sync failed: Request timed out (90s). Check backend is running and try again.'
+          : isConflict
+            ? (detail || 'Sync conflict. Please try again.')
+            : isAlreadySyncing
+              ? (detail || 'Sync already in progress.')
+              : `Sync failed: ${errMsg}${statusCode ? ` [HTTP ${statusCode}]` : ''}${detail ? ` — ${detail}` : ''}`
       )
-      setError(isTimeout ? 'Request timed out. Check backend.' : errMsg)
+      setError(isTimeout ? 'Request timed out. Check backend.' : isConflict ? 'Sync conflict. Try again.' : isAlreadySyncing ? 'Sync in progress.' : errMsg)
     } finally {
+      syncingRef.current = false
       setSyncing(false)
     }
-  }
+  }, [loadThreads, loadFlaggedCount])
 
   const handleDraft = async () => {
     if (!selectedThread) return
@@ -181,19 +214,37 @@ export default function MessageDashboard() {
   const handleSend = async () => {
     if (!selectedThread || !replyContent.trim()) return
     if (!sendingEnabled) return
-    setLoading(true)
+    const content = replyContent.trim()
     setError(null)
+    const optimisticMsg: MessageResp = {
+      message_id: `pending-${Date.now()}`,
+      thread_id: selectedThread.thread_id,
+      sender_type: 'seller',
+      sender_username: null,
+      subject: null,
+      content,
+      is_read: true,
+      detected_language: null,
+      translated_content: null,
+      ebay_created_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    }
+    setSelectedThread({
+      ...selectedThread,
+      messages: [...selectedThread.messages, optimisticMsg],
+    })
+    setReplyContent('')
+    setDraft('')
+    setLoading(true)
     try {
-      await messagesAPI.sendReply(
-        selectedThread.thread_id,
-        replyContent.trim(),
-        _draft ? _draft : undefined
-      )
-      setReplyContent('')
-      setDraft('')
+      await messagesAPI.sendReply(selectedThread.thread_id, content, _draft ? _draft : undefined)
       loadThread(selectedThread.thread_id)
+      loadThreads()
+      loadFlaggedCount()
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Send failed')
+      setReplyContent(content)
+      loadThread(selectedThread.thread_id)
     } finally {
       setLoading(false)
     }
@@ -208,6 +259,70 @@ export default function MessageDashboard() {
   useEffect(() => {
     loadThreads()
   }, [loadThreads])
+
+  const SYNC_POLL_INTERVAL_MS = 90_000
+
+  useEffect(() => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
+    const scheduleNext = () => {
+      timeoutId = setTimeout(() => {
+        handleSync().finally(scheduleNext)
+      }, SYNC_POLL_INTERVAL_MS)
+    }
+    const syncOnVisible = () => {
+      if (document.visibilityState === 'visible') {
+        loadThreads()
+        loadFlaggedCount()
+        handleSync()
+      }
+    }
+    const initialTimer = setTimeout(() => {
+      handleSync().finally(scheduleNext)
+    }, 500)
+    document.addEventListener('visibilitychange', syncOnVisible)
+    return () => {
+      clearTimeout(initialTimer)
+      if (timeoutId !== null) clearTimeout(timeoutId)
+      document.removeEventListener('visibilitychange', syncOnVisible)
+    }
+  }, [handleSync, loadThreads, loadFlaggedCount])
+
+  const startReplyResize = useCallback((edge: 'top' | 'bottom', clientY: number) => {
+    resizeEdgeRef.current = edge
+    resizeStartYRef.current = clientY
+    resizeStartHeightRef.current = replyHeight
+    lastReplyHeightRef.current = replyHeight
+    const onMove = (e: MouseEvent) => {
+      if (resizeEdgeRef.current === null) return
+      const startY = resizeStartYRef.current
+      const startH = resizeStartHeightRef.current
+      const delta = e.clientY - startY
+      let newH = resizeEdgeRef.current === 'bottom' ? startH + delta : startH - delta
+      newH = Math.round(Math.min(REPLY_HEIGHT_MAX, Math.max(REPLY_HEIGHT_MIN, newH)))
+      lastReplyHeightRef.current = newH
+      setReplyHeight(newH)
+      try {
+        localStorage.setItem(REPLY_HEIGHT_STORAGE_KEY, String(newH))
+      } catch {
+        /* ignore */
+      }
+    }
+    const onUp = () => {
+      const finalH = lastReplyHeightRef.current
+      if (finalH > 0) {
+        try {
+          localStorage.setItem(REPLY_HEIGHT_STORAGE_KEY, String(finalH))
+        } catch {
+          /* ignore */
+        }
+      }
+      resizeEdgeRef.current = null
+      document.removeEventListener('mousemove', onMove)
+      document.removeEventListener('mouseup', onUp)
+    }
+    document.addEventListener('mousemove', onMove)
+    document.addEventListener('mouseup', onUp)
+  }, [replyHeight])
 
   const handleToggleFlag = async (threadId: string, currentFlag: boolean) => {
     try {
@@ -261,6 +376,8 @@ export default function MessageDashboard() {
       // Reload thread to get updated translations from DB
       await loadThread(selectedThread.thread_id)
       setShowTranslation(true)
+      loadThreads()
+      loadFlaggedCount()
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Translation failed')
     } finally {
@@ -321,8 +438,20 @@ export default function MessageDashboard() {
               </span>
             )}
             {syncStatus === 'success' && <span className="text-green-700">{syncMessage}</span>}
-            {syncStatus === 'error' && <span className="text-red-700">{syncMessage}</span>}
+            {syncStatus === 'error' && (
+              <>
+                <span className="text-red-700">{syncMessage}</span>
+                {threads.length > 0 && (
+                  <span className="text-gray-600 ml-1">— Showing last synced data below.</span>
+                )}
+              </>
+            )}
           </li>
+          {threads.length > 0 && (
+            <li className="text-gray-500 text-sm">
+              Thread list is from your database; sync fetches new messages from eBay.
+            </li>
+          )}
         </ul>
       </div>
 
@@ -379,11 +508,11 @@ export default function MessageDashboard() {
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search messages..."
-            className="px-3 py-2 border border-gray-300 rounded text-sm w-48"
+            className="px-3 py-2 border border-gray-300 rounded text-sm w-48 bg-white text-gray-900"
           />
           <button
             type="submit"
-            className="px-3 py-2 bg-gray-100 border border-gray-300 rounded text-sm hover:bg-gray-200"
+            className="px-3 py-2 bg-white border border-gray-300 rounded text-sm text-gray-800 hover:bg-gray-50"
           >
             Search
           </button>
@@ -394,7 +523,7 @@ export default function MessageDashboard() {
                 setSearchInput('')
                 setSearchQuery('')
               }}
-              className="px-3 py-2 bg-gray-100 border border-gray-300 rounded text-sm hover:bg-gray-200"
+              className="px-3 py-2 bg-white border border-gray-300 rounded text-sm text-gray-800 hover:bg-gray-50"
               title="Clear search"
             >
               Clear
@@ -408,7 +537,7 @@ export default function MessageDashboard() {
           <h2 className="text-lg font-semibold text-gray-800 p-4 border-b border-gray-200">
             Threads
           </h2>
-          {loading && !selectedThread ? (
+          {loading && threads.length === 0 ? (
             <p className="p-4 text-gray-500 text-sm">Loading...</p>
           ) : threads.length === 0 ? (
             <p className="p-4 text-gray-500 text-sm">
@@ -574,40 +703,8 @@ export default function MessageDashboard() {
                   />
                 ))}
               </div>
-              <div className="p-4 border-t border-gray-200 space-y-3">
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={handleDraft}
-                    disabled={loading}
-                    className="px-3 py-2 bg-gray-100 text-gray-800 rounded hover:bg-gray-200 disabled:opacity-50 text-sm font-medium"
-                  >
-                    {loading ? '...' : 'Draft reply'}
-                  </button>
-                </div>
-                <div className="relative">
-                  <textarea
-                    value={replyContent}
-                    onChange={(e) => setReplyContent(e.target.value)}
-                    placeholder="Type or use Draft reply..."
-                    rows={4}
-                    maxLength={2000}
-                    className={`w-full rounded border px-3 py-2 text-sm ${
-                      replyContent.length > 2000 ? 'border-red-500' : 'border-gray-300'
-                    }`}
-                  />
-                  <span
-                    className={`absolute bottom-2 right-2 text-xs ${
-                      replyContent.length > 1900
-                        ? replyContent.length > 2000
-                          ? 'text-red-600 font-medium'
-                          : 'text-amber-600'
-                        : 'text-gray-400'
-                    }`}
-                  >
-                    {replyContent.length}/2000
-                  </span>
-                </div>
+              <div className="p-4 border-t border-gray-200 flex flex-col flex-1 min-h-0">
+                <div className="flex-1 min-h-0" aria-hidden />
                 {/* Translation for sending */}
                 {detectedLang !== 'en' && replyContent.trim() && (
                   <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
@@ -655,27 +752,85 @@ export default function MessageDashboard() {
                   </div>
                 )}
 
-                <div className="flex justify-between items-center">
-                  <span className="text-xs text-gray-500">
-                    {sendingEnabled
-                      ? 'Sending is enabled. Replies will go to eBay.'
-                      : 'Sending is disabled. Enable ENABLE_MESSAGE_SENDING in .env when ready to test.'}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={handleSend}
-                    disabled={!sendingEnabled || !replyContent.trim() || replyContent.length > 2000 || loading}
-                    title={
-                      !sendingEnabled
-                        ? 'Sending is disabled for testing. Set ENABLE_MESSAGE_SENDING=true when ready.'
-                        : replyContent.length > 2000
-                          ? 'Message exceeds 2000 character limit.'
-                          : undefined
-                    }
-                    className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium"
+                <div className="flex flex-col flex-shrink-0 gap-2">
+                  <div className="flex justify-between items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDraft}
+                      disabled={loading}
+                      className="px-3 py-2 bg-gray-100 text-gray-800 rounded hover:bg-gray-200 disabled:opacity-50 text-sm font-medium flex-shrink-0"
+                    >
+                      {loading ? '...' : 'Draft reply'}
+                    </button>
+                    <span className="text-xs text-gray-500 truncate min-w-0">
+                      {sendingEnabled
+                        ? 'Sending is enabled. Replies will go to eBay.'
+                        : 'Sending is disabled. Enable ENABLE_MESSAGE_SENDING in .env when ready to test.'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleSend}
+                      disabled={!sendingEnabled || !replyContent.trim() || replyContent.length > 2000 || loading}
+                      title={
+                        !sendingEnabled
+                          ? 'Sending is disabled for testing. Set ENABLE_MESSAGE_SENDING=true when ready.'
+                          : replyContent.length > 2000
+                            ? 'Message exceeds 2000 character limit.'
+                            : undefined
+                      }
+                      className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium flex-shrink-0"
+                    >
+                      Send
+                    </button>
+                  </div>
+                  <div className="relative flex-shrink-0" style={{ height: replyHeight }}>
+                  <div
+                    className="absolute left-0 right-0 top-0 h-2 cursor-ns-resize z-10"
+                    style={{ marginTop: -1 }}
+                    onMouseDown={(e) => {
+                      e.preventDefault()
+                      startReplyResize('top', e.clientY)
+                    }}
+                    title="Drag to resize"
+                    aria-hidden
+                  />
+                  <textarea
+                    ref={replyTextareaRef}
+                    value={replyContent}
+                    onChange={(e) => setReplyContent(e.target.value)}
+                    placeholder="Type or use Draft reply..."
+                    maxLength={2000}
+                    style={{
+                      height: replyHeight,
+                      minHeight: REPLY_HEIGHT_MIN,
+                      maxHeight: REPLY_HEIGHT_MAX,
+                    }}
+                    className={`w-full resize-none rounded border px-3 py-2 text-sm ${
+                      replyContent.length > 2000 ? 'border-red-500' : 'border-gray-300'
+                    }`}
+                  />
+                  <div
+                    className="absolute left-0 right-0 bottom-0 h-2 cursor-ns-resize z-10"
+                    style={{ marginBottom: -1 }}
+                    onMouseDown={(e) => {
+                      e.preventDefault()
+                      startReplyResize('bottom', e.clientY)
+                    }}
+                    title="Drag to resize"
+                    aria-hidden
+                  />
+                  <span
+                    className={`absolute bottom-2 right-2 z-20 text-xs ${
+                      replyContent.length > 1900
+                        ? replyContent.length > 2000
+                          ? 'text-red-600 font-medium'
+                          : 'text-amber-600'
+                        : 'text-gray-400'
+                    }`}
                   >
-                    Send
-                  </button>
+                    {replyContent.length}/2000
+                  </span>
+                  </div>
                 </div>
               </div>
             </>

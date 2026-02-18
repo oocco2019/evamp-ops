@@ -368,6 +368,8 @@ export const messagesAPI = {
     }),
   getThread: (threadId: string) =>
     api.get<ThreadDetail>(`/api/messages/threads/${threadId}`),
+  markThreadRead: (threadId: string) =>
+    api.post<void>(`/api/messages/threads/${threadId}/mark-read`),
   draftReply: (threadId: string, extra_instructions?: string) =>
     api.post<{ draft: string }>(`/api/messages/threads/${threadId}/draft`, {
       extra_instructions: extra_instructions || undefined,
@@ -386,6 +388,8 @@ export const messagesAPI = {
     ),
   getFlaggedCount: () =>
     api.get<{ flagged_count: number }>('/api/messages/flagged-count'),
+  getSyncStatus: () =>
+    api.get<{ last_sync_at: string | null; is_syncing: boolean; total_unread_count: number }>('/api/messages/sync-status'),
 
   // Translation (CS07, CS08)
   detectLanguage: (text: string) =>

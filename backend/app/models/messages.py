@@ -22,7 +22,11 @@ class MessageThread(Base):
     sku: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     tracking_number: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     is_flagged: Mapped[bool] = mapped_column(Boolean, default=False)
-    
+    last_message_preview: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_message_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    message_count: Mapped[int] = mapped_column(Integer, default=0)
+    unread_count: Mapped[int] = mapped_column(Integer, default=0)
+
     # Relationship to messages
     messages: Mapped[List["Message"]] = relationship(
         "Message",
@@ -45,7 +49,8 @@ class MessageThread(Base):
 class Message(Base):
     """
     Individual messages within threads (CS01, CS02).
-    Stores messages from eBay with metadata and status.
+    Stores messages from eBay with metadata and status. Retained indefinitely in DB
+    (no purge) for warranty and long-term history; eBay may not retain messages as long.
     """
     __tablename__ = "messages"
     

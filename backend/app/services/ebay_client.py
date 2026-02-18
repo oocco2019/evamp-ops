@@ -640,6 +640,34 @@ async def fetch_all_conversation_messages(
     return all_messages
 
 
+async def update_conversation_read(
+    access_token: str,
+    conversation_id: str,
+    read: bool,
+    conversation_type: str = "FROM_MEMBERS",
+) -> None:
+    """
+    Update the read status of a conversation on eBay.
+    POST commerce/message/v1/update_conversation with conversationId, conversationType, read.
+    Returns 204 No Content.
+    """
+    payload: Dict[str, Any] = {
+        "conversationId": conversation_id,
+        "conversationType": conversation_type,
+        "read": read,
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{settings.EBAY_API_URL}{MESSAGE_API_BASE}/update_conversation",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        r.raise_for_status()
+
+
 async def send_message(
     access_token: str,
     conversation_id: str,

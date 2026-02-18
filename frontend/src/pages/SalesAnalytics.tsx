@@ -213,7 +213,7 @@ export default function SalesAnalytics() {
               type="date"
               value={from}
               onChange={(e) => setFrom(e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
             />
           </div>
           <div>
@@ -222,7 +222,7 @@ export default function SalesAnalytics() {
               type="date"
               value={to}
               onChange={(e) => setTo(e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
             />
           </div>
           <div>
@@ -230,7 +230,7 @@ export default function SalesAnalytics() {
             <select
               value={groupBy}
               onChange={(e) => setGroupBy(e.target.value as 'day' | 'week' | 'month')}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
             >
               <option value="day">Day</option>
               <option value="week">Week</option>
@@ -242,7 +242,7 @@ export default function SalesAnalytics() {
             <select
               value={country}
               onChange={(e) => setCountry(e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
             >
               <option value="">All</option>
               {(filterOptions?.countries ?? []).map((c) => (
@@ -255,7 +255,7 @@ export default function SalesAnalytics() {
             <select
               value={sku}
               onChange={(e) => setSku(e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
             >
               <option value="">All</option>
               {(filterOptions?.skus ?? []).map((s) => (
