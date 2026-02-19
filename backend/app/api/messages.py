@@ -1155,6 +1155,7 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
             logger.info("DEBUG incremental: fetch_list has %d (cid, type) pairs", len(fetch_list))
             if not fetch_list:
                 logger.info("Incremental: 0 conversations with activity since start_time")
+                logger.info("Incremental summary: start_time=%s, FROM_MEMBERS=%d, FROM_OWNERS=%d, fetch_list=0", start_time or "(none)", len(member_convs), len(owner_convs))
                 await db.commit()
             else:
                 sem = asyncio.Semaphore(10)
@@ -1264,6 +1265,13 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                         thread.last_message_preview = (body_preview[:500] + "…") if len(body_preview) > 500 else (body_preview or None)
                         thread.message_count = len(msgs)
                         thread.unread_count = sum(1 for x in msgs if not x.get("readStatus", False))
+                logger.info(
+                    "Incremental summary: start_time=%s, FROM_MEMBERS=%d, FROM_OWNERS=%d, fetch_list=%d",
+                    start_time or "(none)",
+                    len(member_convs),
+                    len(owner_convs),
+                    len(fetch_list),
+                )
                 logger.info(
                     "Incremental done: convs=%d threads_synced=%d messages_synced=%d",
                     len(all_convs),
