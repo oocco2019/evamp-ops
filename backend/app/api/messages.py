@@ -1090,23 +1090,33 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
             )
             member_sync_meta = member_sync_result.scalar_one_or_none()
             start_time: Optional[str] = member_sync_meta.value if (member_sync_meta and member_sync_meta.value) else None
+            logger.info("DEBUG incremental: start_time=%r, meta_exists=%s, meta_value=%r", start_time, member_sync_meta is not None, member_sync_meta.value if member_sync_meta else None)
 
             if not start_time:
                 logger.info("Messages sync: incremental but no start_time (first run), doing full FROM_MEMBERS to establish baseline")
-                member_convs = await fetch_all_conversations(
-                    access_token, "FROM_MEMBERS", start_time=None, limit=limit
-                )
+                try:
+                    member_convs = await fetch_all_conversations(
+                        access_token, "FROM_MEMBERS", start_time=None, limit=limit
+                    )
+                    logger.info("DEBUG first-run: fetched %d FROM_MEMBERS conversations", len(member_convs))
+                except Exception as e:
+                    logger.exception("DEBUG first-run: fetch_all_conversations failed: %s", e)
+                    raise
                 owner_convs: List[dict] = []
             else:
                 logger.info("Messages sync: incremental start_time=%s", start_time)
+                logger.info("DEBUG incremental: starting parallel fetch FROM_MEMBERS and FROM_OWNERS")
                 member_result, owner_result = await asyncio.gather(
                     fetch_all_conversations(access_token, "FROM_MEMBERS", start_time=start_time, limit=limit),
                     fetch_all_conversations(access_token, "FROM_OWNERS", start_time=start_time, limit=limit),
                     return_exceptions=True,
                 )
+                logger.info("DEBUG incremental: gather completed, member_result type=%s, owner_result type=%s", type(member_result).__name__, type(owner_result).__name__)
                 if isinstance(member_result, BaseException):
+                    logger.error("DEBUG incremental: FROM_MEMBERS raised exception: %s", member_result)
                     raise member_result
                 member_convs = member_result
+                logger.info("DEBUG incremental: FROM_MEMBERS returned %d conversations", len(member_convs))
                 if isinstance(owner_result, BaseException):
                     error_detail = str(owner_result)
                     if isinstance(owner_result, httpx.HTTPStatusError):
@@ -1136,9 +1146,11 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                         all_convs[cid] = c
                     id_to_types.setdefault(cid, set()).add("FROM_OWNERS")
 
+            logger.info("DEBUG incremental: merged %d member + %d owner = %d unique conversations", len(member_convs), len(owner_convs), len(all_convs))
             fetch_list: List[tuple[str, str]] = [
                 (cid, typ) for cid, types in id_to_types.items() for typ in types
             ]
+            logger.info("DEBUG incremental: fetch_list has %d (cid, type) pairs", len(fetch_list))
             if not fetch_list:
                 logger.info("Incremental: 0 conversations with activity since start_time")
                 await db.commit()
