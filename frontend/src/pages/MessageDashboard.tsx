@@ -65,6 +65,83 @@ export default function MessageDashboard() {
   const lastHeightRef = useRef(0)
   const activeResizeRef = useRef<'reply' | 'aiPrompt' | null>(null)
 
+  const [voiceRecording, setVoiceRecording] = useState(false)
+  const [voiceError, setVoiceError] = useState<string | null>(null)
+  const [liveTranscript, setLiveTranscript] = useState('')
+  const recognitionRef = useRef<SpeechRecognition | null>(null)
+  const transcriptChunksRef = useRef<string[]>([])
+  const skipAppendOnEndRef = useRef(false)
+
+  const toggleVoiceInstructions = useCallback(() => {
+    const SpeechRecognitionAPI =
+      typeof window !== 'undefined' &&
+      (window.SpeechRecognition || (window as unknown as { webkitSpeechRecognition?: typeof SpeechRecognition }).webkitSpeechRecognition)
+    if (!SpeechRecognitionAPI) {
+      setVoiceError('Voice input is not supported in this browser. Use Chrome or Edge.')
+      return
+    }
+    setVoiceError(null)
+
+    if (voiceRecording) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop()
+      }
+      return
+    }
+
+    if (!recognitionRef.current) {
+      const recognition = new SpeechRecognitionAPI() as SpeechRecognition
+      recognition.continuous = true
+      recognition.interimResults = true
+      recognition.lang = 'en-US'
+      recognition.onresult = (e: SpeechRecognitionEvent) => {
+        const chunks = transcriptChunksRef.current
+        let interim = ''
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const result = e.results[i]
+          const text = result[0]?.transcript?.trim() ?? ''
+          if (result.isFinal && text) {
+            chunks.push(text)
+          } else {
+            interim = text
+          }
+        }
+        const finalSoFar = chunks.join(' ')
+        setLiveTranscript(interim ? `${finalSoFar} ${interim}`.trim() : finalSoFar)
+      }
+      recognition.onend = () => {
+        if (skipAppendOnEndRef.current) {
+          skipAppendOnEndRef.current = false
+        } else {
+          const text = transcriptChunksRef.current.join(' ').trim()
+          if (text) {
+            setAiPromptInstructions((prev) => (prev ? `${prev}\n${text}` : text))
+          }
+        }
+        transcriptChunksRef.current = []
+        setLiveTranscript('')
+        setVoiceRecording(false)
+        recognitionRef.current = null
+      }
+      recognition.onerror = (e: SpeechRecognitionErrorEvent) => {
+        if (e.error === 'not-allowed') {
+          setVoiceError('Microphone access denied.')
+        } else {
+          setVoiceError(e.error || 'Voice recognition error')
+        }
+        setLiveTranscript('')
+        setVoiceRecording(false)
+        recognitionRef.current = null
+      }
+      recognitionRef.current = recognition
+    }
+
+    transcriptChunksRef.current = []
+    setLiveTranscript('')
+    setVoiceRecording(true)
+    recognitionRef.current.start()
+  }, [voiceRecording])
+
   const loadFlaggedCount = useCallback(async () => {
     try {
       const res = await messagesAPI.getFlaggedCount()
@@ -146,15 +223,15 @@ export default function MessageDashboard() {
     }
   }, [loadFlaggedCount, loadThreads])
 
-  const handleSync = useCallback(async () => {
+  const handleSync = useCallback(async (full = false) => {
     if (syncingRef.current) return
     syncingRef.current = true
     setSyncing(true)
     setError(null)
     setSyncStatus('syncing')
-    setSyncMessage('Syncing with eBay... this may take up to a minute.')
+    setSyncMessage(full ? 'Full sync: fetching all threads from eBay...' : 'Syncing with eBay... this may take up to a minute.')
     try {
-      const res = await messagesAPI.sync()
+      const res = await messagesAPI.sync(90000, full)
       setSyncStatus('success')
       setSyncMessage(res.data.message ?? `Synced: ${res.data.synced ?? 0} threads.`)
       loadThreads()
@@ -188,10 +265,23 @@ export default function MessageDashboard() {
     if (!selectedThread) return
     setLoading(true)
     setError(null)
+    let instructionsForDraft = aiPromptInstructions.trim()
+    if (voiceRecording && recognitionRef.current) {
+      const transcript = (
+        transcriptChunksRef.current.join(' ') + (liveTranscript ? ' ' + liveTranscript : '')
+      ).trim()
+      instructionsForDraft = (aiPromptInstructions + (transcript ? '\n' + transcript : '')).trim()
+      transcriptChunksRef.current = []
+      setLiveTranscript('')
+      setVoiceRecording(false)
+      setAiPromptInstructions(instructionsForDraft)
+      skipAppendOnEndRef.current = true
+      recognitionRef.current.stop()
+    }
     try {
       const res = await messagesAPI.draftReply(
         selectedThread.thread_id,
-        aiPromptInstructions.trim() || undefined
+        instructionsForDraft || undefined
       )
       setDraft(res.data.draft)
       setReplyContent(res.data.draft)
@@ -247,6 +337,7 @@ export default function MessageDashboard() {
       loadThread(selectedThread.thread_id)
       loadThreads()
       loadFlaggedCount()
+      handleSync().catch(() => {})
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Send failed')
       setReplyContent(content)
@@ -470,9 +561,10 @@ export default function MessageDashboard() {
       <div className="flex flex-wrap gap-2 mb-4 items-center">
         <button
           type="button"
-          onClick={handleSync}
+          onClick={() => handleSync(true)}
           disabled={syncing}
           className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 text-sm font-medium"
+          title="Full sync: fetches all threads from eBay (including where you were last to reply)"
         >
           {syncing ? 'Syncing...' : 'Sync messages'}
         </button>
@@ -717,6 +809,33 @@ export default function MessageDashboard() {
               </div>
               <div className="p-4 border-t border-gray-200 flex flex-col flex-shrink-0">
                 {/* Upper box: AI prompt instructions → Draft reply uses this as extra_instructions. Top-edge drag to resize. */}
+                <div className="mb-1 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={toggleVoiceInstructions}
+                    title={voiceRecording ? 'Stop recording and add transcript to instructions' : 'Record voice instructions (press again to stop)'}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium ${
+                      voiceRecording
+                        ? 'bg-red-600 text-white hover:bg-red-700'
+                        : 'bg-gray-200 text-gray-800 hover:bg-gray-300'
+                    }`}
+                  >
+                    {voiceRecording ? (
+                      <>
+                        <span className="inline-block w-2 h-2 rounded-full bg-white animate-pulse" aria-hidden />
+                        Stop voice
+                      </>
+                    ) : (
+                      'Voice instructions'
+                    )}
+                  </button>
+                  {voiceRecording && (
+                    <span className="text-xs text-gray-500">Listening… Press the button again when done.</span>
+                  )}
+                  {voiceError && (
+                    <span className="text-xs text-red-600">{voiceError}</span>
+                  )}
+                </div>
                 <div className="relative flex-shrink-0 mb-2" style={{ height: aiPromptHeight }}>
                   <div
                     className="absolute left-0 right-0 top-0 h-2 cursor-ns-resize z-10"
@@ -729,16 +848,25 @@ export default function MessageDashboard() {
                     aria-hidden
                   />
                   <textarea
-                    value={aiPromptInstructions}
-                    onChange={(e) => setAiPromptInstructions(e.target.value)}
-                    placeholder="Instructions for AI (e.g. ask customer to send a video, request issue details). Leave empty for a general draft."
+                    value={
+                      voiceRecording
+                        ? aiPromptInstructions + (liveTranscript ? (aiPromptInstructions ? '\n' : '') + liveTranscript : '')
+                        : aiPromptInstructions
+                    }
+                    onChange={(e) => !voiceRecording && setAiPromptInstructions(e.target.value)}
+                    readOnly={voiceRecording}
+                    placeholder={
+                      voiceRecording
+                        ? 'Listening… Speak now. Press Stop voice when done.'
+                        : 'Instructions for AI (e.g. ask customer to send a video, request issue details). Leave empty for a general draft.'
+                    }
                     maxLength={2000}
                     style={{
                       height: aiPromptHeight,
                       minHeight: BOX_HEIGHT_MIN,
                       maxHeight: BOX_HEIGHT_MAX,
                     }}
-                    className="w-full resize-none rounded border border-gray-300 px-3 py-2 text-sm"
+                    className="w-full resize-none rounded border border-gray-300 px-3 py-2 text-sm focus:ring-0 focus:outline-none"
                   />
                 </div>
                 {/* Translation for sending */}

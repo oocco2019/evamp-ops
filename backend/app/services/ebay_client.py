@@ -563,8 +563,8 @@ async def fetch_message_conversations_page(
 ) -> Dict[str, Any]:
     """
     Fetch one page of conversations from eBay Message API.
-    conversation_type is required: FROM_MEMBERS (member-to-member) or FROM_EBAY.
-    start_time/end_time (ISO 8601) filter by conversation activity for FROM_MEMBERS.
+    conversation_type is required: FROM_MEMBERS (member-to-member), FROM_OWNERS (seller-to-buyer), or FROM_EBAY.
+    start_time/end_time (ISO 8601) filter by conversation activity for FROM_MEMBERS and FROM_OWNERS.
     """
     params: Dict[str, Any] = {
         "conversation_type": conversation_type,
@@ -588,6 +588,32 @@ async def fetch_message_conversations_page(
         )
         r.raise_for_status()
         return r.json()
+
+
+async def fetch_all_conversations(
+    access_token: str,
+    conversation_type: str,
+    start_time: Optional[str] = None,
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Fetch all conversations for a type (paginating), optionally filtered by start_time."""
+    all_conversations: List[Dict[str, Any]] = []
+    offset = 0
+    while True:
+        data = await fetch_message_conversations_page(
+            access_token,
+            conversation_type=conversation_type,
+            start_time=start_time,
+            limit=limit,
+            offset=offset,
+        )
+        conversations = data.get("conversations") or []
+        all_conversations.extend(conversations)
+        total = data.get("total") or 0
+        if not conversations or offset + len(conversations) >= total or not data.get("next"):
+            break
+        offset += limit
+    return all_conversations
 
 
 async def fetch_conversation_messages_page(

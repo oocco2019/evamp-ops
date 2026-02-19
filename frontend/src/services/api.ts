@@ -379,8 +379,8 @@ export const messagesAPI = {
       `/api/messages/threads/${threadId}/send`,
       { content, draft_content: draftContent ?? undefined }
     ),
-  sync: (timeoutMs = 90000) =>
-    api.post<{ message: string; synced: number }>('/api/messages/sync', {}, { timeout: timeoutMs }),
+  sync: (timeoutMs = 90000, full = false) =>
+    api.post<{ message: string; synced: number }>('/api/messages/sync', {}, { timeout: timeoutMs, params: { full: full ? 'true' : undefined } }),
   toggleFlag: (threadId: string, isFlagged: boolean) =>
     api.patch<{ thread_id: string; is_flagged: boolean }>(
       `/api/messages/threads/${threadId}/flag`,
