@@ -357,6 +357,27 @@ export default function MessageDashboard() {
     loadThreads()
   }, [loadThreads])
 
+  // Poll backend sync status to show accurate state (backend might be syncing from another request)
+  useEffect(() => {
+    const checkSyncStatus = async () => {
+      try {
+        const res = await messagesAPI.getSyncStatus()
+        if (res.data.is_syncing && syncStatus !== 'syncing') {
+          setSyncStatus('syncing')
+          setSyncMessage('Sync already in progress.')
+        } else if (!res.data.is_syncing && syncStatus === 'syncing' && !syncingRef.current) {
+          // Backend finished but we didn't get the response (e.g. timeout), reset to idle
+          setSyncStatus('idle')
+          setSyncMessage('')
+        }
+      } catch {
+        // Ignore errors polling sync status
+      }
+    }
+    const interval = setInterval(checkSyncStatus, 2000) // Check every 2s
+    return () => clearInterval(interval)
+  }, [syncStatus])
+
   const SYNC_POLL_INTERVAL_MS = 90_000
 
   useEffect(() => {
