@@ -25,6 +25,7 @@ from app.services.ai_service import AIService
 from app.services.ebay_auth import get_ebay_access_token
 from app.services.ebay_client import (
     fetch_message_conversations_page,
+    fetch_all_conversations,
     fetch_all_conversation_messages,
     send_message as ebay_send_message,
     update_conversation_read,
@@ -524,6 +525,90 @@ async def send_reply(
     return SendResponse(success=True, message=f"Message sent. ID: {ebay_message_id}")
 
 
+@router.post("/threads/{thread_id}/refresh", status_code=status.HTTP_204_NO_CONTENT)
+async def refresh_thread_messages(
+    thread_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Refetch messages for a single conversation from eBay and upsert. Use after send instead of a full sync.
+    """
+    thread = await db.get(MessageThread, thread_id)
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    try:
+        access_token = await get_ebay_access_token(db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Refresh thread: token error")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get eBay token: {e!s}",
+        )
+    try:
+        msgs = await fetch_all_conversation_messages(
+            access_token, thread_id, conversation_type="FROM_MEMBERS"
+        )
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 403:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="eBay denied access to messages.",
+            ) from e
+        raise
+    page_msg_ids = [m.get("messageId") for m in msgs if m.get("messageId")]
+    existing_by_id = {}
+    if page_msg_ids:
+        existing_result = await db.execute(select(Message).where(Message.message_id.in_(page_msg_ids)))
+        for msg_row in existing_result.scalars().all():
+            existing_by_id[msg_row.message_id] = msg_row
+    seller_username = (settings.EBAY_SELLER_USERNAME or "").strip().lower()
+    for m in msgs:
+        msg_id = m.get("messageId")
+        if not msg_id:
+            continue
+        existing = existing_by_id.get(msg_id)
+        if existing:
+            existing.is_read = bool(m.get("readStatus", False))
+            continue
+        body = m.get("messageBody") or ""
+        media = m.get("messageMedia") or []
+        if media:
+            attachment_strs = []
+            for i, x in enumerate(media):
+                if isinstance(x, dict):
+                    name = x.get("mediaName") or x.get("name") or f"file_{i+1}"
+                    mtype = x.get("mediaType") or x.get("type") or "FILE"
+                    attachment_strs.append(f"[{mtype}: {name}]")
+                else:
+                    attachment_strs.append(f"[Attachment {i+1}]")
+            if attachment_strs:
+                body = body + "\n" + " ".join(attachment_strs) if body else " ".join(attachment_strs)
+        sender = (m.get("senderUsername") or "").strip()
+        sender_type = "seller" if seller_username and sender.lower() == seller_username else "buyer"
+        ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
+        new_msg = Message(
+            message_id=msg_id,
+            thread_id=thread_id,
+            sender_type=sender_type,
+            sender_username=sender or None,
+            subject=(m.get("subject") or "").strip() or None,
+            content=body,
+            is_read=bool(m.get("readStatus", False)),
+            ebay_created_at=ebay_created,
+        )
+        db.add(new_msg)
+    if msgs:
+        last_msg = max(msgs, key=lambda m: m.get("createdDate") or "")
+        thread.last_message_at = _parse_iso_to_naive_utc(last_msg.get("createdDate"))
+        body_preview = (last_msg.get("messageBody") or "").strip()
+        thread.last_message_preview = (body_preview[:500] + "…") if len(body_preview) > 500 else (body_preview or None)
+        thread.message_count = len(msgs)
+        thread.unread_count = sum(1 for m in msgs if not m.get("readStatus", False))
+    await db.commit()
+
+
 @router.patch("/threads/{thread_id}/flag", response_model=FlagResponse)
 async def toggle_thread_flag(
     thread_id: str,
@@ -860,189 +945,318 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
         )
 
     seller_username = (settings.EBAY_SELLER_USERNAME or "").strip().lower()
+    sync_start_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-    # FROM_MEMBERS: we always use start_time=None so we get all member threads every time. eBay getConversations
-    # with start_time returns only threads with buyer activity since that time; threads where the seller replied
-    # last are NOT returned, so incremental (start_time) would never refresh those threads or show sent messages.
-    # So every sync (short or full) fetches all FROM_MEMBERS threads; full_sync only affects FROM_EBAY page count.
-    start_time: Optional[str] = None
-    logger.info(
-        "Messages sync FROM_MEMBERS: full_sync=%s start_time=none (fetching all member threads so sent messages are visible)",
-        full_sync,
-    )
     threads_synced = 0
     messages_synced = 0
-    from_members_page = 0
+    limit = 50
     try:
-        offset = 0
-        limit = 50
-        while True:
-            from_members_page += 1
-            try:
-                conv_page = await fetch_message_conversations_page(
-                    access_token,
-                    conversation_type="FROM_MEMBERS",
-                    start_time=start_time,
-                    limit=limit,
-                    offset=offset,
-                )
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 403:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="eBay denied access to messages. Reconnect eBay in Settings so the app requests the message scope (commerce.message).",
-                    ) from e
-                raise
-            conversations = conv_page.get("conversations") or []
-            total_from_api = conv_page.get("total")
-            next_url = conv_page.get("next")
-            if not conversations:
-                logger.info(
-                    "FROM_MEMBERS page %d: offset=%d limit=%d total=%s next=%s -> 0 conversations, stopping",
-                    from_members_page,
-                    offset,
-                    limit,
-                    total_from_api,
-                    "yes" if next_url else "no",
-                )
-                break
-            page_new_threads = 0
-            page_new_messages = 0
-            sem = asyncio.Semaphore(10)
-
-            async def fetch_messages(cid: str):
-                async with sem:
-                    return await fetch_all_conversation_messages(
-                        access_token, cid, conversation_type="FROM_MEMBERS"
+        if full_sync:
+            # Full sync: FROM_MEMBERS only, no start_time, paginate and fetch all (manual "Sync messages" fallback).
+            logger.info("Messages sync: full_sync=True, FROM_MEMBERS only (no start_time)")
+            offset = 0
+            from_members_page = 0
+            while True:
+                from_members_page += 1
+                try:
+                    conv_page = await fetch_message_conversations_page(
+                        access_token,
+                        conversation_type="FROM_MEMBERS",
+                        start_time=None,
+                        limit=limit,
+                        offset=offset,
                     )
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 403:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="eBay denied access to messages. Reconnect eBay in Settings so the app requests the message scope (commerce.message).",
+                        ) from e
+                    raise
+                conversations = conv_page.get("conversations") or []
+                if not conversations:
+                    break
+                sem = asyncio.Semaphore(10)
 
-            conv_ids = [c.get("conversationId") for c in conversations if c.get("conversationId")]
-            msg_results = await asyncio.gather(
-                *[fetch_messages(cid) for cid in conv_ids],
-                return_exceptions=True,
+                async def fetch_messages_full(cid: str):
+                    async with sem:
+                        return await fetch_all_conversation_messages(
+                            access_token, cid, conversation_type="FROM_MEMBERS"
+                        )
+
+                conv_ids = [c.get("conversationId") for c in conversations if c.get("conversationId")]
+                msg_results = await asyncio.gather(
+                    *[fetch_messages_full(cid) for cid in conv_ids],
+                    return_exceptions=True,
+                )
+                id_to_msgs = dict(zip(conv_ids, msg_results))
+                page_msg_ids = []
+                for cid in conv_ids:
+                    msgs_result = id_to_msgs.get(cid)
+                    if isinstance(msgs_result, BaseException):
+                        continue
+                    for m in msgs_result or []:
+                        mid = m.get("messageId")
+                        if mid:
+                            page_msg_ids.append(mid)
+                existing_by_id = {}
+                if page_msg_ids:
+                    existing_result = await db.execute(select(Message).where(Message.message_id.in_(page_msg_ids)))
+                    for msg_row in existing_result.scalars().all():
+                        existing_by_id[msg_row.message_id] = msg_row
+                for conv in conversations:
+                    conversation_id = conv.get("conversationId")
+                    if not conversation_id:
+                        continue
+                    msgs_result = id_to_msgs.get(conversation_id)
+                    if isinstance(msgs_result, BaseException):
+                        logger.warning("Messages fetch failed for %s: %s", conversation_id, msgs_result)
+                        continue
+                    msgs = msgs_result
+                    ref_id = conv.get("referenceId")
+                    ref_type = conv.get("referenceType")
+                    created_date = _parse_iso_to_naive_utc(conv.get("createdDate"))
+                    buyer_name = _buyer_username_from_conversation(conv, seller_username)
+                    if _is_seller_username(buyer_name):
+                        buyer_name = None
+                    thread = await db.get(MessageThread, conversation_id)
+                    if not thread:
+                        thread = MessageThread(
+                            thread_id=conversation_id,
+                            buyer_username=buyer_name,
+                            ebay_item_id=ref_id if ref_type == "LISTING" else None,
+                            ebay_order_id=None,
+                            sku=None,
+                            created_at=created_date or datetime.utcnow(),
+                        )
+                        db.add(thread)
+                        await db.flush()
+                        threads_synced += 1
+                    else:
+                        if not thread.buyer_username and buyer_name:
+                            thread.buyer_username = buyer_name
+                    for m in msgs:
+                        msg_id = m.get("messageId")
+                        if not msg_id:
+                            continue
+                        existing = existing_by_id.get(msg_id)
+                        if existing:
+                            existing.is_read = bool(m.get("readStatus", False))
+                            continue
+                        body = m.get("messageBody") or ""
+                        media = m.get("messageMedia") or []
+                        if media:
+                            attachment_strs = []
+                            for i, x in enumerate(media):
+                                if isinstance(x, dict):
+                                    name = x.get("mediaName") or x.get("name") or f"file_{i+1}"
+                                    mtype = x.get("mediaType") or x.get("type") or "FILE"
+                                    attachment_strs.append(f"[{mtype}: {name}]")
+                                else:
+                                    attachment_strs.append(f"[Attachment {i+1}]")
+                            if attachment_strs:
+                                body = body + "\n" + " ".join(attachment_strs) if body else " ".join(attachment_strs)
+                        sender = (m.get("senderUsername") or "").strip()
+                        sender_type = "seller" if seller_username and sender.lower() == seller_username else "buyer"
+                        ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
+                        new_msg = Message(
+                            message_id=msg_id,
+                            thread_id=conversation_id,
+                            sender_type=sender_type,
+                            sender_username=sender or None,
+                            subject=(m.get("subject") or "").strip() or None,
+                            content=body,
+                            is_read=bool(m.get("readStatus", False)),
+                            ebay_created_at=ebay_created,
+                        )
+                        db.add(new_msg)
+                        messages_synced += 1
+                    if msgs:
+                        last_msg = max(msgs, key=lambda m: m.get("createdDate") or "")
+                        thread.last_message_at = _parse_iso_to_naive_utc(last_msg.get("createdDate"))
+                        body_preview = (last_msg.get("messageBody") or "").strip()
+                        thread.last_message_preview = (body_preview[:500] + "…") if len(body_preview) > 500 else (body_preview or None)
+                        thread.message_count = len(msgs)
+                        thread.unread_count = sum(1 for m in msgs if not m.get("readStatus", False))
+                total = conv_page.get("total") or 0
+                offset += limit
+                if offset >= total or not conv_page.get("next"):
+                    break
+            await db.commit()
+        else:
+            # Incremental: start_time from last sync; FROM_MEMBERS + FROM_OWNERS in parallel, merge, fetch messages only for those convs.
+            member_sync_result = await db.execute(
+                select(SyncMetadata).where(SyncMetadata.key == "messages_member_last_sync_at")
             )
-            id_to_msgs = dict(zip(conv_ids, msg_results))
+            member_sync_meta = member_sync_result.scalar_one_or_none()
+            start_time: Optional[str] = member_sync_meta.value if (member_sync_meta and member_sync_meta.value) else None
 
-            page_msg_ids = []
-            for cid in conv_ids:
-                msgs_result = id_to_msgs.get(cid)
-                if isinstance(msgs_result, BaseException):
-                    continue
-                for m in msgs_result or []:
-                    mid = m.get("messageId")
-                    if mid:
-                        page_msg_ids.append(mid)
-            existing_by_id = {}
-            if page_msg_ids:
-                existing_result = await db.execute(select(Message).where(Message.message_id.in_(page_msg_ids)))
-                for msg_row in existing_result.scalars().all():
-                    existing_by_id[msg_row.message_id] = msg_row
-
-            for conv in conversations:
-                conversation_id = conv.get("conversationId")
-                if not conversation_id:
-                    continue
-                msgs_result = id_to_msgs.get(conversation_id)
-                if isinstance(msgs_result, BaseException):
-                    logger.warning("Messages fetch failed for %s: %s", conversation_id, msgs_result)
-                    continue
-                msgs = msgs_result
-                ref_id = conv.get("referenceId")
-                ref_type = conv.get("referenceType")
-                created_date = _parse_iso_to_naive_utc(conv.get("createdDate"))
-                buyer_name = _buyer_username_from_conversation(conv, seller_username)
-                if _is_seller_username(buyer_name):
-                    buyer_name = None  # Never store seller as thread title; title = buyer only
-                thread = await db.get(MessageThread, conversation_id)
-                if not thread:
-                    thread = MessageThread(
-                        thread_id=conversation_id,
-                        buyer_username=buyer_name,
-                        ebay_item_id=ref_id if ref_type == "LISTING" else None,
-                        ebay_order_id=None,
-                        sku=None,
-                        created_at=created_date or datetime.utcnow(),
-                    )
-                    db.add(thread)
-                    await db.flush()
-                    threads_synced += 1
-                    page_new_threads += 1
+            if not start_time:
+                logger.info("Messages sync: incremental but no start_time (first run), doing full FROM_MEMBERS to establish baseline")
+                member_convs = await fetch_all_conversations(
+                    access_token, "FROM_MEMBERS", start_time=None, limit=limit
+                )
+                owner_convs: List[dict] = []
+            else:
+                logger.info("Messages sync: incremental start_time=%s", start_time)
+                member_result, owner_result = await asyncio.gather(
+                    fetch_all_conversations(access_token, "FROM_MEMBERS", start_time=start_time, limit=limit),
+                    fetch_all_conversations(access_token, "FROM_OWNERS", start_time=start_time, limit=limit),
+                    return_exceptions=True,
+                )
+                if isinstance(member_result, BaseException):
+                    raise member_result
+                member_convs = member_result
+                if isinstance(owner_result, BaseException):
+                    error_detail = str(owner_result)
+                    if isinstance(owner_result, httpx.HTTPStatusError):
+                        status = owner_result.response.status_code
+                        try:
+                            body = owner_result.response.json()
+                            error_detail = f"HTTP {status}: {body}"
+                        except Exception:
+                            error_detail = f"HTTP {status}: {owner_result.response.text[:200]}"
+                    logger.warning("FROM_OWNERS not supported or failed: %s; using FROM_MEMBERS only", error_detail)
+                    owner_convs = []
                 else:
-                    if not thread.buyer_username and buyer_name:
-                        thread.buyer_username = buyer_name  # buyer_name already cleared if seller
-                for m in msgs:
-                    msg_id = m.get("messageId")
-                    if not msg_id:
-                        continue
-                    existing = existing_by_id.get(msg_id)
-                    if existing:
-                        existing.is_read = bool(m.get("readStatus", False))
-                        continue
-                    body = m.get("messageBody") or ""
-                    media = m.get("messageMedia") or []
-                    if media:
-                        attachment_strs = []
-                        for i, x in enumerate(media):
-                            if isinstance(x, dict):
-                                name = x.get("mediaName") or x.get("name") or f"file_{i+1}"
-                                mtype = x.get("mediaType") or x.get("type") or "FILE"
-                                attachment_strs.append(f"[{mtype}: {name}]")
-                            else:
-                                # Fallback if media item is not a dict (e.g. just a string/ID)
-                                attachment_strs.append(f"[Attachment {i+1}]")
-                        if attachment_strs:
-                            if body:
-                                body = body + "\n" + " ".join(attachment_strs)
-                            else:
-                                body = " ".join(attachment_strs)
-                    sender = (m.get("senderUsername") or "").strip()
-                    sender_type = "seller" if seller_username and sender.lower() == seller_username else "buyer"
-                    ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
-                    new_msg = Message(
-                        message_id=msg_id,
-                        thread_id=conversation_id,
-                        sender_type=sender_type,
-                        sender_username=sender or None,
-                        subject=(m.get("subject") or "").strip() or None,
-                        content=body,
-                        is_read=bool(m.get("readStatus", False)),
-                        ebay_created_at=ebay_created,
-                    )
-                    db.add(new_msg)
-                    messages_synced += 1
-                    page_new_messages += 1
-                if msgs:
-                    last_msg = max(msgs, key=lambda m: m.get("createdDate") or "")
-                    thread.last_message_at = _parse_iso_to_naive_utc(last_msg.get("createdDate"))
-                    body_preview = (last_msg.get("messageBody") or "").strip()
-                    thread.last_message_preview = (body_preview[:500] + "…") if len(body_preview) > 500 else (body_preview or None)
-                    thread.message_count = len(msgs)
-                    thread.unread_count = sum(1 for m in msgs if not m.get("readStatus", False))
-            logger.info(
-                "FROM_MEMBERS page %d: offset=%d limit=%d total=%s next=%s convs=%d +threads=%d +msgs=%d (cumul: threads=%d msgs=%d)",
-                from_members_page,
-                offset,
-                limit,
-                total_from_api,
-                "yes" if next_url else "no",
-                len(conversations),
-                page_new_threads,
-                page_new_messages,
-                threads_synced,
-                messages_synced,
-            )
-            total = conv_page.get("total") or 0
-            offset += limit
-            if offset >= total or not conv_page.get("next"):
-                break
+                    owner_convs = owner_result
+                    logger.info("FROM_OWNERS succeeded: %d conversations", len(owner_convs))
 
-        logger.info(
-            "FROM_MEMBERS done: pages=%d threads_synced=%d messages_synced=%d",
-            from_members_page,
-            threads_synced,
-            messages_synced,
-        )
-        await db.commit()
+            all_convs: dict[str, dict] = {}
+            id_to_types: dict[str, set[str]] = {}
+            for c in member_convs:
+                cid = c.get("conversationId")
+                if cid:
+                    all_convs[cid] = c
+                    id_to_types.setdefault(cid, set()).add("FROM_MEMBERS")
+            for c in owner_convs:
+                cid = c.get("conversationId")
+                if cid:
+                    if cid not in all_convs:
+                        all_convs[cid] = c
+                    id_to_types.setdefault(cid, set()).add("FROM_OWNERS")
+
+            fetch_list: List[tuple[str, str]] = [
+                (cid, typ) for cid, types in id_to_types.items() for typ in types
+            ]
+            if not fetch_list:
+                logger.info("Incremental: 0 conversations with activity since start_time")
+                await db.commit()
+            else:
+                sem = asyncio.Semaphore(10)
+
+                async def fetch_messages_for_cid_type(item: tuple[str, str]):
+                    cid, ctype = item
+                    async with sem:
+                        return await fetch_all_conversation_messages(
+                            access_token, cid, conversation_type=ctype
+                        )
+
+                msg_results = await asyncio.gather(
+                    *[fetch_messages_for_cid_type(item) for item in fetch_list],
+                    return_exceptions=True,
+                )
+                id_type_to_msgs = dict(zip(fetch_list, msg_results))
+                id_to_msgs_merged: dict[str, list] = {}
+                for (cid, ctype), result in id_type_to_msgs.items():
+                    if isinstance(result, BaseException):
+                        logger.warning("Messages fetch failed for %s (%s): %s", cid, ctype, result)
+                        continue
+                    seen_ids = {m.get("messageId") for m in id_to_msgs_merged.get(cid, [])}
+                    for m in result or []:
+                        mid = m.get("messageId")
+                        if mid and mid not in seen_ids:
+                            seen_ids.add(mid)
+                            id_to_msgs_merged.setdefault(cid, []).append(m)
+                for cid, msgs in id_to_msgs_merged.items():
+                    msgs.sort(key=lambda x: x.get("createdDate") or "")
+
+                page_msg_ids = []
+                for msgs in id_to_msgs_merged.values():
+                    for m in msgs:
+                        mid = m.get("messageId")
+                        if mid:
+                            page_msg_ids.append(mid)
+                existing_by_id = {}
+                if page_msg_ids:
+                    existing_result = await db.execute(select(Message).where(Message.message_id.in_(page_msg_ids)))
+                    for msg_row in existing_result.scalars().all():
+                        existing_by_id[msg_row.message_id] = msg_row
+
+                for cid, conv in all_convs.items():
+                    msgs = id_to_msgs_merged.get(cid, [])
+                    ref_id = conv.get("referenceId")
+                    ref_type = conv.get("referenceType")
+                    created_date = _parse_iso_to_naive_utc(conv.get("createdDate"))
+                    buyer_name = _buyer_username_from_conversation(conv, seller_username)
+                    if _is_seller_username(buyer_name):
+                        buyer_name = None
+                    thread = await db.get(MessageThread, cid)
+                    if not thread:
+                        thread = MessageThread(
+                            thread_id=cid,
+                            buyer_username=buyer_name,
+                            ebay_item_id=ref_id if ref_type == "LISTING" else None,
+                            ebay_order_id=None,
+                            sku=None,
+                            created_at=created_date or datetime.utcnow(),
+                        )
+                        db.add(thread)
+                        await db.flush()
+                        threads_synced += 1
+                    else:
+                        if not thread.buyer_username and buyer_name:
+                            thread.buyer_username = buyer_name
+                    for m in msgs:
+                        msg_id = m.get("messageId")
+                        if not msg_id:
+                            continue
+                        existing = existing_by_id.get(msg_id)
+                        if existing:
+                            existing.is_read = bool(m.get("readStatus", False))
+                            continue
+                        body = m.get("messageBody") or ""
+                        media = m.get("messageMedia") or []
+                        if media:
+                            attachment_strs = []
+                            for i, x in enumerate(media):
+                                if isinstance(x, dict):
+                                    name = x.get("mediaName") or x.get("name") or f"file_{i+1}"
+                                    mtype = x.get("mediaType") or x.get("type") or "FILE"
+                                    attachment_strs.append(f"[{mtype}: {name}]")
+                                else:
+                                    attachment_strs.append(f"[Attachment {i+1}]")
+                            if attachment_strs:
+                                body = body + "\n" + " ".join(attachment_strs) if body else " ".join(attachment_strs)
+                        sender = (m.get("senderUsername") or "").strip()
+                        sender_type = "seller" if seller_username and sender.lower() == seller_username else "buyer"
+                        ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
+                        new_msg = Message(
+                            message_id=msg_id,
+                            thread_id=cid,
+                            sender_type=sender_type,
+                            sender_username=sender or None,
+                            subject=(m.get("subject") or "").strip() or None,
+                            content=body,
+                            is_read=bool(m.get("readStatus", False)),
+                            ebay_created_at=ebay_created,
+                        )
+                        db.add(new_msg)
+                        messages_synced += 1
+                    if msgs:
+                        last_msg = max(msgs, key=lambda x: x.get("createdDate") or "")
+                        thread.last_message_at = _parse_iso_to_naive_utc(last_msg.get("createdDate"))
+                        body_preview = (last_msg.get("messageBody") or "").strip()
+                        thread.last_message_preview = (body_preview[:500] + "…") if len(body_preview) > 500 else (body_preview or None)
+                        thread.message_count = len(msgs)
+                        thread.unread_count = sum(1 for x in msgs if not x.get("readStatus", False))
+                logger.info(
+                    "Incremental done: convs=%d threads_synced=%d messages_synced=%d",
+                    len(all_convs),
+                    threads_synced,
+                    messages_synced,
+                )
+                await db.commit()
 
         # Sync FROM_EBAY (eBay system messages: returns, cases, promotions)
         # HTML content is stripped to plain text to reduce size
@@ -1196,13 +1410,16 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
             logger.warning("FROM_EBAY sync error: %s, partial progress saved", e)
 
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        for key in ("messages_last_sync_at", "messages_member_last_sync_at"):
+        for key, value in (
+            ("messages_last_sync_at", now_utc),
+            ("messages_member_last_sync_at", sync_start_time),
+        ):
             meta_result = await db.execute(select(SyncMetadata).where(SyncMetadata.key == key))
             meta_row = meta_result.scalar_one_or_none()
             if meta_row:
-                meta_row.value = now_utc
+                meta_row.value = value
             else:
-                db.add(SyncMetadata(key=key, value=now_utc))
+                db.add(SyncMetadata(key=key, value=value))
         await db.commit()
     except HTTPException:
         await db.rollback()

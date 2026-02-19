@@ -337,7 +337,7 @@ export default function MessageDashboard() {
       loadThread(selectedThread.thread_id)
       loadThreads()
       loadFlaggedCount()
-      handleSync().catch(() => {})
+      messagesAPI.refreshThread(selectedThread.thread_id).catch(() => {})
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Send failed')
       setReplyContent(content)
@@ -853,8 +853,20 @@ export default function MessageDashboard() {
                         ? aiPromptInstructions + (liveTranscript ? (aiPromptInstructions ? '\n' : '') + liveTranscript : '')
                         : aiPromptInstructions
                     }
-                    onChange={(e) => !voiceRecording && setAiPromptInstructions(e.target.value)}
-                    readOnly={voiceRecording}
+                    onChange={(e) => {
+                      const newValue = e.target.value
+                      if (voiceRecording) {
+                        if (liveTranscript && newValue.endsWith(liveTranscript)) {
+                          setAiPromptInstructions(newValue.slice(0, -liveTranscript.length).trimEnd())
+                        } else {
+                          setAiPromptInstructions(newValue)
+                          setLiveTranscript('')
+                        }
+                      } else {
+                        setAiPromptInstructions(newValue)
+                      }
+                    }}
+                    readOnly={false}
                     placeholder={
                       voiceRecording
                         ? 'Listening… Speak now. Press Stop voice when done.'

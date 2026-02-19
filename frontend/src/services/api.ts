@@ -379,6 +379,9 @@ export const messagesAPI = {
       `/api/messages/threads/${threadId}/send`,
       { content, draft_content: draftContent ?? undefined }
     ),
+  /** Refetch messages for this thread from eBay (single API call). Use after send instead of full sync. */
+  refreshThread: (threadId: string) =>
+    api.post<void>(`/api/messages/threads/${threadId}/refresh`),
   sync: (timeoutMs = 90000, full = false) =>
     api.post<{ message: string; synced: number }>('/api/messages/sync', {}, { timeout: timeoutMs, params: { full: full ? 'true' : undefined } }),
   toggleFlag: (threadId: string, isFlagged: boolean) =>
