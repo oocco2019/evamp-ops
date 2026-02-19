@@ -918,7 +918,7 @@ async def sync_messages(
 
 async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
     """Inner sync logic; called with _sync_lock held. Messages are never purged; only stub-* threads are removed."""
-    logger.info("Messages sync: start (full_sync=%s)", full_sync)
+    logger.info("Messages sync: start (full_sync=%s) [DEBUG: code version with FROM_OWNERS incremental]", full_sync)
     from sqlalchemy import delete
 
     try:
