@@ -12,22 +12,23 @@ function _threadTitle(
   return ebayOrderId || 'Unknown Buyer'
 }
 
+const BOX_HEIGHT_MIN = 80
+const BOX_HEIGHT_MAX = 320
+const BOX_HEIGHT_DEFAULT = 120
 const REPLY_HEIGHT_STORAGE_KEY = 'evamp_reply_height'
-const REPLY_HEIGHT_MIN = 80
-const REPLY_HEIGHT_MAX = 320
-const REPLY_HEIGHT_DEFAULT = 120
+const AI_PROMPT_HEIGHT_STORAGE_KEY = 'evamp_ai_prompt_height'
 
-function getStoredReplyHeight(): number {
+function getStoredHeight(key: string): number {
   try {
-    const v = localStorage.getItem(REPLY_HEIGHT_STORAGE_KEY)
+    const v = localStorage.getItem(key)
     if (v != null) {
       const n = parseInt(v, 10)
-      if (!Number.isNaN(n)) return Math.min(REPLY_HEIGHT_MAX, Math.max(REPLY_HEIGHT_MIN, n))
+      if (!Number.isNaN(n)) return Math.min(BOX_HEIGHT_MAX, Math.max(BOX_HEIGHT_MIN, n))
     }
   } catch {
     /* ignore */
   }
-  return REPLY_HEIGHT_DEFAULT
+  return BOX_HEIGHT_DEFAULT
 }
 
 export default function MessageDashboard() {
@@ -36,6 +37,7 @@ export default function MessageDashboard() {
   const [sendingEnabled, setSendingEnabled] = useState(false)
   const [_draft, setDraft] = useState('')
   const [replyContent, setReplyContent] = useState('')
+  const [aiPromptInstructions, setAiPromptInstructions] = useState('')
   const [loading, setLoading] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -55,12 +57,13 @@ export default function MessageDashboard() {
   const [translatingReply, setTranslatingReply] = useState(false)
   const [detectedLang, setDetectedLang] = useState<string>('en')
   const syncingRef = useRef(false)
-  const [replyHeight, setReplyHeight] = useState(getStoredReplyHeight)
+  const [replyHeight, setReplyHeight] = useState(() => getStoredHeight(REPLY_HEIGHT_STORAGE_KEY))
+  const [aiPromptHeight, setAiPromptHeight] = useState(() => getStoredHeight(AI_PROMPT_HEIGHT_STORAGE_KEY))
   const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null)
-  const resizeEdgeRef = useRef<'top' | 'bottom' | null>(null)
   const resizeStartYRef = useRef(0)
   const resizeStartHeightRef = useRef(0)
-  const lastReplyHeightRef = useRef(0)
+  const lastHeightRef = useRef(0)
+  const activeResizeRef = useRef<'reply' | 'aiPrompt' | null>(null)
 
   const loadFlaggedCount = useCallback(async () => {
     try {
@@ -186,7 +189,10 @@ export default function MessageDashboard() {
     setLoading(true)
     setError(null)
     try {
-      const res = await messagesAPI.draftReply(selectedThread.thread_id)
+      const res = await messagesAPI.draftReply(
+        selectedThread.thread_id,
+        aiPromptInstructions.trim() || undefined
+      )
       setDraft(res.data.draft)
       setReplyContent(res.data.draft)
     } catch (e: unknown) {
@@ -287,42 +293,48 @@ export default function MessageDashboard() {
     }
   }, [handleSync, loadThreads, loadFlaggedCount])
 
-  const startReplyResize = useCallback((edge: 'top' | 'bottom', clientY: number) => {
-    resizeEdgeRef.current = edge
-    resizeStartYRef.current = clientY
-    resizeStartHeightRef.current = replyHeight
-    lastReplyHeightRef.current = replyHeight
-    const onMove = (e: MouseEvent) => {
-      if (resizeEdgeRef.current === null) return
-      const startY = resizeStartYRef.current
-      const startH = resizeStartHeightRef.current
-      const delta = e.clientY - startY
-      let newH = resizeEdgeRef.current === 'bottom' ? startH + delta : startH - delta
-      newH = Math.round(Math.min(REPLY_HEIGHT_MAX, Math.max(REPLY_HEIGHT_MIN, newH)))
-      lastReplyHeightRef.current = newH
-      setReplyHeight(newH)
-      try {
-        localStorage.setItem(REPLY_HEIGHT_STORAGE_KEY, String(newH))
-      } catch {
-        /* ignore */
-      }
-    }
-    const onUp = () => {
-      const finalH = lastReplyHeightRef.current
-      if (finalH > 0) {
+  /** Top-edge-only resize: drag up = taller, drag down = shorter. Same logic for both boxes. */
+  const startResize = useCallback(
+    (box: 'reply' | 'aiPrompt', clientY: number) => {
+      const currentHeight = box === 'reply' ? replyHeight : aiPromptHeight
+      const storageKey = box === 'reply' ? REPLY_HEIGHT_STORAGE_KEY : AI_PROMPT_HEIGHT_STORAGE_KEY
+      const setHeight = box === 'reply' ? setReplyHeight : setAiPromptHeight
+      activeResizeRef.current = box
+      resizeStartYRef.current = clientY
+      resizeStartHeightRef.current = currentHeight
+      lastHeightRef.current = currentHeight
+      const onMove = (e: MouseEvent) => {
+        if (activeResizeRef.current === null) return
+        const startY = resizeStartYRef.current
+        const startH = resizeStartHeightRef.current
+        const delta = e.clientY - startY
+        const newH = Math.round(Math.min(BOX_HEIGHT_MAX, Math.max(BOX_HEIGHT_MIN, startH - delta)))
+        lastHeightRef.current = newH
+        setHeight(newH)
         try {
-          localStorage.setItem(REPLY_HEIGHT_STORAGE_KEY, String(finalH))
+          localStorage.setItem(storageKey, String(newH))
         } catch {
           /* ignore */
         }
       }
-      resizeEdgeRef.current = null
-      document.removeEventListener('mousemove', onMove)
-      document.removeEventListener('mouseup', onUp)
-    }
-    document.addEventListener('mousemove', onMove)
-    document.addEventListener('mouseup', onUp)
-  }, [replyHeight])
+      const onUp = () => {
+        const finalH = lastHeightRef.current
+        if (finalH > 0) {
+          try {
+            localStorage.setItem(storageKey, String(finalH))
+          } catch {
+            /* ignore */
+          }
+        }
+        activeResizeRef.current = null
+        document.removeEventListener('mousemove', onMove)
+        document.removeEventListener('mouseup', onUp)
+      }
+      document.addEventListener('mousemove', onMove)
+      document.addEventListener('mouseup', onUp)
+    },
+    [replyHeight, aiPromptHeight]
+  )
 
   const handleToggleFlag = async (threadId: string, currentFlag: boolean) => {
     try {
@@ -533,8 +545,8 @@ export default function MessageDashboard() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-1 bg-white shadow rounded-lg overflow-hidden">
-          <h2 className="text-lg font-semibold text-gray-800 p-4 border-b border-gray-200">
+        <div className="lg:col-span-1 bg-white shadow rounded-lg overflow-hidden flex flex-col min-h-0 max-h-[calc(100vh-6rem)]">
+          <h2 className="text-lg font-semibold text-gray-800 p-4 border-b border-gray-200 flex-shrink-0">
             Threads
           </h2>
           {loading && threads.length === 0 ? (
@@ -546,7 +558,7 @@ export default function MessageDashboard() {
                 : 'No messages found for the selected filter.'}
             </p>
           ) : (
-            <ul className="divide-y divide-gray-200 max-h-[60vh] overflow-y-auto">
+            <ul className="divide-y divide-gray-200 flex-1 min-h-0 overflow-y-auto">
               {threads.map((t) => (
                 <li key={t.thread_id}>
                   <button
@@ -585,7 +597,7 @@ export default function MessageDashboard() {
           )}
         </div>
 
-        <div className="lg:col-span-2 bg-white shadow rounded-lg overflow-hidden flex flex-col">
+        <div className="lg:col-span-2 bg-white shadow rounded-lg overflow-hidden flex flex-col min-h-0 max-h-[calc(100vh-6rem)]">
           {!selectedThread ? (
             <div className="p-8 text-center text-gray-500">
               Select a thread or sync to load sample threads.
@@ -694,7 +706,7 @@ export default function MessageDashboard() {
                   )}
                 </div>
               </div>
-              <div className="flex-1 overflow-y-auto p-4 space-y-4 max-h-[40vh]">
+              <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
                 {selectedThread.messages.map((m) => (
                   <MessageBubble 
                     key={m.message_id} 
@@ -703,8 +715,32 @@ export default function MessageDashboard() {
                   />
                 ))}
               </div>
-              <div className="p-4 border-t border-gray-200 flex flex-col flex-1 min-h-0">
-                <div className="flex-1 min-h-0" aria-hidden />
+              <div className="p-4 border-t border-gray-200 flex flex-col flex-shrink-0">
+                {/* Upper box: AI prompt instructions → Draft reply uses this as extra_instructions. Top-edge drag to resize. */}
+                <div className="relative flex-shrink-0 mb-2" style={{ height: aiPromptHeight }}>
+                  <div
+                    className="absolute left-0 right-0 top-0 h-2 cursor-ns-resize z-10"
+                    style={{ marginTop: -1 }}
+                    onMouseDown={(e) => {
+                      e.preventDefault()
+                      startResize('aiPrompt', e.clientY)
+                    }}
+                    title="Drag to resize"
+                    aria-hidden
+                  />
+                  <textarea
+                    value={aiPromptInstructions}
+                    onChange={(e) => setAiPromptInstructions(e.target.value)}
+                    placeholder="Instructions for AI (e.g. ask customer to send a video, request issue details). Leave empty for a general draft."
+                    maxLength={2000}
+                    style={{
+                      height: aiPromptHeight,
+                      minHeight: BOX_HEIGHT_MIN,
+                      maxHeight: BOX_HEIGHT_MAX,
+                    }}
+                    className="w-full resize-none rounded border border-gray-300 px-3 py-2 text-sm"
+                  />
+                </div>
                 {/* Translation for sending */}
                 {detectedLang !== 'en' && replyContent.trim() && (
                   <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
@@ -759,8 +795,9 @@ export default function MessageDashboard() {
                       onClick={handleDraft}
                       disabled={loading}
                       className="px-3 py-2 bg-gray-100 text-gray-800 rounded hover:bg-gray-200 disabled:opacity-50 text-sm font-medium flex-shrink-0"
+                      title="Generate draft in the box below using instructions above"
                     >
-                      {loading ? '...' : 'Draft reply'}
+                      {loading ? '...' : 'Generate draft'}
                     </button>
                     <span className="text-xs text-gray-500 truncate min-w-0">
                       {sendingEnabled
@@ -789,7 +826,7 @@ export default function MessageDashboard() {
                     style={{ marginTop: -1 }}
                     onMouseDown={(e) => {
                       e.preventDefault()
-                      startReplyResize('top', e.clientY)
+                      startResize('reply', e.clientY)
                     }}
                     title="Drag to resize"
                     aria-hidden
@@ -802,22 +839,12 @@ export default function MessageDashboard() {
                     maxLength={2000}
                     style={{
                       height: replyHeight,
-                      minHeight: REPLY_HEIGHT_MIN,
-                      maxHeight: REPLY_HEIGHT_MAX,
+                      minHeight: BOX_HEIGHT_MIN,
+                      maxHeight: BOX_HEIGHT_MAX,
                     }}
                     className={`w-full resize-none rounded border px-3 py-2 text-sm ${
                       replyContent.length > 2000 ? 'border-red-500' : 'border-gray-300'
                     }`}
-                  />
-                  <div
-                    className="absolute left-0 right-0 bottom-0 h-2 cursor-ns-resize z-10"
-                    style={{ marginBottom: -1 }}
-                    onMouseDown={(e) => {
-                      e.preventDefault()
-                      startReplyResize('bottom', e.clientY)
-                    }}
-                    title="Drag to resize"
-                    aria-hidden
                   />
                   <span
                     className={`absolute bottom-2 right-2 z-20 text-xs ${
