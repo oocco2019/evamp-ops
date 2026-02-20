@@ -13,7 +13,7 @@ A full-stack application for managing eBay stock operations and customer service
 - **Supplier Orders** (SM06-07) - Order generation and tracking
 
 ### Customer Service
-- **Message Import** (CS01) - Real-time eBay message sync
+- **Message Import** (CS01) - Real-time eBay message sync (incremental, full, periodic full every 10 min). See [docs/SYNC_LOGIC.md](docs/SYNC_LOGIC.md).
 - **Thread Management** (CS02-03) - Organized conversation view
 - **AI Message Drafting** (CS04-06) - Multi-provider AI support
 - **Translation** (CS07-08) - Automatic language detection and translation

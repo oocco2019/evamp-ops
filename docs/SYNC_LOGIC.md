@@ -1,6 +1,6 @@
 # Message sync – logic and optimization
 
-**Implemented:** Incremental sync (start_time + FROM_MEMBERS + FROM_OWNERS merge), full sync for manual button only, after-send single-thread refresh.
+**Implemented:** Incremental sync (start_time + FROM_MEMBERS only), full sync for manual button only, **periodic full sync every 10 minutes** (triggered by incremental sync when `messages_last_full_sync_at` is older than 10 min), after-send single-thread refresh. eBay getConversations supports only `FROM_MEMBERS` and `FROM_EBAY`; there is no FROM_OWNERS type.
 
 ---
 
@@ -9,15 +9,19 @@
 1. **Stub cleanup** – Delete any `stub-*` threads/messages from DB.
 2. **Token** – Get eBay access token.
 3. **Member/owner sync** – Either **full** (manual button) or **incremental** (background/tab focus); then **FROM_EBAY sync** – unchanged.
-4. **Metadata** – Update `messages_last_sync_at` and `messages_member_last_sync_at` (member uses sync start time to avoid gaps).
+4. **Metadata** – Update `messages_last_sync_at`, `messages_member_last_sync_at`, and (when a full sync ran) `messages_last_full_sync_at`.
 
 Only one sync runs at a time (lock); concurrent calls get 503.
 
 **Full sync** (`full=true`, manual "Sync messages"): FROM_MEMBERS only, no start_time, paginate list and fetch all messages per page (same as before). Safety net / recovery.
 
-**Incremental sync** (`full=false`, background poll, tab focus): Read `messages_member_last_sync_at` as start_time. Fetch FROM_MEMBERS and FROM_OWNERS conversation lists in parallel (both with start_time, paginate fully). If FROM_OWNERS fails (e.g. API unsupported), use FROM_MEMBERS only. Merge by conversation_id; fetch messages only for that deduplicated set (with correct conversation_type per source). Upsert threads/messages; commit. First run (no start_time): full FROM_MEMBERS list to establish baseline, then same message fetch.
+**Incremental sync** (`full=false`, background poll, tab focus): Read `messages_member_last_sync_at` as start_time. Fetch FROM_MEMBERS only (with start_time; paginate fully). With start_time, eBay returns only conversations that have had buyer activity since that time—threads where only the seller replied are not included. First run (no start_time): full FROM_MEMBERS list to establish baseline, then same message fetch.
+
+**Periodic full sync (10 min):** On every incremental sync, before running incremental logic, the backend checks `messages_last_full_sync_at` in SyncMetadata. If it is missing or older than 10 minutes, the run does incremental first, then runs a full FROM_MEMBERS sync (no start_time) to pick up conversations where the seller replied on eBay. `messages_last_full_sync_at` is updated after each full sync (manual or periodic). No separate background worker—existing sync calls (poll, tab focus) trigger the check.
 
 **After send:** Frontend calls `POST /api/messages/threads/{thread_id}/refresh` instead of sync. Backend refetches that conversation’s messages (FROM_MEMBERS) and upserts. Single API call.
+
+**Sync summary log:** After each sync (full or incremental), the backend appends one JSON line to `backend/logs/sync_summary.log` (created if missing). Fields include `full_sync`, `threads_synced`, `messages_synced`, `ebay_threads_synced`, `ebay_messages_synced`, `at` (ISO timestamp); for incremental runs also `start_time`, `from_members`, `fetch_list`. When a periodic full ran after incremental, `periodic_full_run` is true. Use this file to inspect the last (or history of) sync results without grepping Docker logs.
 
 ---
 

@@ -3,9 +3,11 @@ Messages API (Phase 4-6): threads, draft, send.
 Send is disabled by default (ENABLE_MESSAGE_SENDING=false); enable when ready to test with real customers.
 """
 import asyncio
+import json
 import logging
-from datetime import datetime, timezone
-from typing import List, Optional
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, List, Optional
 
 _sync_lock = asyncio.Lock()
 _sync_in_progress = False
@@ -916,10 +918,149 @@ async def sync_messages(
             _sync_in_progress = False
 
 
+async def _sync_from_members_full(
+    db: AsyncSession,
+    access_token: str,
+    limit: int,
+    seller_username: str,
+) -> tuple[int, int]:
+    """Run FROM_MEMBERS full sync (no start_time): paginate all conversations, fetch messages, upsert. Returns (threads_added, messages_added). Commits once at end."""
+    threads_added = 0
+    messages_added = 0
+    offset = 0
+    while True:
+        try:
+            conv_page = await fetch_message_conversations_page(
+                access_token,
+                conversation_type="FROM_MEMBERS",
+                start_time=None,
+                limit=limit,
+                offset=offset,
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="eBay denied access to messages. Reconnect eBay in Settings so the app requests the message scope (commerce.message).",
+                ) from e
+            raise
+        conversations = conv_page.get("conversations") or []
+        if not conversations:
+            break
+        sem = asyncio.Semaphore(10)
+
+        async def fetch_messages_full(cid: str):
+            async with sem:
+                return await fetch_all_conversation_messages(
+                    access_token, cid, conversation_type="FROM_MEMBERS"
+                )
+
+        conv_ids = [c.get("conversationId") for c in conversations if c.get("conversationId")]
+        msg_results = await asyncio.gather(
+            *[fetch_messages_full(cid) for cid in conv_ids],
+            return_exceptions=True,
+        )
+        id_to_msgs = dict(zip(conv_ids, msg_results))
+        page_msg_ids = []
+        for cid in conv_ids:
+            msgs_result = id_to_msgs.get(cid)
+            if isinstance(msgs_result, BaseException):
+                continue
+            for m in msgs_result or []:
+                mid = m.get("messageId")
+                if mid:
+                    page_msg_ids.append(mid)
+        existing_by_id = {}
+        if page_msg_ids:
+            existing_result = await db.execute(select(Message).where(Message.message_id.in_(page_msg_ids)))
+            for msg_row in existing_result.scalars().all():
+                existing_by_id[msg_row.message_id] = msg_row
+        for conv in conversations:
+            conversation_id = conv.get("conversationId")
+            if not conversation_id:
+                continue
+            msgs_result = id_to_msgs.get(conversation_id)
+            if isinstance(msgs_result, BaseException):
+                logger.warning("Messages fetch failed for %s: %s", conversation_id, msgs_result)
+                continue
+            msgs = msgs_result
+            ref_id = conv.get("referenceId")
+            ref_type = conv.get("referenceType")
+            created_date = _parse_iso_to_naive_utc(conv.get("createdDate"))
+            buyer_name = _buyer_username_from_conversation(conv, seller_username)
+            if _is_seller_username(buyer_name):
+                buyer_name = None
+            thread = await db.get(MessageThread, conversation_id)
+            if not thread:
+                thread = MessageThread(
+                    thread_id=conversation_id,
+                    buyer_username=buyer_name,
+                    ebay_item_id=ref_id if ref_type == "LISTING" else None,
+                    ebay_order_id=None,
+                    sku=None,
+                    created_at=created_date or datetime.utcnow(),
+                )
+                db.add(thread)
+                await db.flush()
+                threads_added += 1
+            else:
+                if not thread.buyer_username and buyer_name:
+                    thread.buyer_username = buyer_name
+            for m in msgs:
+                msg_id = m.get("messageId")
+                if not msg_id:
+                    continue
+                existing = existing_by_id.get(msg_id)
+                if existing:
+                    existing.is_read = bool(m.get("readStatus", False))
+                    continue
+                body = m.get("messageBody") or ""
+                media = m.get("messageMedia") or []
+                if media:
+                    attachment_strs = []
+                    for i, x in enumerate(media):
+                        if isinstance(x, dict):
+                            name = x.get("mediaName") or x.get("name") or f"file_{i+1}"
+                            mtype = x.get("mediaType") or x.get("type") or "FILE"
+                            attachment_strs.append(f"[{mtype}: {name}]")
+                        else:
+                            attachment_strs.append(f"[Attachment {i+1}]")
+                    if attachment_strs:
+                        body = body + "\n" + " ".join(attachment_strs) if body else " ".join(attachment_strs)
+                sender = (m.get("senderUsername") or "").strip()
+                sender_type = "seller" if seller_username and sender.lower() == seller_username else "buyer"
+                ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
+                new_msg = Message(
+                    message_id=msg_id,
+                    thread_id=conversation_id,
+                    sender_type=sender_type,
+                    sender_username=sender or None,
+                    subject=(m.get("subject") or "").strip() or None,
+                    content=body,
+                    is_read=bool(m.get("readStatus", False)),
+                    ebay_created_at=ebay_created,
+                )
+                db.add(new_msg)
+                messages_added += 1
+            if msgs:
+                last_msg = max(msgs, key=lambda m: m.get("createdDate") or "")
+                thread.last_message_at = _parse_iso_to_naive_utc(last_msg.get("createdDate"))
+                body_preview = (last_msg.get("messageBody") or "").strip()
+                thread.last_message_preview = (body_preview[:500] + "…") if len(body_preview) > 500 else (body_preview or None)
+                thread.message_count = len(msgs)
+                thread.unread_count = sum(1 for m in msgs if not m.get("readStatus", False))
+        total = conv_page.get("total") or 0
+        offset += limit
+        if offset >= total or not conv_page.get("next"):
+            break
+    await db.commit()
+    return (threads_added, messages_added)
+
+
 async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
     """Inner sync logic; called with _sync_lock held. Messages are never purged; only stub-* threads are removed."""
     logger.info("=" * 80)
-    logger.info("Messages sync: start (full_sync=%s) [DEBUG: code version with FROM_OWNERS incremental]", full_sync)
+    logger.info("Messages sync: start (full_sync=%s)", full_sync)
     logger.info("=" * 80)
     from sqlalchemy import delete
 
@@ -952,210 +1093,60 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
     threads_synced = 0
     messages_synced = 0
     limit = 50
+    sync_summary: dict[str, Any] = {"full_sync": full_sync}
+    ran_full_sync = full_sync
+    need_periodic_full = False
     try:
-        if full_sync:
-            # Full sync: FROM_MEMBERS only, no start_time, paginate and fetch all (manual "Sync messages" fallback).
-            logger.info("Messages sync: full_sync=True, FROM_MEMBERS only (no start_time)")
-            offset = 0
-            from_members_page = 0
-            while True:
-                from_members_page += 1
+        if not full_sync:
+            full_meta_result = await db.execute(
+                select(SyncMetadata).where(SyncMetadata.key == "messages_last_full_sync_at")
+            )
+            full_meta = full_meta_result.scalar_one_or_none()
+            last_full_at: Optional[datetime] = None
+            if full_meta and full_meta.value:
                 try:
-                    conv_page = await fetch_message_conversations_page(
-                        access_token,
-                        conversation_type="FROM_MEMBERS",
-                        start_time=None,
-                        limit=limit,
-                        offset=offset,
-                    )
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code == 403:
-                        raise HTTPException(
-                            status_code=status.HTTP_403_FORBIDDEN,
-                            detail="eBay denied access to messages. Reconnect eBay in Settings so the app requests the message scope (commerce.message).",
-                        ) from e
-                    raise
-                conversations = conv_page.get("conversations") or []
-                if not conversations:
-                    break
-                sem = asyncio.Semaphore(10)
+                    last_full_at = datetime.fromisoformat(full_meta.value.replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+            need_periodic_full = last_full_at is None or (datetime.now(timezone.utc) - last_full_at) > timedelta(minutes=10)
+            if need_periodic_full:
+                logger.info("Messages sync: periodic full due (last full > 10 min), will run after incremental")
 
-                async def fetch_messages_full(cid: str):
-                    async with sem:
-                        return await fetch_all_conversation_messages(
-                            access_token, cid, conversation_type="FROM_MEMBERS"
-                        )
-
-                conv_ids = [c.get("conversationId") for c in conversations if c.get("conversationId")]
-                msg_results = await asyncio.gather(
-                    *[fetch_messages_full(cid) for cid in conv_ids],
-                    return_exceptions=True,
-                )
-                id_to_msgs = dict(zip(conv_ids, msg_results))
-                page_msg_ids = []
-                for cid in conv_ids:
-                    msgs_result = id_to_msgs.get(cid)
-                    if isinstance(msgs_result, BaseException):
-                        continue
-                    for m in msgs_result or []:
-                        mid = m.get("messageId")
-                        if mid:
-                            page_msg_ids.append(mid)
-                existing_by_id = {}
-                if page_msg_ids:
-                    existing_result = await db.execute(select(Message).where(Message.message_id.in_(page_msg_ids)))
-                    for msg_row in existing_result.scalars().all():
-                        existing_by_id[msg_row.message_id] = msg_row
-                for conv in conversations:
-                    conversation_id = conv.get("conversationId")
-                    if not conversation_id:
-                        continue
-                    msgs_result = id_to_msgs.get(conversation_id)
-                    if isinstance(msgs_result, BaseException):
-                        logger.warning("Messages fetch failed for %s: %s", conversation_id, msgs_result)
-                        continue
-                    msgs = msgs_result
-                    ref_id = conv.get("referenceId")
-                    ref_type = conv.get("referenceType")
-                    created_date = _parse_iso_to_naive_utc(conv.get("createdDate"))
-                    buyer_name = _buyer_username_from_conversation(conv, seller_username)
-                    if _is_seller_username(buyer_name):
-                        buyer_name = None
-                    thread = await db.get(MessageThread, conversation_id)
-                    if not thread:
-                        thread = MessageThread(
-                            thread_id=conversation_id,
-                            buyer_username=buyer_name,
-                            ebay_item_id=ref_id if ref_type == "LISTING" else None,
-                            ebay_order_id=None,
-                            sku=None,
-                            created_at=created_date or datetime.utcnow(),
-                        )
-                        db.add(thread)
-                        await db.flush()
-                        threads_synced += 1
-                    else:
-                        if not thread.buyer_username and buyer_name:
-                            thread.buyer_username = buyer_name
-                    for m in msgs:
-                        msg_id = m.get("messageId")
-                        if not msg_id:
-                            continue
-                        existing = existing_by_id.get(msg_id)
-                        if existing:
-                            existing.is_read = bool(m.get("readStatus", False))
-                            continue
-                        body = m.get("messageBody") or ""
-                        media = m.get("messageMedia") or []
-                        if media:
-                            attachment_strs = []
-                            for i, x in enumerate(media):
-                                if isinstance(x, dict):
-                                    name = x.get("mediaName") or x.get("name") or f"file_{i+1}"
-                                    mtype = x.get("mediaType") or x.get("type") or "FILE"
-                                    attachment_strs.append(f"[{mtype}: {name}]")
-                                else:
-                                    attachment_strs.append(f"[Attachment {i+1}]")
-                            if attachment_strs:
-                                body = body + "\n" + " ".join(attachment_strs) if body else " ".join(attachment_strs)
-                        sender = (m.get("senderUsername") or "").strip()
-                        sender_type = "seller" if seller_username and sender.lower() == seller_username else "buyer"
-                        ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
-                        new_msg = Message(
-                            message_id=msg_id,
-                            thread_id=conversation_id,
-                            sender_type=sender_type,
-                            sender_username=sender or None,
-                            subject=(m.get("subject") or "").strip() or None,
-                            content=body,
-                            is_read=bool(m.get("readStatus", False)),
-                            ebay_created_at=ebay_created,
-                        )
-                        db.add(new_msg)
-                        messages_synced += 1
-                    if msgs:
-                        last_msg = max(msgs, key=lambda m: m.get("createdDate") or "")
-                        thread.last_message_at = _parse_iso_to_naive_utc(last_msg.get("createdDate"))
-                        body_preview = (last_msg.get("messageBody") or "").strip()
-                        thread.last_message_preview = (body_preview[:500] + "…") if len(body_preview) > 500 else (body_preview or None)
-                        thread.message_count = len(msgs)
-                        thread.unread_count = sum(1 for m in msgs if not m.get("readStatus", False))
-                total = conv_page.get("total") or 0
-                offset += limit
-                if offset >= total or not conv_page.get("next"):
-                    break
-            await db.commit()
+        if full_sync:
+            logger.info("Messages sync: full_sync=True, FROM_MEMBERS only (no start_time)")
+            t, m = await _sync_from_members_full(db, access_token, limit, seller_username)
+            threads_synced += t
+            messages_synced += m
         else:
-            # Incremental: start_time from last sync; FROM_MEMBERS + FROM_OWNERS in parallel, merge, fetch messages only for those convs.
+            # Incremental: start_time from last sync; FROM_MEMBERS only (eBay getConversations supports only FROM_MEMBERS and FROM_EBAY).
+            # With start_time, eBay returns only conversations with buyer activity since that time; seller-only replies are not included.
             member_sync_result = await db.execute(
                 select(SyncMetadata).where(SyncMetadata.key == "messages_member_last_sync_at")
             )
             member_sync_meta = member_sync_result.scalar_one_or_none()
-            start_time: Optional[str] = member_sync_meta.value if (member_sync_meta and member_sync_meta.value) else None
-            logger.info("DEBUG incremental: start_time=%r, meta_exists=%s, meta_value=%r", start_time, member_sync_meta is not None, member_sync_meta.value if member_sync_meta else None)
+            start_time = member_sync_meta.value if (member_sync_meta and member_sync_meta.value) else None
+            logger.info("Messages sync: incremental start_time=%r", start_time)
 
             if not start_time:
                 logger.info("Messages sync: incremental but no start_time (first run), doing full FROM_MEMBERS to establish baseline")
-                try:
-                    member_convs = await fetch_all_conversations(
-                        access_token, "FROM_MEMBERS", start_time=None, limit=limit
-                    )
-                    logger.info("DEBUG first-run: fetched %d FROM_MEMBERS conversations", len(member_convs))
-                except Exception as e:
-                    logger.exception("DEBUG first-run: fetch_all_conversations failed: %s", e)
-                    raise
-                owner_convs: List[dict] = []
-            else:
-                logger.info("Messages sync: incremental start_time=%s", start_time)
-                logger.info("DEBUG incremental: starting parallel fetch FROM_MEMBERS and FROM_OWNERS")
-                member_result, owner_result = await asyncio.gather(
-                    fetch_all_conversations(access_token, "FROM_MEMBERS", start_time=start_time, limit=limit),
-                    fetch_all_conversations(access_token, "FROM_OWNERS", start_time=start_time, limit=limit),
-                    return_exceptions=True,
+                member_convs = await fetch_all_conversations(
+                    access_token, "FROM_MEMBERS", start_time=None, limit=limit
                 )
-                logger.info("DEBUG incremental: gather completed, member_result type=%s, owner_result type=%s", type(member_result).__name__, type(owner_result).__name__)
-                if isinstance(member_result, BaseException):
-                    logger.error("DEBUG incremental: FROM_MEMBERS raised exception: %s", member_result)
-                    raise member_result
-                member_convs = member_result
-                logger.info("DEBUG incremental: FROM_MEMBERS returned %d conversations", len(member_convs))
-                if isinstance(owner_result, BaseException):
-                    error_detail = str(owner_result)
-                    if isinstance(owner_result, httpx.HTTPStatusError):
-                        status = owner_result.response.status_code
-                        try:
-                            body = owner_result.response.json()
-                            error_detail = f"HTTP {status}: {body}"
-                        except Exception:
-                            error_detail = f"HTTP {status}: {owner_result.response.text[:200]}"
-                    logger.warning("FROM_OWNERS not supported or failed: %s; using FROM_MEMBERS only", error_detail)
-                    owner_convs = []
-                else:
-                    owner_convs = owner_result
-                    logger.info("FROM_OWNERS succeeded: %d conversations", len(owner_convs))
+                logger.info("Incremental first-run: fetched %d FROM_MEMBERS conversations", len(member_convs))
+            else:
+                member_convs = await fetch_all_conversations(
+                    access_token, "FROM_MEMBERS", start_time=start_time, limit=limit
+                )
+                logger.info("Incremental: FROM_MEMBERS returned %d conversations since start_time", len(member_convs))
 
-            all_convs: dict[str, dict] = {}
-            id_to_types: dict[str, set[str]] = {}
-            for c in member_convs:
-                cid = c.get("conversationId")
-                if cid:
-                    all_convs[cid] = c
-                    id_to_types.setdefault(cid, set()).add("FROM_MEMBERS")
-            for c in owner_convs:
-                cid = c.get("conversationId")
-                if cid:
-                    if cid not in all_convs:
-                        all_convs[cid] = c
-                    id_to_types.setdefault(cid, set()).add("FROM_OWNERS")
-
-            logger.info("DEBUG incremental: merged %d member + %d owner = %d unique conversations", len(member_convs), len(owner_convs), len(all_convs))
-            fetch_list: List[tuple[str, str]] = [
-                (cid, typ) for cid, types in id_to_types.items() for typ in types
-            ]
-            logger.info("DEBUG incremental: fetch_list has %d (cid, type) pairs", len(fetch_list))
+            all_convs = {c.get("conversationId"): c for c in member_convs if c.get("conversationId")}
+            fetch_list: List[tuple[str, str]] = [(cid, "FROM_MEMBERS") for cid in all_convs]
+            sync_summary["start_time"] = start_time or "(none)"
+            sync_summary["from_members"] = len(member_convs)
+            sync_summary["fetch_list"] = len(fetch_list)
             if not fetch_list:
                 logger.info("Incremental: 0 conversations with activity since start_time")
-                logger.info("Incremental summary: start_time=%s, FROM_MEMBERS=%d, FROM_OWNERS=%d, fetch_list=0", start_time or "(none)", len(member_convs), len(owner_convs))
+                logger.info("Incremental summary: start_time=%s, FROM_MEMBERS=%d, fetch_list=0", start_time or "(none)", len(member_convs))
                 await db.commit()
             else:
                 sem = asyncio.Semaphore(10)
@@ -1266,10 +1257,9 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                         thread.message_count = len(msgs)
                         thread.unread_count = sum(1 for x in msgs if not x.get("readStatus", False))
                 logger.info(
-                    "Incremental summary: start_time=%s, FROM_MEMBERS=%d, FROM_OWNERS=%d, fetch_list=%d",
+                    "Incremental summary: start_time=%s, FROM_MEMBERS=%d, fetch_list=%d",
                     start_time or "(none)",
                     len(member_convs),
-                    len(owner_convs),
                     len(fetch_list),
                 )
                 logger.info(
@@ -1279,6 +1269,13 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                     messages_synced,
                 )
                 await db.commit()
+
+            if need_periodic_full:
+                logger.info("Messages sync: running periodic full (FROM_MEMBERS, no start_time)")
+                t, m = await _sync_from_members_full(db, access_token, limit, seller_username)
+                threads_synced += t
+                messages_synced += m
+                ran_full_sync = True
 
         # Sync FROM_EBAY (eBay system messages: returns, cases, promotions)
         # HTML content is stripped to plain text to reduce size
@@ -1432,10 +1429,13 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
             logger.warning("FROM_EBAY sync error: %s, partial progress saved", e)
 
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        for key, value in (
+        meta_updates: list[tuple[str, str]] = [
             ("messages_last_sync_at", now_utc),
             ("messages_member_last_sync_at", sync_start_time),
-        ):
+        ]
+        if ran_full_sync:
+            meta_updates.append(("messages_last_full_sync_at", now_utc))
+        for key, value in meta_updates:
             meta_result = await db.execute(select(SyncMetadata).where(SyncMetadata.key == key))
             meta_row = meta_result.scalar_one_or_none()
             if meta_row:
@@ -1460,6 +1460,22 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Sync failed: {e!s}",
         )
+
+    sync_summary["threads_synced"] = threads_synced
+    sync_summary["messages_synced"] = messages_synced
+    sync_summary["ebay_threads_synced"] = ebay_threads_synced
+    sync_summary["ebay_messages_synced"] = ebay_messages_synced
+    if ran_full_sync and not full_sync:
+        sync_summary["periodic_full_run"] = True
+    sync_summary["at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        log_dir = Path(__file__).resolve().parent.parent.parent / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        summary_path = log_dir / "sync_summary.log"
+        with open(summary_path, "a") as f:
+            f.write(json.dumps(sync_summary) + "\n")
+    except Exception as e:
+        logger.warning("Could not write sync summary log: %s", e)
 
     logger.info(
         "Messages sync: done full_sync=%s threads_synced=%d messages_synced=%d (FROM_EBAY: +%d threads +%d msgs)",

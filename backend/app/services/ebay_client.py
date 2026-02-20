@@ -563,8 +563,8 @@ async def fetch_message_conversations_page(
 ) -> Dict[str, Any]:
     """
     Fetch one page of conversations from eBay Message API.
-    conversation_type is required: FROM_MEMBERS (member-to-member), FROM_OWNERS (seller-to-buyer), or FROM_EBAY.
-    start_time/end_time (ISO 8601) filter by conversation activity for FROM_MEMBERS and FROM_OWNERS.
+    conversation_type is required. Valid values per eBay docs: FROM_MEMBERS, FROM_EBAY (only).
+    start_time/end_time (ISO 8601) are supported only when conversation_type is FROM_MEMBERS.
     """
     params: Dict[str, Any] = {
         "conversation_type": conversation_type,
