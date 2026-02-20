@@ -7,6 +7,27 @@ function ebayImageFullSizeUrl(url: string): string {
   return url.replace(/\$_1\./, '$_57.').replace(/\$_12\./, '$_57.')
 }
 
+/** Line-art image icon for attach button (eBay-style). */
+function ImageAttachmentIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <polyline points="21 15 16 10 5 21" />
+    </svg>
+  )
+}
+
+/** Paper plane icon for send button (eBay-style). */
+function SendIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <line x1="22" y1="2" x2="11" y2="13" />
+      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+    </svg>
+  )
+}
+
 /** Thread title: the buyer (person evamp talks to). Never show seller; fallback to order ID or "Unknown Buyer". */
 function _threadTitle(
   buyerUsername: string | null,
@@ -44,6 +65,8 @@ export default function MessageDashboard() {
   const [replyContent, setReplyContent] = useState('')
   const [replyAttachments, setReplyAttachments] = useState<MessageMediaItem[]>([])
   const [uploadingAttachment, setUploadingAttachment] = useState(false)
+  const [attachError, setAttachError] = useState<string | null>(null)
+  const attachErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [replyDragOver, setReplyDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [aiPromptInstructions, setAiPromptInstructions] = useState('')
@@ -322,12 +345,34 @@ export default function MessageDashboard() {
     setReplyDragOver(false)
   }, [])
 
+  const clearAttachErrorAfterDelay = useCallback(() => {
+    if (attachErrorTimeoutRef.current) clearTimeout(attachErrorTimeoutRef.current)
+    attachErrorTimeoutRef.current = setTimeout(() => {
+      setAttachError(null)
+      attachErrorTimeoutRef.current = null
+    }, 5000)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (attachErrorTimeoutRef.current) clearTimeout(attachErrorTimeoutRef.current)
+    }
+  }, [])
+
   const handleReplyDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
     setReplyDragOver(false)
-    const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'))
-    if (files.length === 0) return
+    const allFiles = Array.from(e.dataTransfer.files)
+    const files = allFiles.filter((f) => f.type.startsWith('image/'))
+    if (files.length === 0) {
+      if (allFiles.length > 0) {
+        setAttachError('File type not supported. Use JPG, PNG, GIF, etc.')
+        clearAttachErrorAfterDelay()
+      }
+      return
+    }
+    setAttachError(null)
     setUploadingAttachment(true)
     setError(null)
     const added: MessageMediaItem[] = []
@@ -342,7 +387,7 @@ export default function MessageDashboard() {
     }
     if (added.length > 0) setReplyAttachments((a) => (a.length + added.length <= 5 ? [...a, ...added] : [...a.slice(0, 5 - added.length), ...added]))
     setUploadingAttachment(false)
-  }, [])
+  }, [clearAttachErrorAfterDelay])
 
   const handleSend = async () => {
     if (!selectedThread || (!replyContent.trim() && replyAttachments.length === 0)) return
@@ -871,6 +916,15 @@ export default function MessageDashboard() {
                 <div className="mb-1 flex items-center gap-2">
                   <button
                     type="button"
+                    onClick={handleDraft}
+                    disabled={loading}
+                    className="px-3 py-2 bg-gray-100 text-gray-800 rounded hover:bg-gray-200 disabled:opacity-50 text-sm font-medium"
+                    title="Generate draft in the reply box below using instructions above"
+                  >
+                    {loading ? '...' : 'Generate draft'}
+                  </button>
+                  <button
+                    type="button"
                     onClick={toggleVoiceInstructions}
                     title={voiceRecording ? 'Stop recording and add transcript to instructions' : 'Record voice instructions (press again to stop)'}
                     className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium ${
@@ -940,17 +994,6 @@ export default function MessageDashboard() {
                     className="w-full resize-none rounded border border-gray-300 px-3 py-2 text-sm focus:ring-0 focus:outline-none"
                   />
                 </div>
-                <div className="flex justify-end mb-2">
-                  <button
-                    type="button"
-                    onClick={handleDraft}
-                    disabled={loading}
-                    className="px-3 py-2 bg-gray-100 text-gray-800 rounded hover:bg-gray-200 disabled:opacity-50 text-sm font-medium"
-                    title="Generate draft in the reply box below using instructions above"
-                  >
-                    {loading ? '...' : 'Generate draft'}
-                  </button>
-                </div>
                 {/* Translation for sending */}
                 {detectedLang !== 'en' && replyContent.trim() && (
                   <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
@@ -998,6 +1041,44 @@ export default function MessageDashboard() {
                   </div>
                 )}
 
+                {/* Row above reply box: Attach + Send (same position as old Generate draft row). */}
+                <div className="flex items-center gap-2 mb-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAttachError(null)
+                      fileInputRef.current?.click()
+                    }}
+                    disabled={loading || uploadingAttachment || replyAttachments.length >= 5}
+                    className="w-10 h-10 flex-shrink-0 rounded-full bg-gray-100 text-gray-800 hover:bg-gray-200 disabled:opacity-50 flex items-center justify-center"
+                    title="Attach image (JPG, PNG, GIF, etc. Max 5.)"
+                    aria-label="Attach image"
+                  >
+                    {uploadingAttachment ? (
+                      <span className="text-xs text-gray-600">…</span>
+                    ) : (
+                      <ImageAttachmentIcon className="w-5 h-5" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSend}
+                    disabled={(!replyContent.trim() && replyAttachments.length === 0) || replyContent.length > 2000 || loading}
+                    title={
+                      replyContent.length > 2000
+                        ? 'Message exceeds 2000 character limit.'
+                        : undefined
+                    }
+                    className="w-10 h-10 flex-shrink-0 rounded-full bg-gray-100 text-gray-800 hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+                    aria-label="Send"
+                  >
+                    <SendIcon className="w-5 h-5" />
+                  </button>
+                  {attachError && (
+                    <span className="text-xs text-red-600">{attachError}</span>
+                  )}
+                </div>
+
                 <div className="flex flex-col flex-shrink-0 gap-2">
                   {replyAttachments.length > 0 && (
                     <div className="flex flex-wrap gap-2 items-center">
@@ -1022,96 +1103,78 @@ export default function MessageDashboard() {
                       ))}
                     </div>
                   )}
-                  <div className="flex justify-between items-center gap-2">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept=".jpg,.jpeg,.gif,.png,.bmp,.tiff,.tif,.avif,.heic,.webp,image/*"
-                      className="hidden"
-                      onChange={async (e) => {
-                        const file = e.target.files?.[0]
-                        if (!file || replyAttachments.length >= 5) return
-                        e.target.value = ''
-                        setUploadingAttachment(true)
-                        try {
-                          const res = await messagesAPI.uploadMessageMedia(file)
-                          setReplyAttachments((a) => [...a, res.data])
-                        } catch (err) {
-                          setError(err instanceof Error ? err.message : 'Upload failed')
-                        } finally {
-                          setUploadingAttachment(false)
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".jpg,.jpeg,.gif,.png,.bmp,.tiff,.tif,.avif,.heic,.webp,image/*"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0]
+                      if (!file || replyAttachments.length >= 5) return
+                      e.target.value = ''
+                      setAttachError(null)
+                      setUploadingAttachment(true)
+                      try {
+                        const res = await messagesAPI.uploadMessageMedia(file)
+                        setReplyAttachments((a) => [...a, res.data])
+                      } catch (err) {
+                        const msg = err instanceof Error ? err.message : 'Upload failed'
+                        setError(msg)
+                        if (/unsupported|file type|allowed/i.test(msg)) {
+                          setAttachError('File type not supported. Use JPG, PNG, GIF, etc.')
+                          clearAttachErrorAfterDelay()
                         }
-                      }}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={loading || uploadingAttachment || replyAttachments.length >= 5}
-                      className="px-3 py-2 bg-gray-100 text-gray-800 rounded hover:bg-gray-200 disabled:opacity-50 text-sm font-medium flex-shrink-0"
-                      title="Attach image (JPG, PNG, GIF, etc. Max 5.)"
-                    >
-                      {uploadingAttachment ? 'Uploading…' : 'Attach image'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleSend}
-                      disabled={(!replyContent.trim() && replyAttachments.length === 0) || replyContent.length > 2000 || loading}
-                      title={
-                        replyContent.length > 2000
-                          ? 'Message exceeds 2000 character limit.'
-                          : undefined
+                      } finally {
+                        setUploadingAttachment(false)
                       }
-                      className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium flex-shrink-0"
-                    >
-                      Send
-                    </button>
-                  </div>
+                    }}
+                  />
                   <div
-                    className={`relative flex-shrink-0 rounded border transition-colors ${replyDragOver ? 'border-2 border-blue-400 bg-blue-50' : 'border border-gray-300'}`}
+                    className={`relative flex-shrink-0 w-full rounded-xl border transition-colors bg-gray-50 ${replyDragOver ? 'border-2 border-blue-400 bg-blue-50' : 'border-gray-200'}`}
                     style={{ height: replyHeight }}
                     onDragOver={handleReplyDragOver}
                     onDragLeave={handleReplyDragLeave}
                     onDrop={handleReplyDrop}
                   >
-                  <div
-                    className="absolute left-0 right-0 top-0 h-2 cursor-ns-resize z-10"
-                    style={{ marginTop: -1 }}
-                    onMouseDown={(e) => {
-                      e.preventDefault()
-                      startResize('reply', e.clientY)
-                    }}
-                    title="Drag to resize"
-                    aria-hidden
-                  />
-                  <textarea
-                    ref={replyTextareaRef}
-                    value={replyContent}
-                    onChange={(e) => setReplyContent(e.target.value)}
-                    placeholder="Type or use Draft reply..."
-                    maxLength={2000}
-                    style={{
-                      height: replyHeight,
-                      minHeight: BOX_HEIGHT_MIN,
-                      maxHeight: BOX_HEIGHT_MAX,
-                    }}
-                    className={`w-full resize-none rounded border-0 px-3 py-2 text-sm bg-transparent focus:ring-0 focus:outline-none ${
-                      replyContent.length > 2000 ? 'border-red-500' : 'border-gray-300'
-                    }`}
-                    onDragOver={handleReplyDragOver}
-                    onDragLeave={handleReplyDragLeave}
-                    onDrop={handleReplyDrop}
-                  />
-                  <span
-                    className={`absolute bottom-2 right-2 z-20 text-xs ${
-                      replyContent.length > 1900
-                        ? replyContent.length > 2000
-                          ? 'text-red-600 font-medium'
-                          : 'text-amber-600'
-                        : 'text-gray-400'
-                    }`}
-                  >
-                    {replyContent.length}/2000
-                  </span>
+                    <div
+                      className="absolute left-0 right-0 top-0 h-2 cursor-ns-resize z-10"
+                      style={{ marginTop: -1 }}
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        startResize('reply', e.clientY)
+                      }}
+                      title="Drag to resize"
+                      aria-hidden
+                    />
+                    <textarea
+                      ref={replyTextareaRef}
+                      value={replyContent}
+                      onChange={(e) => setReplyContent(e.target.value)}
+                      placeholder="Type or use Draft reply..."
+                      maxLength={2000}
+                      style={{
+                        height: replyHeight,
+                        minHeight: BOX_HEIGHT_MIN,
+                        maxHeight: BOX_HEIGHT_MAX,
+                      }}
+                      className={`w-full resize-none rounded-xl border-0 px-3 py-2 text-sm bg-transparent focus:ring-0 focus:outline-none ${
+                        replyContent.length > 2000 ? 'text-red-600' : ''
+                      }`}
+                      onDragOver={handleReplyDragOver}
+                      onDragLeave={handleReplyDragLeave}
+                      onDrop={handleReplyDrop}
+                    />
+                    <span
+                      className={`absolute bottom-2 right-2 z-20 text-xs ${
+                        replyContent.length > 1900
+                          ? replyContent.length > 2000
+                            ? 'text-red-600 font-medium'
+                            : 'text-amber-600'
+                          : 'text-gray-400'
+                      }`}
+                    >
+                      {replyContent.length}/2000
+                    </span>
                   </div>
                 </div>
               </div>

@@ -1,5 +1,9 @@
 # Message attachments (display and send)
 
+## Where images are stored
+
+**Image files are not stored in your local database.** When you attach an image and send (or upload via "Attach image"), the backend sends the file to **eBay Commerce Media API** (Picture Services). eBay hosts the image and returns a URL. The app stores only **metadata** in PostgreSQL: `messages.media` is a JSON array of `{ mediaName, mediaType, mediaUrl }`—i.e. the URL pointing to eBay’s CDN, not the image bytes. Received attachments are also just metadata + URLs from eBay; the actual files live on eBay’s side.
+
 ## Display (received messages)
 
 Attachments are stored on each message as `media`: an array of `{ mediaName, mediaType, mediaUrl }`.
