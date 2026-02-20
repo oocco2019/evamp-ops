@@ -35,7 +35,6 @@ services:
       CALLBACK_BASE_URL: ${CALLBACK_BASE_URL:-}
       DEBUG: ${DEBUG:-false}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
-      ENABLE_MESSAGE_SENDING: ${ENABLE_MESSAGE_SENDING:-false}
     ports:
       - "8000:8000"
     depends_on:

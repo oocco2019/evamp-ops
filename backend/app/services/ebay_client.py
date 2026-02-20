@@ -11,17 +11,18 @@ import httpx
 from app.core.config import settings
 
 
-# OAuth scopes: orders (Fulfillment), messaging (Message API), finances (net order earnings)
+# OAuth scopes: orders (Fulfillment), messaging (Message API), finances (order earnings), inventory (image upload for messages)
 EBAY_SCOPE_FULFILLMENT = "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly"
 EBAY_SCOPE_MESSAGE = "https://api.ebay.com/oauth/api_scope/commerce.message"
 EBAY_SCOPE_FINANCES = "https://api.ebay.com/oauth/api_scope/sell.finances"
-EBAY_SCOPES = f"{EBAY_SCOPE_FULFILLMENT} {EBAY_SCOPE_MESSAGE} {EBAY_SCOPE_FINANCES}"
+EBAY_SCOPE_INVENTORY = "https://api.ebay.com/oauth/api_scope/sell.inventory"
+EBAY_SCOPES = f"{EBAY_SCOPE_FULFILLMENT} {EBAY_SCOPE_MESSAGE} {EBAY_SCOPE_FINANCES} {EBAY_SCOPE_INVENTORY}"
 
 
 def get_authorization_url(state: Optional[str] = None) -> str:
     """
     Build the eBay OAuth consent URL. User is redirected here to log in and grant access.
-    Requests fulfillment (orders), commerce.message (messaging), and sell.finances (order earnings) scopes.
+    Requests fulfillment (orders), commerce.message (messaging), sell.finances (order earnings), sell.inventory (image upload for message attachments).
     """
     state = state or secrets.token_urlsafe(32)
     # Strip whitespace so .env typos don't break (eBay rejects redirect_uri with spaces)
@@ -699,21 +700,27 @@ async def send_message(
     conversation_id: str,
     message_text: str,
     reference_id: Optional[str] = None,
+    message_media: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Send a message in an existing conversation via eBay REST Message API.
-    Returns the created message details including messageId.
-    Max message_text length: 2000 characters.
+    message_media: optional list of {mediaName, mediaType, mediaUrl}. Types: IMAGE, DOC, PDF, TXT. Max 5. URLs must be HTTPS.
+    Returns the created message details including messageId and messageMedia.
     """
     payload: Dict[str, Any] = {
         "conversationId": conversation_id,
-        "messageText": message_text[:2000],  # eBay enforces 2000 char limit
+        "messageText": message_text[:2000],
     }
     if reference_id:
         payload["reference"] = {
             "referenceId": reference_id,
             "referenceType": "LISTING",
         }
+    if message_media:
+        payload["messageMedia"] = [
+            {"mediaName": m.get("mediaName", ""), "mediaType": (m.get("mediaType") or "IMAGE").upper(), "mediaUrl": m.get("mediaUrl") or ""}
+            for m in message_media[:5]
+        ]
     async with httpx.AsyncClient() as client:
         r = await client.post(
             f"{settings.EBAY_API_URL}{MESSAGE_API_BASE}/send_message",
@@ -725,3 +732,46 @@ async def send_message(
         )
         r.raise_for_status()
         return r.json()
+
+
+# Commerce Media API (images). Requires sell.inventory scope. Base URL: apim.ebay.com
+MEDIA_API_IMAGE_BASE = "/commerce/media/v1_beta/image"
+
+# Allowed image extensions for message attachments (eBay: JPG, GIF, PNG, BMP, TIFF, AVIF, HEIC, WEBP)
+ALLOWED_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".gif", ".png", ".bmp", ".tiff", ".tif", ".avif", ".heic", ".webp"})
+
+
+async def upload_image_for_message(
+    access_token: str,
+    file_bytes: bytes,
+    filename: str,
+) -> Dict[str, Any]:
+    """
+    Upload an image to eBay Picture Services via Commerce Media API. Returns { mediaUrl, mediaName, mediaType }.
+    Requires OAuth scope sell.inventory. If 403, the app may not have that scope.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{settings.EBAY_MEDIA_API_URL}{MEDIA_API_IMAGE_BASE}/create_image_from_file",
+            headers={"Authorization": f"Bearer {access_token}"},
+            files={"image": (filename or "image.jpg", file_bytes)},
+        )
+        r.raise_for_status()
+        location = r.headers.get("location") or ""
+        image_id = location.rstrip("/").split("/")[-1] if location else None
+        if not image_id:
+            raise ValueError("eBay Media API did not return image ID in Location header")
+        get_r = await client.get(
+            f"{settings.EBAY_MEDIA_API_URL}{MEDIA_API_IMAGE_BASE}/{image_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        get_r.raise_for_status()
+        data = get_r.json()
+        image_url = data.get("imageUrl") or ""
+        if not image_url:
+            raise ValueError("eBay getImage did not return imageUrl")
+        return {
+            "mediaUrl": image_url,
+            "mediaName": filename or "image.jpg",
+            "mediaType": "IMAGE",
+        }

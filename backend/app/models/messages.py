@@ -3,7 +3,7 @@ Customer service message models
 """
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy import String, Integer, DateTime, Text, Boolean, ForeignKey
+from sqlalchemy import String, Integer, DateTime, Text, Boolean, ForeignKey, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -69,7 +69,12 @@ class Message(Base):
     sender_username: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     subject: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    
+    media: Mapped[Optional[list]] = mapped_column(
+        JSON,
+        nullable=True,
+        comment="Attachments: list of {mediaName, mediaType, mediaUrl}. Types: IMAGE, DOC, PDF, TXT",
+    )
+
     # Status flags (CS02)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     

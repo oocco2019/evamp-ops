@@ -309,7 +309,13 @@ export const stockAPI = {
     ),
 }
 
-// Messages API (Phase 4-6)
+// Messages API (Phase 4-6). media: eBay attachment types IMAGE, DOC, PDF, TXT
+export interface MessageMediaItem {
+  mediaName: string
+  mediaType: string
+  mediaUrl: string | null
+}
+
 export interface MessageResp {
   message_id: string
   thread_id: string
@@ -317,6 +323,7 @@ export interface MessageResp {
   sender_username: string | null
   subject: string | null
   content: string
+  media?: MessageMediaItem[] | null
   is_read: boolean
   detected_language: string | null
   translated_content: string | null
@@ -360,8 +367,6 @@ export interface AIInstruction {
 }
 
 export const messagesAPI = {
-  getSendingEnabled: () =>
-    api.get<{ sending_enabled: boolean }>('/api/messages/sending-enabled'),
   listThreads: (params?: { filter?: 'unread' | 'flagged'; search?: string; sender_type?: 'customer' | 'ebay' }) =>
     api.get<ThreadSummary[]>('/api/messages/threads', {
       params: params ?? {},
@@ -374,11 +379,18 @@ export const messagesAPI = {
     api.post<{ draft: string }>(`/api/messages/threads/${threadId}/draft`, {
       extra_instructions: extra_instructions || undefined,
     }),
-  sendReply: (threadId: string, content: string, draftContent?: string) =>
+  sendReply: (threadId: string, content: string, draftContent?: string, messageMedia?: MessageMediaItem[]) =>
     api.post<{ success: boolean; message: string }>(
       `/api/messages/threads/${threadId}/send`,
-      { content, draft_content: draftContent ?? undefined }
+      { content, draft_content: draftContent ?? undefined, message_media: messageMedia ?? undefined }
     ),
+  uploadMessageMedia: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return api.post<MessageMediaItem>('/api/messages/upload-media', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
   /** Refetch messages for this thread from eBay (single API call). Use after send instead of full sync. */
   refreshThread: (threadId: string) =>
     api.post<void>(`/api/messages/threads/${threadId}/refresh`),

@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     # Tunnel URL (e.g. https://xxx.localhost.run) so the app can show the full callback URL to paste in eBay
     CALLBACK_BASE_URL: str = ""
     EBAY_API_URL: str = "https://api.ebay.com"
+    EBAY_MEDIA_API_URL: str = "https://apim.ebay.com"  # Commerce Media API (images for messages/listings)
     # Marketplace for Finances API (required header). E.g. EBAY_GB, EBAY_US.
     EBAY_MARKETPLACE_ID: str = "EBAY_GB"
     EBAY_AUTH_URL: str = "https://auth.ebay.com/oauth2"
@@ -69,9 +70,6 @@ class Settings(BaseSettings):
     
     # Background Tasks
     MESSAGE_SYNC_INTERVAL_MINUTES: int = 60
-
-    # Message sending (Phase 4-6): set True only when ready to test replying to real customers
-    ENABLE_MESSAGE_SENDING: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",

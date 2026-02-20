@@ -1,6 +1,5 @@
 """
 Messages API (Phase 4-6): threads, draft, send.
-Send is disabled by default (ENABLE_MESSAGE_SENDING=false); enable when ready to test with real customers.
 """
 import asyncio
 import json
@@ -11,7 +10,7 @@ from typing import Any, List, Optional
 
 _sync_lock = asyncio.Lock()
 _sync_in_progress = False
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, Integer, func
 from sqlalchemy.orm import selectinload
@@ -30,6 +29,8 @@ from app.services.ebay_client import (
     fetch_all_conversations,
     fetch_all_conversation_messages,
     send_message as ebay_send_message,
+    upload_image_for_message as ebay_upload_image,
+    ALLOWED_IMAGE_EXTENSIONS,
     update_conversation_read,
 )
 
@@ -39,6 +40,12 @@ logger = logging.getLogger(__name__)
 
 # === Schemas ===
 
+class MessageMediaItem(BaseModel):
+    mediaName: str
+    mediaType: str  # IMAGE, DOC, PDF, TXT
+    mediaUrl: Optional[str] = None
+
+
 class MessageResponse(BaseModel):
     message_id: str
     thread_id: str
@@ -46,6 +53,7 @@ class MessageResponse(BaseModel):
     sender_username: Optional[str]
     subject: Optional[str]
     content: str
+    media: Optional[List[MessageMediaItem]] = None
     is_read: bool
     detected_language: Optional[str]
     translated_content: Optional[str]
@@ -94,8 +102,9 @@ class DraftResponse(BaseModel):
 
 
 class SendRequest(BaseModel):
-    content: str = Field(..., min_length=1, max_length=8000)
+    content: str = Field("", max_length=8000)
     draft_content: Optional[str] = Field(None, max_length=8000, description="AI draft they started from; used to record feedback for learning")
+    message_media: Optional[List[MessageMediaItem]] = Field(None, description="Attachments: IMAGE, DOC, PDF, TXT. mediaUrl must be HTTPS. Max 5 per message.")
 
 
 class SendResponse(BaseModel):
@@ -113,12 +122,6 @@ class FlagResponse(BaseModel):
 
 
 # === Endpoints ===
-
-@router.get("/sending-enabled")
-async def get_sending_enabled():
-    """Return whether message sending is enabled. Frontend uses this to enable/disable Send button."""
-    return {"sending_enabled": settings.ENABLE_MESSAGE_SENDING}
-
 
 @router.get("/threads", response_model=List[ThreadSummary])
 async def list_threads(
@@ -258,6 +261,7 @@ async def get_thread(thread_id: str, db: AsyncSession = Depends(get_db)):
                 sender_username=m.sender_username,
                 subject=m.subject,
                 content=m.content,
+                media=[MessageMediaItem(**x) for x in (m.media or [])] or None,
                 is_read=m.is_read,
                 detected_language=m.detected_language,
                 translated_content=m.translated_content,
@@ -425,16 +429,14 @@ async def send_reply(
 ):
     """
     Send a reply in the thread via eBay REST Message API.
-    Disabled unless ENABLE_MESSAGE_SENDING=true.
     """
-    if not settings.ENABLE_MESSAGE_SENDING:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Message sending is disabled for testing. Set ENABLE_MESSAGE_SENDING=true in .env when you are ready to test replying to real customers.",
-        )
-    # Validate length
     content = body.content.strip()
-    if len(content) > 2000:
+    if not content and not (body.message_media and len(body.message_media) > 0):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide message text and/or at least one attachment.",
+        )
+    if content and len(content) > 2000:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Message exceeds 2000 character limit ({len(content)} chars).",
@@ -459,13 +461,23 @@ async def send_reply(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get eBay token: {e!s}",
         )
-    # Send via eBay API
+    message_media_payload = None
+    if body.message_media:
+        message_media_payload = [m.model_dump() for m in body.message_media]
+        for m in message_media_payload:
+            if not (m.get("mediaUrl") or "").strip().startswith("https://"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="All attachment URLs must be HTTPS.",
+                )
+    message_text = content if content else " "  # eBay requires messageText; use space when only attachments
     try:
         ebay_response = await ebay_send_message(
             access_token,
             conversation_id=thread_id,
-            message_text=content,
+            message_text=message_text,
             reference_id=thread.ebay_item_id,
+            message_media=message_media_payload,
         )
     except httpx.HTTPStatusError as e:
         detail = ""
@@ -489,13 +501,15 @@ async def send_reply(
     ebay_message_id = ebay_response.get("messageId") or f"sent-{datetime.now(timezone.utc).isoformat()}"
     ebay_created = _parse_iso_to_naive_utc(ebay_response.get("createdDate")) or datetime.utcnow()
     seller_username = (settings.EBAY_SELLER_USERNAME or "").strip() or ebay_response.get("senderUserName") or "seller"
+    sent_media = _normalize_message_media(ebay_response.get("messageMedia") or [])
     new_msg = Message(
         message_id=ebay_message_id,
         thread_id=thread_id,
         sender_type="seller",
         sender_username=seller_username,
         subject=None,
-        content=content,
+        content=content if content else "(attachment)",
+        media=sent_media if sent_media else None,
         is_read=True,
         ebay_created_at=ebay_created,
     )
@@ -525,6 +539,51 @@ async def send_reply(
 
     await db.commit()
     return SendResponse(success=True, message=f"Message sent. ID: {ebay_message_id}")
+
+
+@router.post("/upload-media", response_model=MessageMediaItem)
+async def upload_message_media(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Upload an image for use as a message attachment. Uses eBay Commerce Media API (requires sell.inventory scope).
+    Supported types: JPG, GIF, PNG, BMP, TIFF, AVIF, HEIC, WEBP. Max 5 attachments per message.
+    """
+    ext = (Path(file.filename or "").suffix or "").lower()
+    if ext not in ALLOWED_IMAGE_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_IMAGE_EXTENSIONS))}",
+        )
+    try:
+        access_token = await get_ebay_access_token(db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Upload: token error")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Token error: {e!s}")
+    try:
+        content = await file.read()
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Failed to read file: {e!s}")
+    try:
+        result = await ebay_upload_image(access_token, content, file.filename or f"image{ext}")
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 403:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Image upload requires eBay sell.inventory scope. Add it in eBay Developer Portal and re-authorize the app.",
+            ) from e
+        detail = (e.response.json().get("errors", [{}])[0].get("message")) if e.response.headers.get("content-type", "").startswith("application/json") else e.response.text
+        raise HTTPException(status_code=e.response.status_code, detail=detail or str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    return MessageMediaItem(
+        mediaName=result["mediaName"],
+        mediaType=result["mediaType"],
+        mediaUrl=result.get("mediaUrl"),
+    )
 
 
 @router.post("/threads/{thread_id}/refresh", status_code=status.HTTP_204_NO_CONTENT)
@@ -573,9 +632,12 @@ async def refresh_thread_messages(
         existing = existing_by_id.get(msg_id)
         if existing:
             existing.is_read = bool(m.get("readStatus", False))
+            media_list = _normalize_message_media(m.get("messageMedia") or [])
+            existing.media = media_list if media_list else None
             continue
         body = m.get("messageBody") or ""
         media = m.get("messageMedia") or []
+        media_list = _normalize_message_media(media)
         if media:
             attachment_strs = []
             for i, x in enumerate(media):
@@ -597,6 +659,7 @@ async def refresh_thread_messages(
             sender_username=sender or None,
             subject=(m.get("subject") or "").strip() or None,
             content=body,
+            media=media_list if media_list else None,
             is_read=bool(m.get("readStatus", False)),
             ebay_created_at=ebay_created,
         )
@@ -823,6 +886,21 @@ def _parse_iso_to_naive_utc(iso_str: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _normalize_message_media(raw: List[Any]) -> List[dict]:
+    """Build list of {mediaName, mediaType, mediaUrl} for storage/API. eBay types: IMAGE, DOC, PDF, TXT."""
+    out: List[dict] = []
+    for i, x in enumerate(raw):
+        if not isinstance(x, dict):
+            continue
+        name = (x.get("mediaName") or x.get("name") or f"file_{i+1}").strip() or f"attachment_{i+1}"
+        mtype = (x.get("mediaType") or x.get("type") or "FILE").strip().upper()
+        if mtype not in ("IMAGE", "DOC", "PDF", "TXT"):
+            mtype = "FILE"
+        url = (x.get("mediaUrl") or x.get("mediaURL") or "").strip()
+        out.append({"mediaName": name, "mediaType": mtype, "mediaUrl": url or None})
+    return out
+
+
 def _is_seller_username(username: Optional[str]) -> bool:
     """True if this is the seller (evamp) so we must not use it as thread title; title must be the buyer."""
     if not username:
@@ -1013,9 +1091,12 @@ async def _sync_from_members_full(
                 existing = existing_by_id.get(msg_id)
                 if existing:
                     existing.is_read = bool(m.get("readStatus", False))
+                    media_list = _normalize_message_media(m.get("messageMedia") or [])
+                    existing.media = media_list if media_list else None
                     continue
                 body = m.get("messageBody") or ""
                 media = m.get("messageMedia") or []
+                media_list = _normalize_message_media(media)
                 if media:
                     attachment_strs = []
                     for i, x in enumerate(media):
@@ -1037,6 +1118,7 @@ async def _sync_from_members_full(
                     sender_username=sender or None,
                     subject=(m.get("subject") or "").strip() or None,
                     content=body,
+                    media=media_list if media_list else None,
                     is_read=bool(m.get("readStatus", False)),
                     ebay_created_at=ebay_created,
                 )
@@ -1220,9 +1302,12 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                         existing = existing_by_id.get(msg_id)
                         if existing:
                             existing.is_read = bool(m.get("readStatus", False))
+                            media_list = _normalize_message_media(m.get("messageMedia") or [])
+                            existing.media = media_list if media_list else None
                             continue
                         body = m.get("messageBody") or ""
                         media = m.get("messageMedia") or []
+                        media_list = _normalize_message_media(media)
                         if media:
                             attachment_strs = []
                             for i, x in enumerate(media):
@@ -1244,6 +1329,7 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                             sender_username=sender or None,
                             subject=(m.get("subject") or "").strip() or None,
                             content=body,
+                            media=media_list if media_list else None,
                             is_read=bool(m.get("readStatus", False)),
                             ebay_created_at=ebay_created,
                         )
@@ -1371,9 +1457,13 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                         existing = existing_ebay_by_id.get(msg_id)
                         if existing:
                             existing.is_read = bool(m.get("readStatus", False))
+                            media_list = _normalize_message_media(m.get("messageMedia") or [])
+                            existing.media = media_list if media_list else None
                             continue
                         raw_body = m.get("messageBody") or ""
                         body = _strip_html_to_text(raw_body) if "<" in raw_body else raw_body
+                        media = m.get("messageMedia") or []
+                        media_list = _normalize_message_media(media)
                         sender = (m.get("senderUsername") or "eBay").strip()
                         subject = (m.get("subject") or "").strip() or None
                         ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
@@ -1384,6 +1474,7 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                             sender_username=sender,
                             subject=subject,
                             content=body,
+                            media=media_list if media_list else None,
                             is_read=bool(m.get("readStatus", False)),
                             ebay_created_at=ebay_created,
                         )

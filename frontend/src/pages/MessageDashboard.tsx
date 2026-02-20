@@ -1,5 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { messagesAPI, settingsAPI, type ThreadSummary, type ThreadDetail, type MessageResp, type EmailTemplate } from '../services/api'
+import { messagesAPI, settingsAPI, type ThreadSummary, type ThreadDetail, type MessageResp, type MessageMediaItem, type EmailTemplate } from '../services/api'
+
+/** eBay CDN: replace _1 or _12 with _57 in image URL to get full-size (zoomed) image. See eBay KB 2194. */
+function ebayImageFullSizeUrl(url: string): string {
+  if (!url || !url.includes('ebayimg.com')) return url
+  return url.replace(/\$_1\./, '$_57.').replace(/\$_12\./, '$_57.')
+}
 
 /** Thread title: the buyer (person evamp talks to). Never show seller; fallback to order ID or "Unknown Buyer". */
 function _threadTitle(
@@ -34,9 +40,12 @@ function getStoredHeight(key: string): number {
 export default function MessageDashboard() {
   const [threads, setThreads] = useState<ThreadSummary[]>([])
   const [selectedThread, setSelectedThread] = useState<ThreadDetail | null>(null)
-  const [sendingEnabled, setSendingEnabled] = useState(false)
   const [_draft, setDraft] = useState('')
   const [replyContent, setReplyContent] = useState('')
+  const [replyAttachments, setReplyAttachments] = useState<MessageMediaItem[]>([])
+  const [uploadingAttachment, setUploadingAttachment] = useState(false)
+  const [replyDragOver, setReplyDragOver] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [aiPromptInstructions, setAiPromptInstructions] = useState('')
   const [loading, setLoading] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -162,15 +171,6 @@ export default function MessageDashboard() {
       // ignore
     }
   }, [selectedEmailTemplate])
-
-  const loadSendingEnabled = useCallback(async () => {
-    try {
-      const res = await messagesAPI.getSendingEnabled()
-      setSendingEnabled(res.data.sending_enabled)
-    } catch {
-      setSendingEnabled(false)
-    }
-  }, [])
 
   const loadThreads = useCallback(async () => {
     setLoading(true)
@@ -307,10 +307,47 @@ export default function MessageDashboard() {
     }
   }
 
+  const handleReplyDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (replyAttachments.length >= 5) {
+      setReplyDragOver(false)
+      return
+    }
+    if (Array.from(e.dataTransfer.types).includes('Files')) setReplyDragOver(true)
+  }, [replyAttachments.length])
+
+  const handleReplyDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    setReplyDragOver(false)
+  }, [])
+
+  const handleReplyDrop = useCallback(async (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setReplyDragOver(false)
+    const files = Array.from(e.dataTransfer.files).filter((f) => f.type.startsWith('image/'))
+    if (files.length === 0) return
+    setUploadingAttachment(true)
+    setError(null)
+    const added: MessageMediaItem[] = []
+    for (const file of files) {
+      if (added.length >= 5) break
+      try {
+        const res = await messagesAPI.uploadMessageMedia(file)
+        added.push(res.data)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Upload failed')
+      }
+    }
+    if (added.length > 0) setReplyAttachments((a) => (a.length + added.length <= 5 ? [...a, ...added] : [...a.slice(0, 5 - added.length), ...added]))
+    setUploadingAttachment(false)
+  }, [])
+
   const handleSend = async () => {
-    if (!selectedThread || !replyContent.trim()) return
-    if (!sendingEnabled) return
+    if (!selectedThread || (!replyContent.trim() && replyAttachments.length === 0)) return
     const content = replyContent.trim()
+    const mediaToSend = replyAttachments.length > 0 ? replyAttachments : undefined
     setError(null)
     const optimisticMsg: MessageResp = {
       message_id: `pending-${Date.now()}`,
@@ -318,7 +355,8 @@ export default function MessageDashboard() {
       sender_type: 'seller',
       sender_username: null,
       subject: null,
-      content,
+      content: content || '(attachment)',
+      media: mediaToSend,
       is_read: true,
       detected_language: null,
       translated_content: null,
@@ -331,9 +369,10 @@ export default function MessageDashboard() {
     })
     setReplyContent('')
     setDraft('')
+    setReplyAttachments([])
     setLoading(true)
     try {
-      await messagesAPI.sendReply(selectedThread.thread_id, content, _draft ? _draft : undefined)
+      await messagesAPI.sendReply(selectedThread.thread_id, content, _draft ? _draft : undefined, mediaToSend)
       loadThread(selectedThread.thread_id)
       loadThreads()
       loadFlaggedCount()
@@ -348,10 +387,9 @@ export default function MessageDashboard() {
   }
 
   useEffect(() => {
-    loadSendingEnabled()
     loadFlaggedCount()
     loadEmailTemplates()
-  }, [loadSendingEnabled, loadFlaggedCount, loadEmailTemplates])
+  }, [loadFlaggedCount, loadEmailTemplates])
 
   useEffect(() => {
     loadThreads()
@@ -902,6 +940,17 @@ export default function MessageDashboard() {
                     className="w-full resize-none rounded border border-gray-300 px-3 py-2 text-sm focus:ring-0 focus:outline-none"
                   />
                 </div>
+                <div className="flex justify-end mb-2">
+                  <button
+                    type="button"
+                    onClick={handleDraft}
+                    disabled={loading}
+                    className="px-3 py-2 bg-gray-100 text-gray-800 rounded hover:bg-gray-200 disabled:opacity-50 text-sm font-medium"
+                    title="Generate draft in the reply box below using instructions above"
+                  >
+                    {loading ? '...' : 'Generate draft'}
+                  </button>
+                </div>
                 {/* Translation for sending */}
                 {detectedLang !== 'en' && replyContent.trim() && (
                   <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
@@ -950,38 +999,80 @@ export default function MessageDashboard() {
                 )}
 
                 <div className="flex flex-col flex-shrink-0 gap-2">
+                  {replyAttachments.length > 0 && (
+                    <div className="flex flex-wrap gap-2 items-center">
+                      {replyAttachments.map((att, idx) => (
+                        <span
+                          key={idx}
+                          className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 rounded text-sm"
+                        >
+                          {att.mediaUrl ? (
+                            <img src={att.mediaUrl} alt="" className="h-8 w-8 object-cover rounded" />
+                          ) : null}
+                          <span className="truncate max-w-[120px]">{att.mediaName}</span>
+                          <button
+                            type="button"
+                            onClick={() => setReplyAttachments((a) => a.filter((_, i) => i !== idx))}
+                            className="text-gray-500 hover:text-red-600"
+                            aria-label="Remove"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   <div className="flex justify-between items-center gap-2">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".jpg,.jpeg,.gif,.png,.bmp,.tiff,.tif,.avif,.heic,.webp,image/*"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0]
+                        if (!file || replyAttachments.length >= 5) return
+                        e.target.value = ''
+                        setUploadingAttachment(true)
+                        try {
+                          const res = await messagesAPI.uploadMessageMedia(file)
+                          setReplyAttachments((a) => [...a, res.data])
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : 'Upload failed')
+                        } finally {
+                          setUploadingAttachment(false)
+                        }
+                      }}
+                    />
                     <button
                       type="button"
-                      onClick={handleDraft}
-                      disabled={loading}
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={loading || uploadingAttachment || replyAttachments.length >= 5}
                       className="px-3 py-2 bg-gray-100 text-gray-800 rounded hover:bg-gray-200 disabled:opacity-50 text-sm font-medium flex-shrink-0"
-                      title="Generate draft in the box below using instructions above"
+                      title="Attach image (JPG, PNG, GIF, etc. Max 5.)"
                     >
-                      {loading ? '...' : 'Generate draft'}
+                      {uploadingAttachment ? 'Uploading…' : 'Attach image'}
                     </button>
-                    <span className="text-xs text-gray-500 truncate min-w-0">
-                      {sendingEnabled
-                        ? 'Sending is enabled. Replies will go to eBay.'
-                        : 'Sending is disabled. Enable ENABLE_MESSAGE_SENDING in .env when ready to test.'}
-                    </span>
                     <button
                       type="button"
                       onClick={handleSend}
-                      disabled={!sendingEnabled || !replyContent.trim() || replyContent.length > 2000 || loading}
+                      disabled={(!replyContent.trim() && replyAttachments.length === 0) || replyContent.length > 2000 || loading}
                       title={
-                        !sendingEnabled
-                          ? 'Sending is disabled for testing. Set ENABLE_MESSAGE_SENDING=true when ready.'
-                          : replyContent.length > 2000
-                            ? 'Message exceeds 2000 character limit.'
-                            : undefined
+                        replyContent.length > 2000
+                          ? 'Message exceeds 2000 character limit.'
+                          : undefined
                       }
                       className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium flex-shrink-0"
                     >
                       Send
                     </button>
                   </div>
-                  <div className="relative flex-shrink-0" style={{ height: replyHeight }}>
+                  <div
+                    className={`relative flex-shrink-0 rounded border transition-colors ${replyDragOver ? 'border-2 border-blue-400 bg-blue-50' : 'border border-gray-300'}`}
+                    style={{ height: replyHeight }}
+                    onDragOver={handleReplyDragOver}
+                    onDragLeave={handleReplyDragLeave}
+                    onDrop={handleReplyDrop}
+                  >
                   <div
                     className="absolute left-0 right-0 top-0 h-2 cursor-ns-resize z-10"
                     style={{ marginTop: -1 }}
@@ -1003,9 +1094,12 @@ export default function MessageDashboard() {
                       minHeight: BOX_HEIGHT_MIN,
                       maxHeight: BOX_HEIGHT_MAX,
                     }}
-                    className={`w-full resize-none rounded border px-3 py-2 text-sm ${
+                    className={`w-full resize-none rounded border-0 px-3 py-2 text-sm bg-transparent focus:ring-0 focus:outline-none ${
                       replyContent.length > 2000 ? 'border-red-500' : 'border-gray-300'
                     }`}
+                    onDragOver={handleReplyDragOver}
+                    onDragLeave={handleReplyDragLeave}
+                    onDrop={handleReplyDrop}
                   />
                   <span
                     className={`absolute bottom-2 right-2 z-20 text-xs ${
@@ -1063,6 +1157,29 @@ function MessageBubble({ message, showTranslation }: { message: MessageResp; sho
         <p className={`text-sm font-medium mb-1 ${subjectClass}`}>{message.subject}</p>
       )}
       <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+      {message.media && message.media.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {message.media.map((att, idx) => (
+            att.mediaUrl && att.mediaType === 'IMAGE'
+              ? (
+                  <a key={idx} href={ebayImageFullSizeUrl(att.mediaUrl)} target="_blank" rel="noopener noreferrer" className="block" title="Open full size">
+                    <img src={att.mediaUrl} alt={att.mediaName} className="max-h-48 rounded border object-contain bg-gray-100 cursor-pointer hover:opacity-90" />
+                  </a>
+                )
+              : (
+                  <a
+                    key={idx}
+                    href={att.mediaUrl || '#'}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-blue-600 hover:underline"
+                  >
+                    {att.mediaName} {att.mediaType !== 'FILE' ? `(${att.mediaType})` : ''}
+                  </a>
+                )
+          ))}
+        </div>
+      )}
       {translation && (
         <div className={`mt-2 pt-2 border-t ${isSeller ? 'border-blue-300' : 'border-gray-300'}`}>
           <p className={`text-xs mb-1 ${isSeller ? 'text-blue-200' : 'text-purple-600'}`}>Translation (English):</p>
