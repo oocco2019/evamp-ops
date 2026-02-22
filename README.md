@@ -17,7 +17,7 @@ A full-stack application for managing eBay stock operations and customer service
 - **Thread Management** (CS02-03) - Organized conversation view
 - **AI Message Drafting** (CS04-06) - Multi-provider AI support
 - **Translation** (CS07-08) - Automatic language detection and translation
-- **Message Sending** (CS09) - Direct eBay API integration; image attachments (attach or drag onto reply box). See [docs/MESSAGE_ATTACHMENTS.md](docs/MESSAGE_ATTACHMENTS.md).
+- **Message Sending** (CS09) - Direct eBay API integration; image attachments (attach or drag onto reply box). Attachment bytes are stored in DB for retention after eBay purges messages. See [docs/MESSAGE_ATTACHMENTS.md](docs/MESSAGE_ATTACHMENTS.md).
 - **Search & Flagging** (CS10-12) - Quick message retrieval
 
 ## Tech Stack

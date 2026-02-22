@@ -23,6 +23,8 @@ Only one sync runs at a time (lock); concurrent calls get 503.
 
 **Sync summary log:** After each sync (full or incremental), the backend appends one JSON line to `backend/logs/sync_summary.log` (created if missing). Fields include `full_sync`, `threads_synced`, `messages_synced`, `ebay_threads_synced`, `ebay_messages_synced`, `at` (ISO timestamp); for incremental runs also `start_time`, `from_members`, `fetch_list`. When a periodic full ran after incremental, `periodic_full_run` is true. Use this file to inspect the last (or history of) sync results without grepping Docker logs.
 
+**Existing threads and messages are not overwritten.** Sync upserts only: if a thread already exists (same `thread_id`), we update its preview, counts, and last_message_at (and set `buyer_username` if it was missing); we never delete or replace the thread. For messages, we load existing rows by `message_id`; existing messages are updated in place (e.g. `is_read`, `media`) and new messages are inserted. The only deletes are `stub-*` threads/messages at the start of each sync (temporary placeholders). Real data is never purged by sync.
+
 ---
 
 ## FROM_MEMBERS (main source of slowness)

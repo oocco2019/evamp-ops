@@ -34,3 +34,8 @@ This doc captures how the Sales Analytics page works and why, so context is pres
 ### Latest orders table removed
 
 - The “Latest orders” table (and its Backfill Order earnings button and “Show 25/50/100 orders” selector) was removed from Sales Analytics. The backfill endpoint (`POST /api/stock/orders/backfill-order-earnings`) still exists on the backend if needed elsewhere.
+
+### Order data retention
+
+- Sales Analytics reads **only from your database** (tables `orders`, `line_items`, `skus`). It does not call eBay when loading the page.
+- Order data is imported from eBay via the stock/order import (e.g. incremental import when you open Sales Analytics). Once imported, it persists in your DB. So you can still run analytics on that data even after eBay no longer returns those orders (e.g. after their retention window).

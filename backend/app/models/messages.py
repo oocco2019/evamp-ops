@@ -3,7 +3,7 @@ Customer service message models
 """
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy import String, Integer, DateTime, Text, Boolean, ForeignKey, JSON
+from sqlalchemy import String, Integer, DateTime, Text, Boolean, ForeignKey, JSON, LargeBinary
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -106,6 +106,31 @@ class Message(Base):
     
     def __repr__(self) -> str:
         return f"<Message {self.message_id} from {self.sender_type}>"
+
+
+class MessageMediaBlob(Base):
+    """
+    Stored copy of message attachment bytes so we retain them after eBay deletes messages.
+    One row per attachment; message_id + media_index match messages.media[i].
+    """
+    __tablename__ = "message_media_blobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    message_id: Mapped[str] = mapped_column(
+        String(100),
+        ForeignKey("messages.message_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    media_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    media_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    media_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    content_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<MessageMediaBlob message_id={self.message_id} index={self.media_index}>"
 
 
 class AIInstruction(Base):

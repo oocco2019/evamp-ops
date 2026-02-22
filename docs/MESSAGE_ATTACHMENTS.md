@@ -1,8 +1,28 @@
 # Message attachments (display and send)
 
-## Where images are stored
+## Where attachments are stored
 
-**Image files are not stored in your local database.** When you attach an image and send (or upload via "Attach image"), the backend sends the file to **eBay Commerce Media API** (Picture Services). eBay hosts the image and returns a URL. The app stores only **metadata** in PostgreSQL: `messages.media` is a JSON array of `{ mediaName, mediaType, mediaUrl }`—i.e. the URL pointing to eBay’s CDN, not the image bytes. Received attachments are also just metadata + URLs from eBay; the actual files live on eBay’s side.
+- **Metadata:** Always in your DB. `messages.media` is a JSON array of `{ mediaName, mediaType, mediaUrl }` (and is kept when syncing or sending).
+- **File bytes (for retention after eBay purge):** The app **stores a copy of attachment bytes** in PostgreSQL so you still have the files when eBay deletes messages (e.g. after ~4 months). When we sync or send a message that has attachments, we fetch each `mediaUrl` and save the bytes in the **`message_media_blobs`** table (one row per attachment: `message_id`, `media_index`, `data` bytea, plus name/type/content-type). Thread detail and images are then served from our DB when a blob exists: the API returns our URL (e.g. `/api/messages/media/{message_id}/{index}`) so the frontend loads the stored copy. If no blob exists yet (e.g. old sync), the API still returns the eBay `mediaUrl`; once synced again or after send, blobs are filled in.
+- **Upload/send flow:** When you attach an image and send, the file is uploaded to eBay (Commerce Media API) and we store the sent message’s media metadata. We then fetch that URL and save the bytes into `message_media_blobs` so we retain it after eBay removes the message.
+
+### When blobs are stored (coverage)
+
+All paths that persist a message with attachments also store the attachment bytes, so **all images from pulled messages are stored** (as long as the fetch of the media URL succeeds; failures are logged and skipped):
+
+| Path | When | Storage |
+|------|------|--------|
+| **Refresh thread** | Single-thread message fetch (open thread / refresh) | After commit, each message with media → `_store_message_media_blobs` |
+| **Send message** | User sends a reply with attachments | After commit, `sent_media` → `_store_message_media_blobs` |
+| **FROM_MEMBERS full sync** | Full sync (no start_time) | After commit, collected `messages_with_media` → store each |
+| **FROM_MEMBERS incremental** | Incremental sync (conversations since last sync) | After commit, `incr_messages_with_media` → store each |
+| **FROM_EBAY sync** | eBay system messages (returns, cases, etc.) | After each page commit, `ebay_page_messages_with_media` → store each |
+
+Existing blobs are skipped (no re-fetch). To verify storage, query the table (use your DB user, e.g. `evamp`):
+
+```bash
+docker compose exec postgres psql -U evamp -d evamp_ops -c "SELECT message_id, media_index, media_name, length(data) FROM message_media_blobs LIMIT 10;"
+```
 
 ## Display (received messages)
 
