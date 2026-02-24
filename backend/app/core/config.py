@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # CORS & Frontend (for OAuth redirects)
     CORS_ORIGINS: str = "http://localhost:5173"
     FRONTEND_URL: str = "http://localhost:5173"
+    # Optional: public base URL of this API (e.g. https://api.yourdomain.com). Used for message attachment URLs
+    # so images load in the browser when the app is behind a proxy. If unset, request.base_url is used.
+    API_PUBLIC_BASE_URL: str = ""
     
     # eBay API (from .env)
     EBAY_APP_ID: str = ""

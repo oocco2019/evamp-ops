@@ -223,8 +223,9 @@ async def list_threads(
 
 
 def _media_url_for_response(request: Request, message_id: str, media_index: int, fallback_url: Optional[str]) -> str:
-    """Return our stored-media URL when we have a blob, else fallback (eBay URL)."""
-    return f"{request.base_url.rstrip('/')}/api/messages/media/{message_id}/{media_index}"
+    """Return URL for our stored-media endpoint so the frontend can load the image. Use API_PUBLIC_BASE_URL when set (e.g. behind proxy)."""
+    base = (settings.API_PUBLIC_BASE_URL or "").strip() or str(request.base_url).rstrip("/")
+    return f"{base}/api/messages/media/{message_id}/{media_index}"
 
 
 @router.get("/threads/{thread_id}", response_model=ThreadDetail)
@@ -234,6 +235,24 @@ async def get_thread(
     db: AsyncSession = Depends(get_db),
 ):
     """Get a thread with all messages. Media URLs point to our stored blobs when available."""
+    try:
+        return await _get_thread_impl(thread_id, request, db)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_thread failed for thread_id=%s", thread_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"{type(e).__name__}: {e}",
+        ) from e
+
+
+async def _get_thread_impl(
+    thread_id: str,
+    request: Request,
+    db: AsyncSession,
+) -> ThreadDetail:
+    """Implementation of get_thread so we can catch and report any exception."""
     result = await db.execute(
         select(MessageThread)
         .where(MessageThread.thread_id == thread_id)
@@ -242,7 +261,7 @@ async def get_thread(
     thread = result.scalar_one_or_none()
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
-    msgs = sorted(thread.messages, key=lambda m: m.ebay_created_at)
+    msgs = sorted(thread.messages, key=lambda m: m.ebay_created_at or datetime.min.replace(tzinfo=None))
     msg_ids = [m.message_id for m in msgs]
     blob_result = await db.execute(
         select(MessageMediaBlob.message_id, MessageMediaBlob.media_index).where(
@@ -250,16 +269,25 @@ async def get_thread(
         )
     )
     stored_set = {(row[0], row[1]) for row in blob_result.all()}
+
     def build_media_items(m: Message) -> Optional[List[MessageMediaItem]]:
         if not m.media:
             return None
         out = []
         for i, x in enumerate(m.media):
-            url = (x.get("mediaUrl") or "").strip() if isinstance(x, dict) else None
+            url = (x.get("mediaUrl") or x.get("mediaURL") or "").strip() if isinstance(x, dict) else None
             if (m.message_id, i) in stored_set:
                 url = _media_url_for_response(request, m.message_id, i, url)
-            out.append(MessageMediaItem(mediaName=x.get("mediaName") or "", mediaType=x.get("mediaType") or "FILE", mediaUrl=url))
+            if isinstance(x, dict):
+                out.append(
+                    MessageMediaItem(
+                        mediaName=x.get("mediaName") or "",
+                        mediaType=x.get("mediaType") or "FILE",
+                        mediaUrl=url,
+                    )
+                )
         return out or None
+
     buyer_display = thread.buyer_username
     if not buyer_display or _is_seller_username(buyer_display):
         buyer_display = next(
@@ -269,6 +297,44 @@ async def get_thread(
     ebay_order_id = thread.ebay_order_id
     if not ebay_order_id and buyer_display:
         ebay_order_id = await _find_order_for_buyer(db, buyer_display)
+
+    def to_message_response(m: Message) -> MessageResponse:
+        media = build_media_items(m)
+        try:
+            content = m.content if isinstance(m.content, str) else (str(m.content)[:10000] if m.content is not None else "")
+            ebay_ts = m.ebay_created_at.isoformat() if m.ebay_created_at else ""
+            created_ts = m.created_at.isoformat() if m.created_at else ""
+            return MessageResponse(
+                message_id=m.message_id,
+                thread_id=m.thread_id,
+                sender_type=m.sender_type or "buyer",
+                sender_username=m.sender_username,
+                subject=m.subject,
+                content=content,
+                media=media,
+                is_read=m.is_read,
+                detected_language=m.detected_language,
+                translated_content=m.translated_content,
+                ebay_created_at=ebay_ts,
+                created_at=created_ts,
+            )
+        except Exception as e:
+            logger.warning("get_thread: MessageResponse failed message_id=%s: %s", getattr(m, "message_id", "?"), e)
+            return MessageResponse(
+                message_id=getattr(m, "message_id", ""),
+                thread_id=thread_id,
+                sender_type=getattr(m, "sender_type", "buyer"),
+                sender_username=getattr(m, "sender_username", None),
+                subject=None,
+                content="[Message could not be loaded]",
+                media=media,
+                is_read=False,
+                detected_language=None,
+                translated_content=None,
+                ebay_created_at="",
+                created_at="",
+            )
+
     return ThreadDetail(
         thread_id=thread.thread_id,
         buyer_username=buyer_display,
@@ -277,25 +343,47 @@ async def get_thread(
         sku=thread.sku,
         tracking_number=thread.tracking_number,
         is_flagged=thread.is_flagged,
-        created_at=thread.created_at.isoformat(),
-        messages=[
-            MessageResponse(
-                message_id=m.message_id,
-                thread_id=m.thread_id,
-                sender_type=m.sender_type,
-                sender_username=m.sender_username,
-                subject=m.subject,
-                content=m.content,
-                media=build_media_items(m),
-                is_read=m.is_read,
-                detected_language=m.detected_language,
-                translated_content=m.translated_content,
-                ebay_created_at=m.ebay_created_at.isoformat(),
-                created_at=m.created_at.isoformat(),
-            )
-            for m in msgs
-        ],
+        created_at=(thread.created_at.isoformat() if thread.created_at else ""),
+        messages=[to_message_response(m) for m in msgs],
     )
+
+
+@router.get("/debug/media-audit")
+async def debug_media_audit(
+    thread_id: Optional[str] = Query(None, description="Optional thread to restrict audit to"),
+    limit: int = Query(5, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Diagnostic: list messages that have media in DB, their raw media JSON, and blob presence.
+    Use ?thread_id=xxx to restrict to one thread. Helps verify why images might not show.
+    """
+    q = select(Message).where(Message.media.isnot(None)).order_by(Message.created_at.desc()).limit(500)
+    if thread_id:
+        q = q.where(Message.thread_id == thread_id)
+    result = await db.execute(q)
+    candidates = result.scalars().all()
+    with_media = [m for m in candidates if m.media and isinstance(m.media, list) and len(m.media) > 0][:limit]
+    if not with_media:
+        return {"message": "No messages with non-empty media found.", "sample_thread_id": thread_id}
+    msg_ids = [m.message_id for m in with_media]
+    blob_result = await db.execute(
+        select(MessageMediaBlob.message_id, MessageMediaBlob.media_index).where(
+            MessageMediaBlob.message_id.in_(msg_ids)
+        )
+    )
+    blob_set = {(r[0], r[1]) for r in blob_result.all()}
+    out = []
+    for m in with_media:
+        raw = m.media
+        items = []
+        for i, x in enumerate(raw):
+            item = isinstance(x, dict) and x or {}
+            url = (item.get("mediaUrl") or item.get("mediaURL") or "").strip() or None
+            has_blob = (m.message_id, i) in blob_set
+            items.append({"index": i, "raw_keys": list(item.keys()) if item else [], "mediaUrl_from_db": url, "has_blob": has_blob})
+        out.append({"message_id": m.message_id, "thread_id": m.thread_id, "media_length": len(raw), "items": items})
+    return {"count": len(out), "messages": out}
 
 
 @router.get("/media/{message_id}/{media_index}", response_class=Response)
@@ -550,7 +638,13 @@ async def send_reply(
     # Store sent message in DB
     ebay_message_id = ebay_response.get("messageId") or f"sent-{datetime.now(timezone.utc).isoformat()}"
     ebay_created = _parse_iso_to_naive_utc(ebay_response.get("createdDate")) or datetime.utcnow()
-    seller_username = (settings.EBAY_SELLER_USERNAME or "").strip() or ebay_response.get("senderUserName") or "seller"
+    seller_username = (settings.EBAY_SELLER_USERNAME or "").strip() or ebay_response.get("senderUserName")
+    if not seller_username or seller_username.lower() == "seller":
+        for m in sorted(thread.messages, key=lambda x: x.ebay_created_at):
+            if m.sender_type == "seller" and (m.sender_username or "").strip():
+                seller_username = (m.sender_username or "").strip()
+                break
+    seller_username = seller_username or "seller"
     sent_media = _normalize_message_media(ebay_response.get("messageMedia") or [])
     new_msg = Message(
         message_id=ebay_message_id,
@@ -947,6 +1041,8 @@ def _parse_iso_to_naive_utc(iso_str: Optional[str]) -> Optional[datetime]:
 
 def _normalize_message_media(raw: List[Any]) -> List[dict]:
     """Build list of {mediaName, mediaType, mediaUrl} for storage/API. eBay types: IMAGE, DOC, PDF, TXT."""
+    if not isinstance(raw, list):
+        return []
     out: List[dict] = []
     for i, x in enumerate(raw):
         if not isinstance(x, dict):
@@ -960,6 +1056,16 @@ def _normalize_message_media(raw: List[Any]) -> List[dict]:
     return out
 
 
+def _ebay_image_full_size_url(url: str) -> str:
+    """
+    Rewrite eBay CDN image URL to full-size. eBay uses _1 or _12 for thumbnails; _57 is full-size.
+    See eBay KB 2194. If not an ebayimg.com URL, return unchanged.
+    """
+    if not url or "ebayimg.com" not in url:
+        return url
+    return url.replace("$_1.", "$_57.").replace("$_12.", "$_57.")
+
+
 async def _store_message_media_blobs(
     db: AsyncSession,
     message_id: str,
@@ -968,6 +1074,7 @@ async def _store_message_media_blobs(
     """
     For each attachment with a mediaUrl, fetch the file and store in message_media_blobs
     so we retain it after eBay deletes messages. Skips if blob already exists; logs and skips on fetch error.
+    For eBay CDN image URLs we fetch the full-size version (_57) so "open in new tab" shows full-size.
     """
     if not media_list:
         return
@@ -975,13 +1082,18 @@ async def _store_message_media_blobs(
         url = (item.get("mediaUrl") or "").strip() if isinstance(item, dict) else None
         if not url or not url.startswith("http"):
             continue
-        existing = await db.execute(
+        mtype = (item.get("mediaType") or item.get("type") or "FILE") if isinstance(item, dict) else "FILE"
+        is_ebay_image = mtype == "IMAGE" and url and "ebayimg.com" in url
+        if is_ebay_image:
+            url = _ebay_image_full_size_url(url)
+        result = await db.execute(
             select(MessageMediaBlob).where(
                 MessageMediaBlob.message_id == message_id,
                 MessageMediaBlob.media_index == idx,
             )
         )
-        if existing.scalar_one_or_none():
+        existing_row = result.scalar_one_or_none()
+        if existing_row and not is_ebay_image:
             continue
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -995,16 +1107,21 @@ async def _store_message_media_blobs(
         if not data:
             continue
         name = item.get("mediaName") or item.get("name") or f"file_{idx+1}" if isinstance(item, dict) else f"file_{idx+1}"
-        mtype = (item.get("mediaType") or item.get("type") or "FILE") if isinstance(item, dict) else "FILE"
-        blob = MessageMediaBlob(
-            message_id=message_id,
-            media_index=idx,
-            media_name=name,
-            media_type=mtype,
-            content_type=content_type,
-            data=data,
-        )
-        db.add(blob)
+        if existing_row:
+            existing_row.data = data
+            existing_row.content_type = content_type
+            existing_row.media_name = name
+            existing_row.media_type = mtype
+        else:
+            blob = MessageMediaBlob(
+                message_id=message_id,
+                media_index=idx,
+                media_name=name,
+                media_type=mtype,
+                content_type=content_type,
+                data=data,
+            )
+            db.add(blob)
     try:
         await db.commit()
     except Exception as e:
@@ -1197,49 +1314,52 @@ async def _sync_from_members_full(
                 if not thread.buyer_username and buyer_name:
                     thread.buyer_username = buyer_name
             for m in msgs:
-                msg_id = m.get("messageId")
-                if not msg_id:
-                    continue
-                existing = existing_by_id.get(msg_id)
-                if existing:
-                    existing.is_read = bool(m.get("readStatus", False))
-                    media_list = _normalize_message_media(m.get("messageMedia") or [])
-                    existing.media = media_list if media_list else None
+                try:
+                    msg_id = m.get("messageId")
+                    if not msg_id:
+                        continue
+                    existing = existing_by_id.get(msg_id)
+                    if existing:
+                        existing.is_read = bool(m.get("readStatus", False))
+                        media_list = _normalize_message_media(m.get("messageMedia") or [])
+                        existing.media = media_list if media_list else None
+                        if media_list:
+                            messages_with_media.append((msg_id, media_list))
+                        continue
+                    body = m.get("messageBody") or ""
+                    media = m.get("messageMedia") or []
+                    media_list = _normalize_message_media(media)
+                    if media:
+                        attachment_strs = []
+                        for i, x in enumerate(media):
+                            if isinstance(x, dict):
+                                name = x.get("mediaName") or x.get("name") or f"file_{i+1}"
+                                mtype = x.get("mediaType") or x.get("type") or "FILE"
+                                attachment_strs.append(f"[{mtype}: {name}]")
+                            else:
+                                attachment_strs.append(f"[Attachment {i+1}]")
+                        if attachment_strs:
+                            body = body + "\n" + " ".join(attachment_strs) if body else " ".join(attachment_strs)
+                    sender = (m.get("senderUsername") or "").strip()
+                    sender_type = "seller" if seller_username and sender.lower() == seller_username else "buyer"
+                    ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
+                    new_msg = Message(
+                        message_id=msg_id,
+                        thread_id=conversation_id,
+                        sender_type=sender_type,
+                        sender_username=sender or None,
+                        subject=(m.get("subject") or "").strip() or None,
+                        content=body,
+                        media=media_list if media_list else None,
+                        is_read=bool(m.get("readStatus", False)),
+                        ebay_created_at=ebay_created,
+                    )
+                    db.add(new_msg)
+                    messages_added += 1
                     if media_list:
                         messages_with_media.append((msg_id, media_list))
-                    continue
-                body = m.get("messageBody") or ""
-                media = m.get("messageMedia") or []
-                media_list = _normalize_message_media(media)
-                if media:
-                    attachment_strs = []
-                    for i, x in enumerate(media):
-                        if isinstance(x, dict):
-                            name = x.get("mediaName") or x.get("name") or f"file_{i+1}"
-                            mtype = x.get("mediaType") or x.get("type") or "FILE"
-                            attachment_strs.append(f"[{mtype}: {name}]")
-                        else:
-                            attachment_strs.append(f"[Attachment {i+1}]")
-                    if attachment_strs:
-                        body = body + "\n" + " ".join(attachment_strs) if body else " ".join(attachment_strs)
-                sender = (m.get("senderUsername") or "").strip()
-                sender_type = "seller" if seller_username and sender.lower() == seller_username else "buyer"
-                ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
-                new_msg = Message(
-                    message_id=msg_id,
-                    thread_id=conversation_id,
-                    sender_type=sender_type,
-                    sender_username=sender or None,
-                    subject=(m.get("subject") or "").strip() or None,
-                    content=body,
-                    media=media_list if media_list else None,
-                    is_read=bool(m.get("readStatus", False)),
-                    ebay_created_at=ebay_created,
-                )
-                db.add(new_msg)
-                messages_added += 1
-                if media_list:
-                    messages_with_media.append((msg_id, media_list))
+                except Exception as e:
+                    logger.warning("Sync: skip message in conversation %s (msg %s): %s", conversation_id, m.get("messageId"), e)
             if msgs:
                 last_msg = max(msgs, key=lambda m: m.get("createdDate") or "")
                 thread.last_message_at = _parse_iso_to_naive_utc(last_msg.get("createdDate"))

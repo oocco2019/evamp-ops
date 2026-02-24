@@ -103,6 +103,14 @@ export default function MessageDashboard() {
   const recognitionRef = useRef<SpeechRecognition | null>(null)
   const transcriptChunksRef = useRef<string[]>([])
   const skipAppendOnEndRef = useRef(false)
+  const promptInstructionsRef = useRef(aiPromptInstructions)
+  const liveTranscriptRef = useRef(liveTranscript)
+  useEffect(() => {
+    promptInstructionsRef.current = aiPromptInstructions
+  }, [aiPromptInstructions])
+  useEffect(() => {
+    liveTranscriptRef.current = liveTranscript
+  }, [liveTranscript])
 
   const toggleVoiceInstructions = useCallback(() => {
     const SpeechRecognitionAPI =
@@ -115,6 +123,15 @@ export default function MessageDashboard() {
     setVoiceError(null)
 
     if (voiceRecording) {
+      skipAppendOnEndRef.current = true
+      const currentInstructions = promptInstructionsRef.current ?? ''
+      const currentLive = liveTranscriptRef.current ?? ''
+      const finalText = currentLive
+        ? (currentInstructions ? `${currentInstructions}\n${currentLive}` : currentLive)
+        : currentInstructions
+      setAiPromptInstructions(finalText)
+      setLiveTranscript('')
+      transcriptChunksRef.current = []
       if (recognitionRef.current) {
         recognitionRef.current.stop()
       }
@@ -239,7 +256,11 @@ export default function MessageDashboard() {
       loadFlaggedCount()
       loadThreads()
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to load thread')
+      const ax = e as { response?: { data?: { detail?: string | string[] }; status?: number }; message?: string }
+      const detail = ax.response?.data?.detail
+      const detailStr = Array.isArray(detail) ? detail.join(' ') : typeof detail === 'string' ? detail : ''
+      const msg = detailStr || (e instanceof Error ? e.message : 'Failed to load thread')
+      setError(msg)
       setSelectedThread(null)
     } finally {
       setLoading(false)
@@ -904,9 +925,9 @@ export default function MessageDashboard() {
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto p-4 space-y-4">
                 {selectedThread.messages.map((m) => (
-                  <MessageBubble 
-                    key={m.message_id} 
-                    message={m} 
+                  <MessageBubble
+                    key={m.message_id}
+                    message={m}
                     showTranslation={showTranslation}
                   />
                 ))}
@@ -963,18 +984,24 @@ export default function MessageDashboard() {
                   <textarea
                     value={
                       voiceRecording
-                        ? aiPromptInstructions + (liveTranscript ? (aiPromptInstructions ? '\n' : '') + liveTranscript : '')
+                        ? (() => {
+                            const base = aiPromptInstructions ?? ''
+                            const live = (liveTranscript ?? '').trim()
+                            if (!live) return base
+                            if (base.endsWith(live)) return base
+                            const at = base.indexOf(live)
+                            if (at !== -1 && (at === 0 || /\s/.test(base[at - 1])) && (at + live.length === base.length || (base[at + live.length] != null && /\s/.test(base[at + live.length]))))
+                              return base
+                            return base ? `${base}\n${liveTranscript}` : liveTranscript
+                          })()
                         : aiPromptInstructions
                     }
                     onChange={(e) => {
                       const newValue = e.target.value
                       if (voiceRecording) {
-                        if (liveTranscript && newValue.endsWith(liveTranscript)) {
-                          setAiPromptInstructions(newValue.slice(0, -liveTranscript.length).trimEnd())
-                        } else {
-                          setAiPromptInstructions(newValue)
-                          setLiveTranscript('')
-                        }
+                        setAiPromptInstructions(newValue)
+                        setLiveTranscript('')
+                        transcriptChunksRef.current = []
                       } else {
                         setAiPromptInstructions(newValue)
                       }
