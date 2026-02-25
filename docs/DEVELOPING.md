@@ -77,6 +77,17 @@ Only rebuild when dependencies or Dockerfiles change:
 - **Frontend (npm deps or Dockerfile):**  
   `make build` then `make up`
 
+## Avoiding regressions
+
+Some features have **behavior docs** and **tests** that lock in how they work. Before changing those areas, read the doc and run the relevant tests so you don’t break behavior that was previously fixed.
+
+| Area | Doc | Tests |
+|------|-----|--------|
+| Message attachments (thread API, media URLs, blobs) | [MESSAGE_ATTACHMENTS.md](MESSAGE_ATTACHMENTS.md) | — |
+| Voice instructions (AI instructions textarea while recording) | [VOICE_INSTRUCTIONS.md](VOICE_INSTRUCTIONS.md) | `frontend/src/utils/voiceInstructionsDisplay.test.ts` |
+
+**Rule:** When editing code covered by a behavior doc, read the doc first. Do not re-introduce pitfalls that the doc warns against. After your change, run `npm run test` (in `frontend/`) so the voice display test still passes; add tests for other areas when you touch them.
+
 ## Troubleshooting
 
 | Symptom | What to check |

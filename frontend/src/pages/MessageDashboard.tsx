@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { messagesAPI, settingsAPI, type ThreadSummary, type ThreadDetail, type MessageResp, type MessageMediaItem, type EmailTemplate } from '../services/api'
+import { getInstructionsDisplayValue } from '../utils/voiceInstructionsDisplay'
 
 /** eBay CDN: replace _1 or _12 with _57 in image URL to get full-size (zoomed) image. See eBay KB 2194. */
 function ebayImageFullSizeUrl(url: string): string {
@@ -145,18 +146,18 @@ export default function MessageDashboard() {
       recognition.lang = 'en-US'
       recognition.onresult = (e: SpeechRecognitionEvent) => {
         const chunks = transcriptChunksRef.current
-        let interim = ''
+        let longestInterim = ''
         for (let i = e.resultIndex; i < e.results.length; i++) {
           const result = e.results[i]
           const text = result[0]?.transcript?.trim() ?? ''
           if (result.isFinal && text) {
             chunks.push(text)
-          } else {
-            interim = text
+          } else if (text && text.length > longestInterim.length) {
+            longestInterim = text
           }
         }
         const finalSoFar = chunks.join(' ')
-        setLiveTranscript(interim ? `${finalSoFar} ${interim}`.trim() : finalSoFar)
+        setLiveTranscript(longestInterim ? `${finalSoFar} ${longestInterim}`.trim() : finalSoFar)
       }
       recognition.onend = () => {
         if (skipAppendOnEndRef.current) {
@@ -982,20 +983,7 @@ export default function MessageDashboard() {
                     aria-hidden
                   />
                   <textarea
-                    value={
-                      voiceRecording
-                        ? (() => {
-                            const base = aiPromptInstructions ?? ''
-                            const live = (liveTranscript ?? '').trim()
-                            if (!live) return base
-                            if (base.endsWith(live)) return base
-                            const at = base.indexOf(live)
-                            if (at !== -1 && (at === 0 || /\s/.test(base[at - 1])) && (at + live.length === base.length || (base[at + live.length] != null && /\s/.test(base[at + live.length]))))
-                              return base
-                            return base ? `${base}\n${liveTranscript}` : liveTranscript
-                          })()
-                        : aiPromptInstructions
-                    }
+                    value={getInstructionsDisplayValue(voiceRecording, aiPromptInstructions ?? '', liveTranscript ?? '')}
                     onChange={(e) => {
                       const newValue = e.target.value
                       if (voiceRecording) {

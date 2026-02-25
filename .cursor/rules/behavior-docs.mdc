@@ -1,0 +1,19 @@
+---
+description: Before changing behavior-doc areas, read the doc and run tests to avoid regressions
+globs: frontend/src/pages/MessageDashboard.tsx, frontend/src/utils/voiceInstructionsDisplay.ts, backend/app/api/messages.py
+alwaysApply: false
+---
+
+# Behavior docs — avoid breaking working features
+
+When editing these files, the project has **behavior docs** that describe how things work and known pitfalls. Regressions have happened here before.
+
+1. **Read the relevant doc first** and check its **Requirements** (or equivalent) section:
+   - Voice instructions (MessageDashboard, voiceInstructionsDisplay): `docs/VOICE_INSTRUCTIONS.md` — e.g. textarea must stay editable while recording; do not make it read-only.
+   - Message attachments / thread API / media blobs: `docs/MESSAGE_ATTACHMENTS.md`
+
+2. **Do not change behavior that conflicts with stated requirements** without explicit agreement. Do not re-introduce pitfalls described in those docs (e.g. do not hide live transcript; do not use `request.base_url.rstrip()` without `str()`).
+
+3. **Run tests after your change:** `cd frontend && npm run test` (voice display tests are in `frontend/src/utils/voiceInstructionsDisplay.test.ts`).
+
+See `docs/BEHAVIOR_DOCS.md` for the full list and rationale.
