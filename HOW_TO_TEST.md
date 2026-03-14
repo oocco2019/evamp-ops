@@ -105,8 +105,8 @@ pip3 install cryptography
 - [ ] Add AI model → Appears with "Default" badge
 - [ ] Add warehouse → Appears in list
 - [ ] Refresh page → Data persists
-- [ ] Navigation → All links work (Analytics, SKUs, Messages, Get video ID, Settings)
-- [ ] Get video ID (Listing video) → Enter item number or URL → returns video ID(s) or "No video"
+- [ ] Navigation → All links work (Analytics, SKUs, Messages, Video ID getter, Settings)
+- [ ] Video ID getter → Enter listing URL or item number → returns video ID(s) or "No video"
 
 **Database:**
 - [ ] Data persists after refresh
@@ -155,14 +155,13 @@ pip3 install cryptography
 
 ---
 
-## Listing video (Get video ID)
+## Video ID getter
 
-1. Open **Get video ID** (or `/listing-video`).
-2. Enter a listing URL (e.g. `https://www.ebay.co.uk/itm/136528644539`), item number (`136528644539`), or SKU (for Inventory API listings).
+1. Open **Video ID getter** in the nav (or go to `/listing-video`).
+2. Enter a **listing URL** (e.g. `https://www.ebay.co.uk/itm/136528644539`) or **item number** (e.g. `136528644539`) only.
 3. Click **Get video ID**. You should get title and video ID(s) or "No video".
-4. **CSV/legacy listings:** Listings created via Seller Hub CSV have no Inventory API record; video comes from Trading API GetItem with `DetailLevel=ReturnAll` (VideoDetails/VideoID). Ensure `EBAY_MARKETPLACE_ID` matches the listing site (e.g. EBAY_GB for ebay.co.uk).
-5. **Video ID:** Use the returned ID with exact character count when adding to other listings (no truncation or padding).
-6. **If you get stuck:** Write a short summary (what you tried, errors, screenshots) and ask Claude (or another model). See `docs/GET_VIDEO_ID_HANDOFF.md` for full technical details and the "If you get stuck" note.
+4. **Video ID:** Use the returned ID with exact character count when adding to other listings (no truncation or padding).
+5. **If you get stuck:** See `docs/GET_VIDEO_ID_HANDOFF.md` for technical details; write a short summary and ask Claude or another model.
 
 ---
 
