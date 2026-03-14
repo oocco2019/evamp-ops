@@ -447,6 +447,20 @@ export const messagesAPI = {
     ),
 }
 
+// Get video ID from an eBay listing (item number or URL)
+export interface VideoIdResponse {
+  item_number: string
+  video_ids: string[]
+  title: string | null
+}
+
+export const listingVideoAPI = {
+  getVideoId: (itemNumberOrUrl: string) =>
+    api.get<VideoIdResponse>('/api/listing-video/video-id', {
+      params: { item_number: itemNumberOrUrl.trim() },
+    }),
+}
+
 // Health check
 export const healthCheck = () => api.get('/health')
 

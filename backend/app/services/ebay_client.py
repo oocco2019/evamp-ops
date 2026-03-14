@@ -775,3 +775,232 @@ async def upload_image_for_message(
             "mediaName": filename or "image.jpg",
             "mediaType": "IMAGE",
         }
+
+
+# --- Trading API GetItem (by item ID) ---
+# https://developer.ebay.com/devzone/xml/docs/reference/ebay/getitem.html
+# Uses same user OAuth token via X-EBAY-API-IAF-TOKEN. Returns listing details including SKU when listing is SKU-tracked.
+
+# Marketplace ID (REST) -> Trading API SiteID
+_EBAY_MARKETPLACE_TO_SITE_ID: Dict[str, int] = {
+    "EBAY_US": 0,
+    "EBAY_CA": 2,
+    "EBAY_GB": 3,
+    "EBAY_AU": 15,
+    "EBAY_AT": 16,
+    "EBAY_DE": 77,
+    "EBAY_FR": 71,
+    "EBAY_IT": 101,
+    "EBAY_ES": 186,
+}
+
+
+async def trading_get_item(access_token: str, item_id: str) -> Dict[str, Any]:
+    """
+    Trading API GetItem: get listing by item ID (e.g. 136528644539 from ebay.com/itm/136528644539).
+    Uses settings.EBAY_MARKETPLACE_ID for SiteID (e.g. EBAY_GB = UK).
+    Returns {"sku": "...", "title": "..."} when listing has SKU; SKU may be None for legacy listings.
+    Raises httpx.HTTPStatusError on HTTP errors; on API errors (e.g. invalid item) response body is in exception.
+    """
+    import logging
+    import xml.etree.ElementTree as ET
+
+    log = logging.getLogger(__name__)
+    item_id = str(item_id).strip()
+    mkt = (settings.EBAY_MARKETPLACE_ID or "EBAY_GB").strip().upper()
+    site_id = _EBAY_MARKETPLACE_TO_SITE_ID.get(mkt, 3)
+    url = "https://api.ebay.com/ws/api.dll"
+    payload = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        "<GetItemRequest xmlns=\"urn:ebay:apis:eBLBaseComponents\">"
+        "<DetailLevel>ReturnAll</DetailLevel>"
+        f"<ItemID>{item_id}</ItemID>"
+        "</GetItemRequest>"
+    )
+    headers = {
+        "X-EBAY-API-IAF-TOKEN": access_token,
+        "X-EBAY-API-CALL-NAME": "GetItem",
+        "X-EBAY-API-SITEID": str(site_id),
+        "X-EBAY-API-COMPATIBILITY-LEVEL": "1085",
+        "Content-Type": "application/xml",
+    }
+    log.info("listing_video: trading_get_item item_id=%s site_id=%s", item_id, site_id)
+    async with httpx.AsyncClient() as client:
+        r = await client.post(url, content=payload, headers=headers)
+    log.info("listing_video: trading_get_item status=%s", r.status_code)
+    if r.status_code != 200:
+        log.warning("listing_video: trading_get_item body=%s", (r.text or "")[:500])
+        r.raise_for_status()
+
+    root = ET.fromstring(r.text or "")
+    # eBay response uses default namespace urn:ebay:apis:eBLBaseComponents; ET exposes as {uri}LocalName
+    NS = "urn:ebay:apis:eBLBaseComponents"
+    errors = root.findall(f".//{{{NS}}}Errors/{{{NS}}}Error")
+    if not errors:
+        errors = root.findall(".//Errors/Error")
+    if errors:
+        err = errors[0]
+        code = err.find(f"{{{NS}}}ErrorCode") or err.find("ErrorCode")
+        short = err.find(f"{{{NS}}}ShortMessage") or err.find("ShortMessage")
+        code_val = code.text if code is not None else ""
+        msg = (short.text if short is not None else "") or "Trading API error"
+        log.warning("listing_video: trading_get_item API error code=%s msg=%s", code_val, msg)
+        raise httpx.HTTPStatusError(
+            msg,
+            request=r.request,
+            response=r,
+        )
+
+    item = root.find(f".//{{{NS}}}Item") or root.find(".//Item")
+    if item is None:
+        raise httpx.HTTPStatusError(
+            "GetItem response missing Item",
+            request=r.request,
+            response=r,
+        )
+    sku_el = item.find(f"{{{NS}}}SKU") or item.find("SKU")
+    title_el = item.find(f"{{{NS}}}Title") or item.find("Title")
+    sku = (sku_el.text or "").strip() or None if sku_el is not None else None
+    title = (title_el.text or "").strip() or None if title_el is not None else None
+    video_ids: List[str] = []
+    video_details = item.find(f"{{{NS}}}VideoDetails") or item.find("VideoDetails")
+    if video_details is not None:
+        for vid_el in video_details.findall(f"{{{NS}}}VideoID") or video_details.findall("VideoID") or []:
+            if vid_el.text and (v := (vid_el.text or "").strip()):
+                video_ids.append(v)  # preserve exact character count; do not truncate
+    log.info("listing_video: trading_get_item sku=%s title=%s video_ids=%s", sku, (title[:50] + "..." if title and len(title) > 50 else title), video_ids)
+    return {"sku": sku, "title": title, "item_id": item_id, "video_ids": video_ids}
+
+
+# --- Sell Inventory API (listing / video on inventory item) ---
+# Requires sell.inventory scope. Base: api.ebay.com
+# https://developer.ebay.com/api-docs/sell/inventory/resources/inventory_item/methods/getInventoryItem
+# https://developer.ebay.com/api-docs/sell/inventory/resources/inventory_item/methods/createOrReplaceInventoryItem
+
+
+def _encode_sku(sku: str) -> str:
+    """URL-encode SKU for path (eBay allows special chars in SKU)."""
+    from urllib.parse import quote
+    return quote(str(sku).strip(), safe="")
+
+
+async def get_inventory_items(
+    access_token: str, limit: int = 100, offset: int = 0
+) -> Dict[str, Any]:
+    """
+    List inventory item SKUs (getInventoryItems). Returns paginated { inventoryItems: [ { sku }, ... ], total, ... }.
+    Used to search for which SKU has a given listingId.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{settings.EBAY_API_URL}/sell/inventory/v1/inventory_item",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            params={"limit": limit, "offset": offset},
+        )
+        log.info("listing_video: get_inventory_items status=%s", r.status_code)
+        r.raise_for_status()
+        return r.json()
+
+
+async def get_offers(access_token: str, sku: str) -> Dict[str, Any]:
+    """
+    Get offers for a SKU (getOffers). Returns { offers: [ { offerId, sku, listing: { listingId }, ... } ], ... }.
+    Used to find which SKU has listingId == item number.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{settings.EBAY_API_URL}/sell/inventory/v1/offer",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            params={"sku": sku},
+        )
+        log.info("listing_video: get_offers sku=%s status=%s", sku, r.status_code)
+        r.raise_for_status()
+        return r.json()
+
+
+async def get_offer(access_token: str, offer_id: str) -> Dict[str, Any]:
+    """
+    Get offer by offer ID (getOffer). Use listing ID (item number) as offer_id when they are the same.
+    Returns offer details including sku so we can fetch the inventory item for videoIds.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    from urllib.parse import quote
+    offer_id = str(offer_id).strip()
+    encoded = quote(offer_id, safe="")
+    url = f"{settings.EBAY_API_URL}/sell/inventory/v1/offer/{encoded}"
+    log.info("listing_video: get_offer request offer_id=%s url=%s", offer_id, url)
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+        )
+        log.info("listing_video: get_offer response status=%s", r.status_code)
+        if r.status_code != 200:
+            log.warning("listing_video: get_offer error body=%s", r.text[:500] if r.text else "")
+        r.raise_for_status()
+        data = r.json()
+        log.info("listing_video: get_offer keys=%s sku=%s inventoryItemId=%s", list(data.keys()) if isinstance(data, dict) else type(data), data.get("sku") if isinstance(data, dict) else None, data.get("inventoryItemId") if isinstance(data, dict) else None)
+        return data
+
+
+async def get_inventory_item(access_token: str, sku: str) -> Dict[str, Any]:
+    """
+    Get inventory item by SKU (getInventoryItem). Returns full item including product (images, videoIds, etc.).
+    Raises httpx.HTTPStatusError on 404 or other API errors.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    encoded = _encode_sku(sku)
+    url = f"{settings.EBAY_API_URL}/sell/inventory/v1/inventory_item/{encoded}"
+    log.info("listing_video: get_inventory_item request sku=%s encoded=%s", sku, encoded)
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+        )
+        log.info("listing_video: get_inventory_item response status=%s", r.status_code)
+        if r.status_code != 200:
+            log.warning("listing_video: get_inventory_item error body=%s", r.text[:500] if r.text else "")
+        r.raise_for_status()
+        data = r.json()
+        product = data.get("product") if isinstance(data, dict) else None
+        video_ids = product.get("videoIds") if isinstance(product, dict) else None
+        log.info("listing_video: get_inventory_item product keys=%s videoIds=%s", list(product.keys()) if isinstance(product, dict) else None, video_ids)
+        return data
+
+
+async def create_or_replace_inventory_item(
+    access_token: str, sku: str, body: Dict[str, Any]
+) -> None:
+    """
+    Create or replace inventory item (createOrReplaceInventoryItem). Use after modifying body (e.g. product.videoIds).
+    Returns 204 No Content on success.
+    """
+    encoded = _encode_sku(sku)
+    async with httpx.AsyncClient() as client:
+        r = await client.put(
+            f"{settings.EBAY_API_URL}/sell/inventory/v1/inventory_item/{encoded}",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        )
+        r.raise_for_status()

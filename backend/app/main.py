@@ -12,6 +12,7 @@ from app.core.database import init_db, close_db
 from app.api import settings as settings_api
 from app.api import stock as stock_api
 from app.api import messages as messages_api
+from app.api import listing_video as listing_video_api
 
 # Configure logging
 logging.basicConfig(
@@ -107,6 +108,11 @@ app.include_router(
     messages_api.router,
     prefix="/api/messages",
     tags=["messages"]
+)
+app.include_router(
+    listing_video_api.router,
+    prefix="/api/listing-video",
+    tags=["listing-video"]
 )
 
 
