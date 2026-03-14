@@ -1,0 +1,14 @@
+---
+description: When the user is frustrated or we're going in circles, suggest writing a summary and asking Claude
+alwaysApply: true
+---
+
+# When stuck or going in circles
+
+If you notice **frustration** or **circular debugging** (same issue revisited, repeated attempts without progress):
+
+1. **Suggest this explicitly:** "If we're going in circles (or you're short on time), write a short summary of what you tried, what failed, and any error messages or screenshots, then ask Claude—or another capable model—for a fresh pass. That often unblocks faster than another round of guesses here."
+
+2. **Keep the summary actionable:** What was the goal, what did you try, what happened (errors, UI, logs), and what you're stuck on. The user can paste that plus link this repo or key files so the other model can continue.
+
+3. **Do not** wait for the user to remember this on their own. Proactively suggest it when the pattern fits (frustration, repeated failures, "nothing works", walking in circles). This applies to **any** development context in this project, not only the Get Video ID / handoff doc.
