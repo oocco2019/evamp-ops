@@ -13,7 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.services.ebay_auth import get_ebay_access_token
-from app.services.ebay_client import trading_get_item, get_inventory_item, get_inventory_items, get_offers
+from app.services.ebay_client import (
+    trading_get_item,
+    get_inventory_item,
+    get_inventory_items,
+    get_offers,
+    create_or_replace_inventory_item,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +45,68 @@ class VideoIdResponse(BaseModel):
     item_number: str
     video_ids: List[str] = Field(default_factory=list, description="eBay video IDs; must be used with exact character count in API calls.")
     title: str | None = None
+
+
+class AddVideoToSkuRequest(BaseModel):
+    video_id: str
+    sku: str
+
+
+class AddVideoToSkuResponse(BaseModel):
+    sku: str
+    video_ids: List[str] = Field(default_factory=list)
+
+
+@router.post("/add-video-to-sku", response_model=AddVideoToSkuResponse)
+async def add_video_to_sku(
+    body: AddVideoToSkuRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Add a video ID to the inventory item for the given SKU. All listings that use this SKU will show the video.
+    Gets the current inventory item, merges the video_id into product.videoIds (no duplicate), then replaces the item.
+    """
+    video_id = (body.video_id or "").strip()
+    sku = (body.sku or "").strip()
+    if not video_id:
+        raise HTTPException(status_code=400, detail="video_id is required.")
+    if not sku:
+        raise HTTPException(status_code=400, detail="sku is required.")
+
+    try:
+        access_token = await get_ebay_access_token(db)
+    except Exception as e:
+        logger.exception("listing_video: get_ebay_access_token failed")
+        raise HTTPException(status_code=503, detail=f"eBay auth failed: {e!s}")
+
+    try:
+        item = await get_inventory_item(access_token, sku)
+    except Exception as e:
+        logger.warning("listing_video: get_inventory_item(sku=%s) failed: %s", sku, e)
+        raise HTTPException(status_code=404, detail=f"SKU '{sku}' not found in your inventory.")
+
+    if not isinstance(item, dict):
+        raise HTTPException(status_code=502, detail="Invalid inventory item response.")
+    product = item.get("product")
+    if not isinstance(product, dict):
+        product = {}
+    existing = list(product.get("videoIds") or [])
+    if not isinstance(existing, list):
+        existing = [existing] if existing else []
+    existing = [str(v).strip() for v in existing if v]
+    if video_id not in existing:
+        existing.append(video_id)
+    product["videoIds"] = existing
+    item["product"] = product
+
+    try:
+        await create_or_replace_inventory_item(access_token, sku, item)
+    except Exception as e:
+        logger.warning("listing_video: create_or_replace_inventory_item failed: %s", e)
+        raise HTTPException(status_code=502, detail=f"Failed to update inventory item: {e!s}")
+
+    logger.info("listing_video: add_video_to_sku success sku=%s video_ids=%s", sku, existing)
+    return AddVideoToSkuResponse(sku=sku, video_ids=existing)
 
 
 @router.get("/video-id", response_model=VideoIdResponse)

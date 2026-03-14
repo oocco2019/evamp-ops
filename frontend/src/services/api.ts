@@ -454,10 +454,20 @@ export interface VideoIdResponse {
   title: string | null
 }
 
+export interface AddVideoToSkuResponse {
+  sku: string
+  video_ids: string[]
+}
+
 export const listingVideoAPI = {
   getVideoId: (itemNumberOrUrl: string) =>
     api.get<VideoIdResponse>('/api/listing-video/video-id', {
       params: { item_number: itemNumberOrUrl.trim() },
+    }),
+  addVideoToSku: (videoId: string, sku: string) =>
+    api.post<AddVideoToSkuResponse>('/api/listing-video/add-video-to-sku', {
+      video_id: videoId.trim(),
+      sku: sku.trim(),
     }),
 }
 

@@ -23,7 +23,9 @@ Single capability: **get video ID(s) from an eBay listing** so the user can reus
     2. **If input is SKU:** Direct `getInventoryItem(access_token, input)` → `product.videoIds`.
   - **Response:** `{ item_number, video_ids: string[], title }`. Each `video_ids` entry is the full ID from eBay; **use exact character count** when passing to eBay APIs (e.g. when adding video to another listing)—do not truncate or pad.
 
-- **Frontend:** "Get video ID" page at `/listing-video`. One input (placeholder: "listing URL or uke03"), one "Get video ID" button, then result (title + video IDs or "No video").
+- **Add video to SKU:** `POST /api/listing-video/add-video-to-sku` with body `{ "video_id": "...", "sku": "..." }`. Gets the inventory item for the SKU, merges the video_id into `product.videoIds` (no duplicate), then `createOrReplaceInventoryItem`. All listings that use this SKU share the same inventory item, so the video appears on all of them (~10 SKUs across 2k+ listings).
+
+- **Frontend:** "Video management" page at `/listing-video`. Section 1: Get video ID (listing URL/item number/SKU). Section 2: Add video to SKU (video ID + SKU inputs, "Add video to SKU" button).
 
 - **Config:** `EBAY_MARKETPLACE_ID` (e.g. EBAY_GB) drives Trading API `X-EBAY-API-SITEID`. Same user OAuth token as Sell API, sent as `X-EBAY-API-IAF-TOKEN` for GetItem.
 
