@@ -459,16 +459,135 @@ export interface AddVideoToSkuResponse {
   video_ids: string[]
 }
 
+export type AddVideoToSkuEvent =
+  | { type: 'progress'; message: string }
+  | { type: 'listing_count'; count: number }
+  | { type: 'done'; sku: string; updated: number; failed: string[]; total: number }
+  | { type: 'error'; detail: string }
+
+export type AddVideoToListingsEvent =
+  | { type: 'progress'; message: string }
+  | { type: 'done'; updated: number; failed: string[]; total: number }
+  | { type: 'error'; detail: string }
+
 export const listingVideoAPI = {
   getVideoId: (itemNumberOrUrl: string) =>
     api.get<VideoIdResponse>('/api/listing-video/video-id', {
       params: { item_number: itemNumberOrUrl.trim() },
     }),
-  addVideoToSku: (videoId: string, sku: string) =>
+  addVideoToSku: (videoId: string, sku: string, marketplaceId?: string) =>
     api.post<AddVideoToSkuResponse>('/api/listing-video/add-video-to-sku', {
       video_id: videoId.trim(),
       sku: sku.trim(),
+      marketplace_id: marketplaceId?.trim() || undefined,
     }),
+  /** Stream add-video-to-sku progress; calls onEvent for each NDJSON line. marketplaceId e.g. EBAY_US, EBAY_GB. */
+  addVideoToSkuStream: async (
+    videoId: string,
+    sku: string,
+    onEvent: (ev: AddVideoToSkuEvent) => void,
+    marketplaceId?: string
+  ): Promise<void> => {
+    const url = `${API_BASE_URL.replace(/\/$/, '')}/api/listing-video/add-video-to-sku`
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        video_id: videoId.trim(),
+        sku: sku.trim(),
+        marketplace_id: marketplaceId?.trim() || undefined,
+      }),
+      credentials: 'include',
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      onEvent({ type: 'error', detail: (err as { detail?: string }).detail || res.statusText })
+      return
+    }
+    const reader = res.body?.getReader()
+    if (!reader) {
+      onEvent({ type: 'error', detail: 'No response body' })
+      return
+    }
+    const dec = new TextDecoder()
+    let buf = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try {
+          const ev = JSON.parse(line) as AddVideoToSkuEvent
+          onEvent(ev)
+          if (ev.type === 'done' || ev.type === 'error') return
+        } catch {
+          // skip malformed line
+        }
+      }
+    }
+    if (buf.trim()) {
+      try {
+        const ev = JSON.parse(buf) as AddVideoToSkuEvent
+        onEvent(ev)
+      } catch {
+        onEvent({ type: 'error', detail: 'Incomplete response' })
+      }
+    }
+  },
+  /** Stream add-video-to-listings (Trading API ReviseFixedPriceItem); for CSV/legacy listings. */
+  addVideoToListingsStream: async (
+    videoId: string,
+    itemIds: string[],
+    onEvent: (ev: AddVideoToListingsEvent) => void
+  ): Promise<void> => {
+    const url = `${API_BASE_URL.replace(/\/$/, '')}/api/listing-video/add-video-to-listings`
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video_id: videoId.trim(), item_ids: itemIds }),
+      credentials: 'include',
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      onEvent({ type: 'error', detail: (err as { detail?: string }).detail || res.statusText })
+      return
+    }
+    const reader = res.body?.getReader()
+    if (!reader) {
+      onEvent({ type: 'error', detail: 'No response body' })
+      return
+    }
+    const dec = new TextDecoder()
+    let buf = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try {
+          const ev = JSON.parse(line) as AddVideoToListingsEvent
+          onEvent(ev)
+          if (ev.type === 'done' || ev.type === 'error') return
+        } catch {
+          // skip
+        }
+      }
+    }
+    if (buf.trim()) {
+      try {
+        const ev = JSON.parse(buf) as AddVideoToListingsEvent
+        onEvent(ev)
+      } catch {
+        onEvent({ type: 'error', detail: 'Incomplete response' })
+      }
+    }
+  },
 }
 
 // Health check

@@ -12,19 +12,34 @@ import {
 } from 'recharts'
 import { stockAPI, type AnalyticsSummary, type AnalyticsBySkuPoint, type AnalyticsByCountryPoint } from '../services/api'
 
-const last90DaysFrom = () => {
+const todayIso = () => new Date().toISOString().slice(0, 10)
+
+const offsetDaysFromToday = (daysAgo: number) => {
   const d = new Date()
-  d.setDate(d.getDate() - 90)
+  d.setDate(d.getDate() - daysAgo)
   return d.toISOString().slice(0, 10)
 }
-const defaultTo = () => new Date().toISOString().slice(0, 10)
+
+const lastNDaysFrom = (n: number) => offsetDaysFromToday(n - 1)
+
+const defaultTo = () => todayIso()
+const defaultFrom = () => lastNDaysFrom(90)
 const GBP_TO_EUR_RATE = 1.16
 
 const SKU_SORT_STORAGE_KEY = 'salesAnalytics.skuSort'
 const COUNTRY_SORT_STORAGE_KEY = 'salesAnalytics.countrySort'
 
+type PeriodPreset = 'today' | '7d' | '1m' | '3m' | '6m' | '1y' | 'custom'
+
 type SkuSortKey = 'sku_code' | 'quantity_sold' | 'profit'
 type CountrySortKey = 'country' | 'quantity_sold' | 'profit'
+
+const parseISODate = (value: string): Date | null => {
+  if (!value) return null
+  const [y, m, d] = value.split('-').map((v) => Number(v))
+  if (!y || !m || !d) return null
+  return new Date(y, m - 1, d)
+}
 
 function loadSkuSort(): { key: SkuSortKey; dir: 'asc' | 'desc' } {
   try {
@@ -68,8 +83,9 @@ function loadCountrySort(): { key: CountrySortKey; dir: 'asc' | 'desc' } {
 
 export default function SalesAnalytics() {
   const queryClient = useQueryClient()
-  const [from, setFrom] = useState(last90DaysFrom)
+  const [from, setFrom] = useState(defaultFrom)
   const [to, setTo] = useState(defaultTo)
+  const [periodPreset, setPeriodPreset] = useState<PeriodPreset>('3m')
   const [groupBy, setGroupBy] = useState<'day' | 'week' | 'month'>('day')
   const [country, setCountry] = useState('')
   const [sku, setSku] = useState('')
@@ -130,16 +146,98 @@ export default function SalesAnalytics() {
     return () => { cancelled = true }
   }, [])
 
+  const applyPeriodPreset = (preset: PeriodPreset) => {
+    const today = todayIso()
+    let newFrom = from
+    let newTo = to
+    if (preset === 'today') {
+      newFrom = today
+      newTo = today
+    } else if (preset === '7d') {
+      newFrom = lastNDaysFrom(7)
+      newTo = today
+    } else if (preset === '1m') {
+      newFrom = lastNDaysFrom(30)
+      newTo = today
+    } else if (preset === '3m') {
+      newFrom = lastNDaysFrom(90)
+      newTo = today
+    } else if (preset === '6m') {
+      newFrom = lastNDaysFrom(180)
+      newTo = today
+    } else if (preset === '1y') {
+      newFrom = lastNDaysFrom(365)
+      newTo = today
+    }
+    setFrom(newFrom)
+    setTo(newTo)
+    setPeriodPreset(preset)
+  }
+
+  // Keep default initial range in sync with default preset.
+  useEffect(() => {
+    applyPeriodPreset('3m')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const formatPeriod = (p: string) => {
     if (groupBy === 'month') return p.slice(0, 7)
     if (groupBy === 'week') return p.slice(0, 10)
     return p
   }
 
-  const chartData = data?.series.map((s) => ({
-    period: formatPeriod(s.period),
-    units: s.units_sold,
-  })) ?? []
+  const buildChartData = (): { period: string; units: number }[] => {
+    if (!data) return []
+    const start = parseISODate(from)
+    const end = parseISODate(to)
+    if (!start || !end || start > end) {
+      return data.series.map((s) => ({
+        period: formatPeriod(s.period),
+        units: s.units_sold,
+      }))
+    }
+
+    const seriesByPeriod = new Map<string, number>()
+    for (const s of data.series) {
+      const key = formatPeriod(s.period)
+      seriesByPeriod.set(key, s.units_sold)
+    }
+
+    const buckets: string[] = []
+    if (groupBy === 'day') {
+      const d = new Date(start.getTime())
+      while (d <= end) {
+        buckets.push(d.toISOString().slice(0, 10))
+        d.setDate(d.getDate() + 1)
+      }
+    } else if (groupBy === 'week') {
+      const d = new Date(start.getTime())
+      const day = d.getDay() // 0=Sun..6=Sat
+      const diffToMonday = (day + 6) % 7
+      d.setDate(d.getDate() - diffToMonday)
+      while (d <= end) {
+        buckets.push(d.toISOString().slice(0, 10))
+        d.setDate(d.getDate() + 7)
+      }
+    } else {
+      const d = new Date(start.getFullYear(), start.getMonth(), 1)
+      const last = new Date(end.getFullYear(), end.getMonth(), 1)
+      while (d <= last) {
+        buckets.push(d.toISOString().slice(0, 10))
+        d.setMonth(d.getMonth() + 1)
+      }
+    }
+
+    return buckets.map((iso) => {
+      const key = formatPeriod(iso)
+      return {
+        period: key,
+        units: seriesByPeriod.get(key) ?? 0,
+      }
+    })
+  }
+
+  const chartData = buildChartData()
 
   const handleSort = (key: SkuSortKey) => {
     setTableSort((prev) => {
@@ -206,13 +304,32 @@ export default function SalesAnalytics() {
 
       <div className="bg-white shadow rounded-lg p-4 mb-6">
         <h2 className="text-lg font-semibold text-gray-800 mb-3">Filters</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Period</label>
+            <select
+              value={periodPreset}
+              onChange={(e) => applyPeriodPreset(e.target.value as PeriodPreset)}
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
+            >
+              <option value="today">Today</option>
+              <option value="7d">Last 7 days</option>
+              <option value="1m">Last month</option>
+              <option value="3m">Last 3 months</option>
+              <option value="6m">Last 6 months</option>
+              <option value="1y">Last year</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">From</label>
             <input
               type="date"
               value={from}
-              onChange={(e) => setFrom(e.target.value)}
+              onChange={(e) => {
+                setFrom(e.target.value)
+                setPeriodPreset('custom')
+              }}
               className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
             />
           </div>
@@ -221,7 +338,10 @@ export default function SalesAnalytics() {
             <input
               type="date"
               value={to}
-              onChange={(e) => setTo(e.target.value)}
+              onChange={(e) => {
+                setTo(e.target.value)
+                setPeriodPreset('custom')
+              }}
               className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
             />
           </div>

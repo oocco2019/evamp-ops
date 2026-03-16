@@ -157,7 +157,11 @@ export default function MessageDashboard() {
           }
         }
         const finalSoFar = chunks.join(' ')
-        setLiveTranscript(longestInterim ? `${finalSoFar} ${longestInterim}`.trim() : finalSoFar)
+        const lastChunk = chunks.length > 0 ? chunks[chunks.length - 1] : ''
+        const avoidDuplicateInterim = longestInterim && lastChunk && longestInterim === lastChunk
+        setLiveTranscript(
+          longestInterim && !avoidDuplicateInterim ? `${finalSoFar} ${longestInterim}`.trim() : finalSoFar
+        )
       }
       recognition.onend = () => {
         if (skipAppendOnEndRef.current) {
@@ -312,9 +316,12 @@ export default function MessageDashboard() {
     setError(null)
     let instructionsForDraft = aiPromptInstructions.trim()
     if (voiceRecording && recognitionRef.current) {
-      const transcript = (
-        transcriptChunksRef.current.join(' ') + (liveTranscript ? ' ' + liveTranscript : '')
-      ).trim()
+      const fromChunks = transcriptChunksRef.current.join(' ').trim()
+      const live = (liveTranscript ?? '').trim()
+      const transcript =
+        live && (fromChunks === '' || !fromChunks.endsWith(live))
+          ? `${fromChunks} ${live}`.trim()
+          : fromChunks
       instructionsForDraft = (aiPromptInstructions + (transcript ? '\n' + transcript : '')).trim()
       transcriptChunksRef.current = []
       setLiveTranscript('')

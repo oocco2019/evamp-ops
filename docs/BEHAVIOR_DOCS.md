@@ -9,6 +9,8 @@ This project keeps **behavior docs** for features that have regressed before or 
 |--------|-----|-------------------|
 | Message attachments | [MESSAGE_ATTACHMENTS.md](MESSAGE_ATTACHMENTS.md) | Thread API media URLs, blob storage, full-size images, display and pitfalls |
 | Voice instructions | [VOICE_INSTRUCTIONS.md](VOICE_INSTRUCTIONS.md) | Real-time transcript display; do not hide live transcript in textarea |
+| Listing video / eBay IDs | [LISTING_VIDEO_EBAY_IDS.md](LISTING_VIDEO_EBAY_IDS.md) | Item number = listing ID; do not use offer ID for “get by item number”; getInventoryItems offset = page number |
+| Listing video / CSV inventory | [LISTING_VIDEO_CSV_INVENTORY.md](LISTING_VIDEO_CSV_INVENTORY.md) | All inventory is CSV-listed; use Trading API only (GetItem read, ReviseFixedPriceItem for adding video). Inventory API 404s for CSV SKUs. |
 
 **Tests:** Voice instructions display logic is in `frontend/src/utils/voiceInstructionsDisplay.ts` and tested by `frontend/src/utils/voiceInstructionsDisplay.test.ts`. Run `npm run test` in `frontend/` before committing changes that touch the instructions textarea or voice recording.
 

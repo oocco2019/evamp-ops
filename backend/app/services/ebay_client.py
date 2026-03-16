@@ -6,7 +6,7 @@ import secrets
 from decimal import Decimal
 from urllib.parse import urlencode
 from datetime import datetime, date, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 import httpx
 from app.core.config import settings
 
@@ -870,6 +870,186 @@ async def trading_get_item(access_token: str, item_id: str) -> Dict[str, Any]:
                 video_ids.append(v)  # preserve exact character count; do not truncate
     log.info("listing_video: trading_get_item sku=%s title=%s video_ids=%s", sku, (title[:50] + "..." if title and len(title) > 50 else title), video_ids)
     return {"sku": sku, "title": title, "item_id": item_id, "video_ids": video_ids}
+
+
+def _trading_xml_escape(s: str) -> str:
+    """Escape for use inside an XML element text."""
+    if not s:
+        return ""
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+async def trading_revise_fixed_price_item(
+    access_token: str, item_id: str, video_id: str, marketplace_id: Optional[str] = None
+) -> None:
+    """
+    Trading API ReviseFixedPriceItem: add (or set) video on a listing by item ID.
+    Uses same auth; SiteID from marketplace_id if provided, else settings.EBAY_MARKETPLACE_ID.
+    Raises httpx.HTTPStatusError on HTTP or API errors.
+    """
+    import logging
+    import xml.etree.ElementTree as ET
+
+    log = logging.getLogger(__name__)
+    item_id = str(item_id).strip()
+    video_id = (video_id or "").strip()
+    if not video_id:
+        raise ValueError("video_id is required")
+    mkt = (marketplace_id or settings.EBAY_MARKETPLACE_ID or "EBAY_GB").strip().upper()
+    site_id = _EBAY_MARKETPLACE_TO_SITE_ID.get(mkt, 3)
+    url = "https://api.ebay.com/ws/api.dll"
+    payload = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        "<ReviseFixedPriceItemRequest xmlns=\"urn:ebay:apis:eBLBaseComponents\">"
+        f"<Item><ItemID>{_trading_xml_escape(item_id)}</ItemID>"
+        "<VideoDetails>"
+        f"<VideoID>{_trading_xml_escape(video_id)}</VideoID>"
+        "</VideoDetails></Item>"
+        "</ReviseFixedPriceItemRequest>"
+    )
+    headers = {
+        "X-EBAY-API-IAF-TOKEN": access_token,
+        "X-EBAY-API-CALL-NAME": "ReviseFixedPriceItem",
+        "X-EBAY-API-SITEID": str(site_id),
+        "X-EBAY-API-COMPATIBILITY-LEVEL": "1085",
+        "Content-Type": "application/xml",
+    }
+    log.info("listing_video: trading_revise_fixed_price_item item_id=%s", item_id)
+    async with httpx.AsyncClient() as client:
+        r = await client.post(url, content=payload, headers=headers)
+    log.info("listing_video: trading_revise_fixed_price_item status=%s", r.status_code)
+    if r.status_code != 200:
+        log.warning("listing_video: trading_revise body=%s", (r.text or "")[:500])
+        r.raise_for_status()
+
+    root = ET.fromstring(r.text or "")
+    NS = "urn:ebay:apis:eBLBaseComponents"
+    errors = root.findall(f".//{{{NS}}}Errors/{{{NS}}}Error")
+    if not errors:
+        errors = root.findall(".//Errors/Error")
+    if errors:
+        err = errors[0]
+        code = err.find(f"{{{NS}}}ErrorCode") or err.find("ErrorCode")
+        short = err.find(f"{{{NS}}}ShortMessage") or err.find("ShortMessage")
+        code_val = code.text if code is not None else ""
+        msg = (short.text if short is not None else "") or "Trading API error"
+        log.warning("listing_video: trading_revise API error code=%s msg=%s", code_val, msg)
+        raise httpx.HTTPStatusError(
+            msg,
+            request=r.request,
+            response=r,
+        )
+
+
+async def trading_get_seller_list_by_sku(
+    access_token: str, sku: str, marketplace_id: Optional[str] = None
+):
+    """
+    Trading API GetSellerList without SKUArray; fetches all active listings, filters server-side by SKU (case-insensitive).
+    Yields progress dicts {"type": "progress", "message": "Scanned page X/Y, found Z matches so far"}, then yields the list of matched item IDs.
+    CSV-uploaded listings are not matched by GetSellerList SKUArray; this hybrid approach works for them.
+    """
+    import logging
+    import xml.etree.ElementTree as ET
+
+    log = logging.getLogger(__name__)
+    sku = (sku or "").strip()
+    sku_lower = sku.lower() if sku else ""
+    if not sku:
+        yield []
+        return
+    mkt = (marketplace_id or settings.EBAY_MARKETPLACE_ID or "EBAY_GB").strip().upper()
+    site_id = _EBAY_MARKETPLACE_TO_SITE_ID.get(mkt, 3)
+    url = "https://api.ebay.com/ws/api.dll"
+    now = datetime.now(timezone.utc)
+    end_from = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    end_to = (now + timedelta(days=120)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    matched_item_ids: List[str] = []
+    page = 1
+    per_page = 200
+    NS = "urn:ebay:apis:eBLBaseComponents"
+    total_pages = 1
+
+    while True:
+        payload = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            "<GetSellerListRequest xmlns=\"urn:ebay:apis:eBLBaseComponents\">"
+            f"<EndTimeFrom>{end_from}</EndTimeFrom>"
+            f"<EndTimeTo>{end_to}</EndTimeTo>"
+            "<GranularityLevel>Fine</GranularityLevel>"
+            "<Pagination>"
+            f"<EntriesPerPage>{per_page}</EntriesPerPage>"
+            f"<PageNumber>{page}</PageNumber>"
+            "</Pagination>"
+            "</GetSellerListRequest>"
+        )
+        headers = {
+            "X-EBAY-API-IAF-TOKEN": access_token,
+            "X-EBAY-API-CALL-NAME": "GetSellerList",
+            "X-EBAY-API-SITEID": str(site_id),
+            "X-EBAY-API-COMPATIBILITY-LEVEL": "1085",
+            "Content-Type": "application/xml",
+        }
+        log.info("listing_video: trading_get_seller_list_by_sku sku=%s page=%s", sku, page)
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, content=payload, headers=headers)
+        if r.status_code != 200:
+            log.warning("listing_video: GetSellerList status=%s body=%s", r.status_code, (r.text or "")[:500])
+            r.raise_for_status()
+
+        root = ET.fromstring(r.text or "")
+        errors = root.findall(f".//{{{NS}}}Errors/{{{NS}}}Error")
+        if not errors:
+            errors = root.findall(".//Errors/Error")
+        if errors:
+            err = errors[0]
+            short = err.find(f"{{{NS}}}ShortMessage") or err.find("ShortMessage")
+            msg = (short.text if short is not None else "") or "GetSellerList error"
+            log.warning("listing_video: GetSellerList API error: %s", msg)
+            raise httpx.HTTPStatusError(msg, request=r.request, response=r)
+
+        pagination_result = root.find(f".//{{{NS}}}PaginationResult") or root.find(".//PaginationResult")
+        if pagination_result is not None:
+            total_el = pagination_result.find(f"{{{NS}}}TotalNumberOfPages") or pagination_result.find("TotalNumberOfPages")
+            if total_el is not None and total_el.text:
+                try:
+                    total_pages = max(1, int(total_el.text))
+                except (TypeError, ValueError):
+                    pass
+
+        item_array = root.find(f".//{{{NS}}}ItemArray") or root.find(".//ItemArray")
+        if item_array is None:
+            if page == 1:
+                log.warning("listing_video: GetSellerList sku=%s site_id=%s returned no ItemArray", sku, site_id)
+            break
+        items = item_array.findall(f"{{{NS}}}Item") or item_array.findall("Item") or []
+        for item in items:
+            sku_el = item.find(f"{{{NS}}}SKU") or item.find("SKU")
+            if sku_el is not None and sku_el.text and (sku_el.text or "").strip().lower() == sku_lower:
+                iid_el = item.find(f"{{{NS}}}ItemID") or item.find("ItemID")
+                if iid_el is not None and iid_el.text:
+                    iid = (iid_el.text or "").strip()
+                    if iid:
+                        matched_item_ids.append(iid)
+
+        yield {"type": "progress", "message": f"Scanned page {page}/{total_pages}, found {len(matched_item_ids)} matches so far."}
+
+        if page >= total_pages:
+            break
+        if len(items) < per_page:
+            break
+        page += 1
+        if page > 100:
+            break
+
+    log.info("listing_video: trading_get_seller_list_by_sku sku=%s found=%s", sku, len(matched_item_ids))
+    yield matched_item_ids
 
 
 # --- Sell Inventory API (listing / video on inventory item) ---

@@ -1,6 +1,6 @@
 ---
 description: Before changing behavior-doc areas, read the doc and run tests to avoid regressions
-globs: frontend/src/pages/MessageDashboard.tsx, frontend/src/utils/voiceInstructionsDisplay.ts, backend/app/api/messages.py
+globs: frontend/src/pages/MessageDashboard.tsx, frontend/src/utils/voiceInstructionsDisplay.ts, backend/app/api/messages.py, backend/app/api/listing_video.py, backend/app/services/ebay_client.py
 alwaysApply: false
 ---
 
@@ -11,6 +11,7 @@ When editing these files, the project has **behavior docs** that describe how th
 1. **Read the relevant doc first** and check its **Requirements** (or equivalent) section:
    - Voice instructions (MessageDashboard, voiceInstructionsDisplay): `docs/VOICE_INSTRUCTIONS.md` — e.g. textarea must stay editable while recording; do not make it read-only.
    - Message attachments / thread API / media blobs: `docs/MESSAGE_ATTACHMENTS.md`
+   - Listing video (listing_video, ebay_client inventory): `docs/LISTING_VIDEO_EBAY_IDS.md` — item number = listing ID; do not use getOffer(offerId) for item number; getInventoryItems offset is page number. **CSV inventory:** `docs/LISTING_VIDEO_CSV_INVENTORY.md` — all inventory is CSV-listed; use Trading API only (GetItem for read, ReviseFixedPriceItem for adding video). Do not rely on Inventory API for CSV SKUs (getInventoryItem 404s).
 
 2. **Do not change behavior that conflicts with stated requirements** without explicit agreement. Do not re-introduce pitfalls described in those docs (e.g. do not hide live transcript; do not use `request.base_url.rstrip()` without `str()`).
 

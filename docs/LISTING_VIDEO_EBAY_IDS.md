@@ -2,6 +2,8 @@
 
 This doc clarifies how eBay identifiers work and how this project uses them, so we don’t mix up **item ID** (listing ID) with **offer ID**.
 
+**CSV inventory:** All of this project's inventory is listed via CSV. Those listings have no Inventory API record. For listing video, use **Trading API only** (GetItem for read, ReviseFixedPriceItem for adding video). See `docs/LISTING_VIDEO_CSV_INVENTORY.md`.
+
 ## Terminology
 
 | Term | Meaning | Where it appears |
