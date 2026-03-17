@@ -12,12 +12,19 @@ import {
 } from 'recharts'
 import { stockAPI, type AnalyticsSummary, type AnalyticsBySkuPoint, type AnalyticsByCountryPoint } from '../services/api'
 
-const todayIso = () => new Date().toISOString().slice(0, 10)
+const formatLocalDate = (d: Date): string => {
+  const year = d.getFullYear()
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const todayIso = () => formatLocalDate(new Date())
 
 const offsetDaysFromToday = (daysAgo: number) => {
   const d = new Date()
   d.setDate(d.getDate() - daysAgo)
-  return d.toISOString().slice(0, 10)
+  return formatLocalDate(d)
 }
 
 const lastNDaysFrom = (n: number) => offsetDaysFromToday(n - 1)
@@ -207,7 +214,7 @@ export default function SalesAnalytics() {
     if (groupBy === 'day') {
       const d = new Date(start.getTime())
       while (d <= end) {
-        buckets.push(d.toISOString().slice(0, 10))
+        buckets.push(formatLocalDate(d))
         d.setDate(d.getDate() + 1)
       }
     } else if (groupBy === 'week') {
@@ -216,20 +223,20 @@ export default function SalesAnalytics() {
       const diffToMonday = (day + 6) % 7
       d.setDate(d.getDate() - diffToMonday)
       while (d <= end) {
-        buckets.push(d.toISOString().slice(0, 10))
+        buckets.push(formatLocalDate(d))
         d.setDate(d.getDate() + 7)
       }
     } else {
       const d = new Date(start.getFullYear(), start.getMonth(), 1)
       const last = new Date(end.getFullYear(), end.getMonth(), 1)
       while (d <= last) {
-        buckets.push(d.toISOString().slice(0, 10))
+        buckets.push(formatLocalDate(d))
         d.setMonth(d.getMonth() + 1)
       }
     }
 
-    return buckets.map((iso) => {
-      const key = formatPeriod(iso)
+    return buckets.map((label) => {
+      const key = formatPeriod(label)
       return {
         period: key,
         units: seriesByPeriod.get(key) ?? 0,
