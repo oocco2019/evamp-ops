@@ -44,6 +44,51 @@ export interface EmailTemplate {
   body: string
 }
 
+export interface OCConnection {
+  id: number
+  name: string
+  region: string
+  environment: 'stage' | 'prod'
+  oauth_base_url: string
+  api_base_url: string
+  signature_mode: 'path_only' | 'path_and_body'
+  is_active: boolean
+  updated_at: string
+}
+
+export interface InventoryStatusSummary {
+  connection: OCConnection | null
+  credentials_present: string[]
+  has_required_credentials: boolean
+  mapping_count: number
+  last_sync_at: string | null
+}
+
+export interface OCSkuMapping {
+  id: number
+  sku_code: string
+  seller_skuid: string
+  reference_skuid: string
+  mfskuid: string
+  service_region: string | null
+  last_synced_at: string
+}
+
+export interface OCSkuInventoryRow {
+  id: number
+  mfskuid: string
+  service_region: string
+  available: number
+  in_transit: number
+  received: number
+  reserved_allocated: number
+  reserved_hold: number
+  reserved_vas: number
+  suspend: number
+  unfulfillable: number
+  synced_at: string
+}
+
 // Settings API
 export const settingsAPI = {
   // API Credentials
@@ -588,6 +633,38 @@ export const listingVideoAPI = {
       }
     }
   },
+}
+
+export const inventoryStatusAPI = {
+  getSummary: () => api.get<InventoryStatusSummary>('/api/inventory-status/summary'),
+  upsertConnection: (data: {
+    name: string
+    region: string
+    environment: 'stage' | 'prod'
+    oauth_base_url: string
+    api_base_url: string
+    signature_mode: 'path_only' | 'path_and_body'
+    is_active: boolean
+  }) => api.put<OCConnection>('/api/inventory-status/connection', data),
+  testConnection: () =>
+    api.post<{ ok: boolean; detail: string; region?: string; environment?: string; service_count?: number }>(
+      '/api/inventory-status/test-connection',
+      {}
+    ),
+  getAuthorizeUrl: (data: { redirect_uri: string; state?: string }) =>
+    api.post<{ authorize_url: string }>('/api/inventory-status/oauth/authorize-url', data),
+  exchangeCode: (data: { code: string; redirect_uri: string }) =>
+    api.post<{ access_token_received: boolean; refresh_token_stored: boolean; expires_in?: number }>(
+      '/api/inventory-status/oauth/exchange-code',
+      data
+    ),
+  syncSkuMappings: () =>
+    api.post<{ synced: number; skipped: number; inventory_rows: number }>('/api/inventory-status/sync-sku-mappings', {}),
+  listSkuMappings: (sku?: string) =>
+    api.get<OCSkuMapping[]>('/api/inventory-status/sku-mappings', {
+      params: sku ? { sku } : {},
+    }),
+  listInventory: () => api.get<OCSkuInventoryRow[]>('/api/inventory-status/inventory'),
 }
 
 // Health check

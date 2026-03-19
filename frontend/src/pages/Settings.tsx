@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { settingsAPI, stockAPI, messagesAPI, type AIModelSetting, type APICredential, type Warehouse, type EmailTemplate, type AIInstruction } from '../services/api'
+import { settingsAPI, stockAPI, messagesAPI, inventoryStatusAPI, type AIModelSetting, type APICredential, type Warehouse, type EmailTemplate, type AIInstruction, type OCConnection } from '../services/api'
 
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState<'credentials' | 'ai-models' | 'ai-instructions' | 'ebay' | 'warehouses' | 'email-templates'>('credentials')
+  const [activeTab, setActiveTab] = useState<'credentials' | 'ai-models' | 'ai-instructions' | 'ebay' | 'oc' | 'warehouses' | 'email-templates'>('credentials')
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -72,6 +72,16 @@ export default function Settings() {
             eBay
           </button>
           <button
+            onClick={() => setActiveTab('oc')}
+            className={`${
+              activeTab === 'oc'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
+          >
+            OC Integration
+          </button>
+          <button
             onClick={() => setActiveTab('warehouses')}
             className={`${
               activeTab === 'warehouses'
@@ -99,6 +109,7 @@ export default function Settings() {
       {activeTab === 'ai-models' && <AIModelsTab />}
       {activeTab === 'ai-instructions' && <AIInstructionsTab />}
       {activeTab === 'ebay' && <EbayTab />}
+      {activeTab === 'oc' && <OCTab />}
       {activeTab === 'email-templates' && <EmailTemplatesTab />}
       {activeTab === 'warehouses' && <WarehousesTab />}
     </div>
@@ -238,6 +249,308 @@ function CredentialsTab() {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+function OCTab() {
+  const queryClient = useQueryClient()
+  const [keyName, setKeyName] = useState<'client_id' | 'client_secret' | 'refresh_token'>('client_id')
+  const [keyValue, setKeyValue] = useState('')
+  const [connectionDraft, setConnectionDraft] = useState<OCConnection>({
+    id: 0,
+    name: 'OC',
+    region: 'UK',
+    environment: 'stage',
+    oauth_base_url: 'https://openapi-stage-cn.orangeconnex.com',
+    api_base_url: 'https://openapi-stage-cn.orangeconnex.com',
+    signature_mode: 'path_and_body',
+    is_active: true,
+    updated_at: new Date().toISOString(),
+  })
+  const [redirectUri, setRedirectUri] = useState(window.location.origin + '/settings')
+  const [oauthState, setOauthState] = useState('oocco')
+  const [authCode, setAuthCode] = useState('')
+  const [authorizeUrl, setAuthorizeUrl] = useState('')
+
+  const { data: summary } = useQuery({
+    queryKey: ['inventory-status', 'summary'],
+    queryFn: async () => (await inventoryStatusAPI.getSummary()).data,
+  })
+
+  const { data: ocCreds, isLoading } = useQuery({
+    queryKey: ['credentials', 'oc'],
+    queryFn: async () => (await settingsAPI.listCredentials('oc')).data,
+  })
+
+  useEffect(() => {
+    if (summary?.connection) {
+      setConnectionDraft(summary.connection)
+    }
+  }, [summary?.connection])
+
+  const createCredentialMutation = useMutation({
+    mutationFn: settingsAPI.createCredential,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials', 'oc'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-status'] })
+      setKeyValue('')
+    },
+  })
+
+  const deleteCredentialMutation = useMutation({
+    mutationFn: settingsAPI.deleteCredential,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials', 'oc'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-status'] })
+    },
+  })
+
+  const upsertConnection = useMutation({
+    mutationFn: inventoryStatusAPI.upsertConnection,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['inventory-status'] })
+    },
+  })
+
+  const testConnection = useMutation({
+    mutationFn: inventoryStatusAPI.testConnection,
+  })
+  const buildAuthorizeUrl = useMutation({
+    mutationFn: inventoryStatusAPI.getAuthorizeUrl,
+    onSuccess: (res) => {
+      setAuthorizeUrl(res.data.authorize_url)
+    },
+  })
+  const exchangeCode = useMutation({
+    mutationFn: inventoryStatusAPI.exchangeCode,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['credentials', 'oc'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-status'] })
+      setAuthCode('')
+    },
+  })
+
+  const missingRequired = ['client_id', 'client_secret', 'refresh_token'].filter(
+    (k) => !(summary?.credentials_present ?? []).includes(k)
+  )
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white shadow rounded-lg p-6">
+        <h2 className="text-xl font-semibold mb-2">OrangeConnex credentials</h2>
+        <p className="text-sm text-gray-600 mb-4">
+          Add OC secrets here (`service_name=oc`). Inventory Status page stays read-only.
+        </p>
+
+        <form
+          className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end mb-4"
+          onSubmit={(e) => {
+            e.preventDefault()
+            createCredentialMutation.mutate({
+              service_name: 'oc',
+              key_name: keyName,
+              value: keyValue,
+            })
+          }}
+        >
+          <label className="flex flex-col gap-1">
+            <span className="text-sm text-gray-700">Key name</span>
+            <select
+              className="border border-gray-300 rounded-md px-3 py-2"
+              value={keyName}
+              onChange={(e) => setKeyName(e.target.value as 'client_id' | 'client_secret' | 'refresh_token')}
+            >
+              <option value="client_id">client_id</option>
+              <option value="client_secret">client_secret</option>
+              <option value="refresh_token">refresh_token</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 md:col-span-2">
+            <span className="text-sm text-gray-700">Value</span>
+            <input
+              type="password"
+              className="border border-gray-300 rounded-md px-3 py-2"
+              value={keyValue}
+              onChange={(e) => setKeyValue(e.target.value)}
+              required
+            />
+          </label>
+          <button
+            type="submit"
+            disabled={createCredentialMutation.isPending || !keyValue.trim()}
+            className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
+          >
+            {createCredentialMutation.isPending ? 'Saving...' : 'Save OC key'}
+          </button>
+        </form>
+
+        <p className={`text-sm mb-3 ${missingRequired.length === 0 ? 'text-green-700' : 'text-amber-700'}`}>
+          {missingRequired.length === 0 ? 'All required OC credentials are present.' : `Missing: ${missingRequired.join(', ')}`}
+        </p>
+
+        {isLoading ? (
+          <p className="text-sm text-gray-500">Loading OC credentials...</p>
+        ) : (
+          <div className="space-y-2">
+            {(ocCreds ?? []).map((cred) => (
+              <div key={cred.id} className="flex items-center justify-between p-2 bg-gray-50 rounded">
+                <span className="text-sm">{cred.service_name} / {cred.key_name}</span>
+                <button
+                  onClick={() => deleteCredentialMutation.mutate(cred.id)}
+                  className="text-red-600 hover:text-red-800 text-sm"
+                >
+                  Delete
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white shadow rounded-lg p-6">
+        <h2 className="text-xl font-semibold mb-2">OrangeConnex connection</h2>
+        <p className="text-sm text-gray-600 mb-2">Non-secret connection details and connectivity test.</p>
+        <p className="text-xs text-gray-500 mb-4">
+          Use the exact host values provided by OC for your tenant and environment.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-gray-700">Name</span>
+            <input className="rounded border border-gray-300 px-2 py-1.5" value={connectionDraft.name} onChange={(e) => setConnectionDraft((p) => ({ ...p, name: e.target.value }))} />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-gray-700">Region</span>
+            <input className="rounded border border-gray-300 px-2 py-1.5" value={connectionDraft.region} onChange={(e) => setConnectionDraft((p) => ({ ...p, region: e.target.value.toUpperCase() }))} />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-gray-700">Environment</span>
+            <select className="rounded border border-gray-300 px-2 py-1.5" value={connectionDraft.environment} onChange={(e) => setConnectionDraft((p) => ({ ...p, environment: e.target.value as 'stage' | 'prod' }))}>
+              <option value="stage">stage</option>
+              <option value="prod">prod</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-sm lg:col-span-2">
+            <span className="text-gray-700">OAuth base URL</span>
+            <input className="rounded border border-gray-300 px-2 py-1.5" value={connectionDraft.oauth_base_url} onChange={(e) => setConnectionDraft((p) => ({ ...p, oauth_base_url: e.target.value }))} />
+          </label>
+          <label className="flex flex-col gap-1 text-sm lg:col-span-2">
+            <span className="text-gray-700">API base URL</span>
+            <input className="rounded border border-gray-300 px-2 py-1.5" value={connectionDraft.api_base_url} onChange={(e) => setConnectionDraft((p) => ({ ...p, api_base_url: e.target.value }))} />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-gray-700">Signature mode</span>
+            <select className="rounded border border-gray-300 px-2 py-1.5" value={connectionDraft.signature_mode} onChange={(e) => setConnectionDraft((p) => ({ ...p, signature_mode: e.target.value as 'path_only' | 'path_and_body' }))}>
+              <option value="path_and_body">path_and_body</option>
+              <option value="path_only">path_only</option>
+            </select>
+          </label>
+        </div>
+        <div className="mt-3 flex gap-2">
+          <button
+            type="button"
+            onClick={() => upsertConnection.mutate(connectionDraft)}
+            className="px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+            disabled={upsertConnection.isPending}
+          >
+            {upsertConnection.isPending ? 'Saving...' : 'Save connection'}
+          </button>
+          <button
+            type="button"
+            onClick={() => testConnection.mutate()}
+            className="px-3 py-2 bg-gray-700 text-white rounded hover:bg-gray-800 disabled:opacity-50"
+            disabled={testConnection.isPending}
+          >
+            {testConnection.isPending ? 'Testing...' : 'Test connection'}
+          </button>
+        </div>
+        {testConnection.isSuccess && (
+          <p className="text-sm text-green-700 mt-2">
+            Connection OK: {testConnection.data?.data.environment?.toUpperCase()} {testConnection.data?.data.region}
+            {' '}services={testConnection.data?.data.service_count ?? 0}
+          </p>
+        )}
+        {testConnection.isError && (
+          <p className="text-sm text-red-700 mt-2">
+            {(() => {
+              const ax = testConnection.error as { response?: { data?: { detail?: string } }; message?: string }
+              return ax.response?.data?.detail || ax.message || 'Connection test failed'
+            })()}
+          </p>
+        )}
+      </div>
+
+      <div className="bg-white shadow rounded-lg p-6">
+        <h2 className="text-xl font-semibold mb-2">OAuth: get refresh token</h2>
+        <p className="text-sm text-gray-600 mb-4">
+          Generate OC authorize URL, complete login/consent, then paste returned code to store refresh_token.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-gray-700">Redirect URI</span>
+            <input className="rounded border border-gray-300 px-2 py-1.5" value={redirectUri} onChange={(e) => setRedirectUri(e.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1 text-sm">
+            <span className="text-gray-700">State (optional)</span>
+            <input className="rounded border border-gray-300 px-2 py-1.5" value={oauthState} onChange={(e) => setOauthState(e.target.value)} />
+          </label>
+        </div>
+        <div className="flex flex-wrap gap-2 mb-3">
+          <button
+            type="button"
+            onClick={() => buildAuthorizeUrl.mutate({ redirect_uri: redirectUri.trim(), state: oauthState.trim() || undefined })}
+            className="px-3 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50"
+            disabled={buildAuthorizeUrl.isPending || !redirectUri.trim()}
+          >
+            {buildAuthorizeUrl.isPending ? 'Generating...' : 'Generate authorize URL'}
+          </button>
+          {authorizeUrl && (
+            <a
+              href={authorizeUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="px-3 py-2 bg-indigo-100 text-indigo-800 rounded hover:bg-indigo-200"
+            >
+              Open authorize URL
+            </a>
+          )}
+        </div>
+        {buildAuthorizeUrl.isError && (
+          <p className="text-sm text-red-700 mb-2">
+            {(() => {
+              const ax = buildAuthorizeUrl.error as { response?: { data?: { detail?: string } }; message?: string }
+              return ax.response?.data?.detail || ax.message || 'Failed to build authorize URL'
+            })()}
+          </p>
+        )}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
+          <label className="flex flex-col gap-1 text-sm md:col-span-2">
+            <span className="text-gray-700">Authorization code (from redirect URL)</span>
+            <input className="rounded border border-gray-300 px-2 py-1.5" value={authCode} onChange={(e) => setAuthCode(e.target.value)} placeholder="Paste code=... value here" />
+          </label>
+          <button
+            type="button"
+            onClick={() => exchangeCode.mutate({ code: authCode.trim(), redirect_uri: redirectUri.trim() })}
+            className="px-3 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+            disabled={exchangeCode.isPending || !authCode.trim() || !redirectUri.trim()}
+          >
+            {exchangeCode.isPending ? 'Exchanging...' : 'Exchange code and save refresh token'}
+          </button>
+        </div>
+        {exchangeCode.isSuccess && (
+          <p className="text-sm text-green-700 mt-2">
+            refresh_token stored. Access token received: {exchangeCode.data?.data.access_token_received ? 'yes' : 'no'}.
+          </p>
+        )}
+        {exchangeCode.isError && (
+          <p className="text-sm text-red-700 mt-2">
+            {(() => {
+              const ax = exchangeCode.error as { response?: { data?: { detail?: string } }; message?: string }
+              return ax.response?.data?.detail || ax.message || 'Code exchange failed'
+            })()}
+          </p>
+        )}
+      </div>
     </div>
   )
 }

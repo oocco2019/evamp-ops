@@ -3,8 +3,8 @@ Settings and configuration models
 """
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Boolean, DateTime, Text, Integer
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import String, Boolean, DateTime, Text, Integer, ForeignKey, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
 
@@ -110,3 +110,86 @@ class EmailTemplate(Base):
     
     def __repr__(self) -> str:
         return f"<EmailTemplate {self.name}>"
+
+
+class OCConnection(Base):
+    """
+    OrangeConnex API connection profile.
+    Single active connection is used by inventory status integration.
+    """
+
+    __tablename__ = "oc_connections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, default="OC")
+    region: Mapped[str] = mapped_column(String(10), nullable=False, default="UK")
+    environment: Mapped[str] = mapped_column(String(10), nullable=False, default="stage")
+    oauth_base_url: Mapped[str] = mapped_column(String(255), nullable=False)
+    api_base_url: Mapped[str] = mapped_column(String(255), nullable=False)
+    signature_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="path_and_body",
+        comment="path_only or path_and_body"
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow
+    )
+
+    sku_mappings: Mapped[list["OCSkuMapping"]] = relationship(
+        "OCSkuMapping",
+        back_populates="connection",
+        cascade="all, delete-orphan",
+    )
+
+
+class OCSkuMapping(Base):
+    """
+    Mapping between local sku_code and OrangeConnex SKU identifiers.
+    """
+
+    __tablename__ = "oc_sku_mappings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    connection_id: Mapped[int] = mapped_column(ForeignKey("oc_connections.id"), nullable=False)
+    sku_code: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    seller_skuid: Mapped[str] = mapped_column(String(100), nullable=False)
+    reference_skuid: Mapped[str] = mapped_column(String(100), nullable=False)
+    mfskuid: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    service_region: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    raw_payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    connection: Mapped["OCConnection"] = relationship("OCConnection", back_populates="sku_mappings")
+
+    __table_args__ = (
+        UniqueConstraint("connection_id", "sku_code", "mfskuid", name="uq_oc_mapping_conn_sku_mf"),
+    )
+
+
+class OCSkuInventory(Base):
+    """
+    Inventory quantities from OC StockSnapshot v2.
+    """
+
+    __tablename__ = "oc_sku_inventory"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    connection_id: Mapped[int] = mapped_column(ForeignKey("oc_connections.id"), nullable=False)
+    mfskuid: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    service_region: Mapped[str] = mapped_column(String(20), nullable=False, default="UK")
+    available: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    in_transit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    received: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved_allocated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved_hold: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved_vas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    suspend: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unfulfillable: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("connection_id", "mfskuid", "service_region", name="uq_oc_inventory_conn_mf_region"),
+    )

@@ -13,6 +13,7 @@ from app.api import settings as settings_api
 from app.api import stock as stock_api
 from app.api import messages as messages_api
 from app.api import listing_video as listing_video_api
+from app.api import inventory_status as inventory_status_api
 
 # Configure logging
 logging.basicConfig(
@@ -113,6 +114,11 @@ app.include_router(
     listing_video_api.router,
     prefix="/api/listing-video",
     tags=["listing-video"]
+)
+app.include_router(
+    inventory_status_api.router,
+    prefix="/api/inventory-status",
+    tags=["inventory-status"]
 )
 
 
