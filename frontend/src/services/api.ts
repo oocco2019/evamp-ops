@@ -76,6 +76,7 @@ export interface OCSkuMapping {
 
 export interface OCSkuInventoryRow {
   id: number
+  seller_skuid: string | null
   mfskuid: string
   service_region: string
   available: number
@@ -86,7 +87,20 @@ export interface OCSkuInventoryRow {
   reserved_vas: number
   suspend: number
   unfulfillable: number
+  sold_3m_units: number
+  sold_1m_units: number
   synced_at: string
+}
+
+export interface OCInboundOrderRow {
+  seller_inbound_number: string
+  oc_inbound_number: string | null
+  status: string | null
+  warehouse_code: string | null
+  region: string | null
+  shipping_method: string | null
+  sku_qty: number
+  put_away_qty: number
 }
 
 // Settings API
@@ -665,6 +679,8 @@ export const inventoryStatusAPI = {
       params: sku ? { sku } : {},
     }),
   listInventory: () => api.get<OCSkuInventoryRow[]>('/api/inventory-status/inventory'),
+  listInboundOrders: (params?: { months_back?: number }) =>
+    api.get<OCInboundOrderRow[]>('/api/inventory-status/inbound-orders', { params: params ?? {} }),
 }
 
 // Health check

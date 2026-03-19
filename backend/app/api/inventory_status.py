@@ -4,16 +4,17 @@ Inventory status API (OrangeConnex, read-only).
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models.settings import APICredential, OCConnection, OCSkuMapping, OCSkuInventory
+from app.models.stock import LineItem, Order
 from app.core.security import encryption_service
 from app.services.oc_client import (
     OCAPIError,
@@ -21,6 +22,8 @@ from app.services.oc_client import (
     oc_build_authorize_url,
     oc_debug_raw_calls,
     oc_exchange_code_for_tokens,
+    oc_fetch_inbound_orders,
+    oc_fetch_inventory_rows,
     oc_sync_sku_mappings,
     oc_test_connection,
 )
@@ -88,6 +91,7 @@ class SyncSkuResponse(BaseModel):
 
 class OCSkuInventoryResponse(BaseModel):
     id: int
+    seller_skuid: Optional[str] = None
     mfskuid: str
     service_region: str
     available: int
@@ -98,6 +102,8 @@ class OCSkuInventoryResponse(BaseModel):
     reserved_vas: int
     suspend: int
     unfulfillable: int
+    sold_3m_units: int = 0
+    sold_1m_units: int = 0
     synced_at: datetime
 
     model_config = {"from_attributes": True}
@@ -129,6 +135,26 @@ class OCRawDebugResponse(BaseModel):
     snapshot_response: dict
     sku_query_request: dict
     sku_query_response: dict
+
+
+class OCInboundRawDebugResponse(BaseModel):
+    connection: dict
+    service_region: str
+    page: int
+    page_size: int
+    attempts: list[dict]
+    last_response: dict | None = None
+
+
+class OCInboundOrderResponse(BaseModel):
+    seller_inbound_number: str
+    oc_inbound_number: Optional[str] = None
+    status: Optional[str] = None
+    warehouse_code: Optional[str] = None
+    region: Optional[str] = None
+    shipping_method: Optional[str] = None
+    sku_qty: int = 0
+    put_away_qty: int = 0
 
 
 @router.get("/summary", response_model=InventoryStatusSummary)
@@ -288,6 +314,7 @@ async def sync_oc_sku_mappings(db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="No active OC connection configured.")
     try:
         rows = await oc_sync_sku_mappings(db)
+        inventory_rows_data = await oc_fetch_inventory_rows(db)
     except (OCConfigError, OCAPIError) as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:  # noqa: BLE001
@@ -316,24 +343,23 @@ async def sync_oc_sku_mappings(db: AsyncSession = Depends(get_db)):
             )
         )
         synced += 1
-        inv = r.get("inventory") if isinstance(r.get("inventory"), dict) else None
-        if inv:
-            db.add(
-                OCSkuInventory(
-                    connection_id=connection.id,
-                    mfskuid=mfskuid,
-                    service_region=str(inv.get("service_region") or connection.region or "UK").strip() or "UK",
-                    available=int(inv.get("available") or 0),
-                    in_transit=int(inv.get("in_transit") or 0),
-                    received=int(inv.get("received") or 0),
-                    reserved_allocated=int(inv.get("reserved_allocated") or 0),
-                    reserved_hold=int(inv.get("reserved_hold") or 0),
-                    reserved_vas=int(inv.get("reserved_vas") or 0),
-                    suspend=int(inv.get("suspend") or 0),
-                    unfulfillable=int(inv.get("unfulfillable") or 0),
-                )
+    for inv in inventory_rows_data:
+        db.add(
+            OCSkuInventory(
+                connection_id=connection.id,
+                mfskuid=str(inv.get("mfskuid") or "").strip(),
+                service_region=str(inv.get("service_region") or connection.region or "UK").strip() or "UK",
+                available=int(inv.get("available") or 0),
+                in_transit=int(inv.get("in_transit") or 0),
+                received=int(inv.get("received") or 0),
+                reserved_allocated=int(inv.get("reserved_allocated") or 0),
+                reserved_hold=int(inv.get("reserved_hold") or 0),
+                reserved_vas=int(inv.get("reserved_vas") or 0),
+                suspend=int(inv.get("suspend") or 0),
+                unfulfillable=int(inv.get("unfulfillable") or 0),
             )
-            inventory_rows += 1
+        )
+        inventory_rows += 1
     await db.commit()
     return SyncSkuResponse(synced=synced, skipped=skipped, inventory_rows=inventory_rows)
 
@@ -354,9 +380,108 @@ async def list_sku_mappings(
 async def list_oc_inventory(
     db: AsyncSession = Depends(get_db),
 ):
-    query = select(OCSkuInventory).order_by(OCSkuInventory.mfskuid.asc())
-    result = await db.execute(query)
-    return result.scalars().all()
+    inv_result = await db.execute(select(OCSkuInventory).order_by(OCSkuInventory.mfskuid.asc()))
+    rows = list(inv_result.scalars().all())
+    map_result = await db.execute(select(OCSkuMapping))
+    mappings = list(map_result.scalars().all())
+    by_mf: dict[str, str] = {}
+    for m in mappings:
+        key = (m.mfskuid or "").strip().lower()
+        if key and key not in by_mf:
+            by_mf[key] = (m.seller_skuid or "").strip()
+
+    seller_skus = sorted({v for v in by_mf.values() if v})
+    sold_by_sku_3m: dict[str, int] = {}
+    sold_by_sku_1m: dict[str, int] = {}
+    if seller_skus:
+        today = date.today()
+        cutoff_3m = today - timedelta(days=90)
+        cutoff_1m = today - timedelta(days=30)
+        sales_stmt = (
+            select(
+                LineItem.sku.label("sku"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (Order.date >= cutoff_3m, LineItem.quantity),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("sold_3m"),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (Order.date >= cutoff_1m, LineItem.quantity),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ).label("sold_1m"),
+            )
+            .select_from(LineItem)
+            .join(Order, Order.order_id == LineItem.order_id)
+            .where(LineItem.sku.in_(seller_skus), Order.cancel_status != "CANCELED")
+            .group_by(LineItem.sku)
+        )
+        sales_result = await db.execute(sales_stmt)
+        for s in sales_result.all():
+            sku_key = (s.sku or "").strip()
+            sold_by_sku_3m[sku_key] = int(s.sold_3m or 0)
+            sold_by_sku_1m[sku_key] = int(s.sold_1m or 0)
+
+    payload: List[OCSkuInventoryResponse] = []
+    for r in rows:
+        seller_sku = by_mf.get((r.mfskuid or "").strip().lower()) or None
+        payload.append(
+            OCSkuInventoryResponse(
+                id=r.id,
+                seller_skuid=seller_sku,
+                mfskuid=r.mfskuid,
+                service_region=r.service_region,
+                available=r.available,
+                in_transit=r.in_transit,
+                received=r.received,
+                reserved_allocated=r.reserved_allocated,
+                reserved_hold=r.reserved_hold,
+                reserved_vas=r.reserved_vas,
+                suspend=r.suspend,
+                unfulfillable=r.unfulfillable,
+                sold_3m_units=sold_by_sku_3m.get(seller_sku or "", 0),
+                sold_1m_units=sold_by_sku_1m.get(seller_sku or "", 0),
+                synced_at=r.synced_at,
+            )
+        )
+    return payload
+
+
+@router.get("/inbound-orders", response_model=List[OCInboundOrderResponse])
+async def list_oc_inbound_orders(
+    months_back: int = 6,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        rows = await oc_fetch_inbound_orders(db, months_back=months_back)
+
+        payload: List[OCInboundOrderResponse] = []
+        for r in rows:
+            payload.append(
+                OCInboundOrderResponse(
+                    seller_inbound_number=str(r.get("seller_inbound_number") or "").strip(),
+                    oc_inbound_number=r.get("oc_inbound_number"),
+                    status=r.get("status"),
+                    warehouse_code=r.get("warehouse_code"),
+                    region=r.get("region"),
+                    shipping_method=r.get("shipping_method"),
+                    sku_qty=int(r.get("sku_qty") or 0),
+                    put_away_qty=int(r.get("put_away_qty") or 0),
+                )
+            )
+        return payload
+    except (OCConfigError, OCAPIError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC inbound orders fetch failed: {e}")
 
 
 @router.get("/debug-raw", response_model=OCRawDebugResponse)
@@ -371,3 +496,27 @@ async def debug_raw_oc_calls(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC debug failed: {e}")
+
+
+@router.get("/debug-inbound-raw", response_model=OCInboundRawDebugResponse)
+async def debug_inbound_raw_oc_calls(
+    service_region: str = "UK",
+    page: int = 1,
+    page_size: int = 200,
+    months_back: int = 6,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        from app.services.oc_client import oc_debug_inbound_orders_calls
+
+        return await oc_debug_inbound_orders_calls(
+            db,
+            service_region=service_region,
+            page=max(page, 1),
+            page_size=min(max(page_size, 1), 500),
+            months_back=months_back,
+        )
+    except (OCConfigError, OCAPIError) as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC inbound debug failed: {e}")

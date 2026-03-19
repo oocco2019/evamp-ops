@@ -1,12 +1,16 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { inventoryStatusAPI, type OCSkuInventoryRow, type OCSkuMapping } from '../services/api'
+import { inventoryStatusAPI, type OCInboundOrderRow, type OCSkuInventoryRow, type OCSkuMapping } from '../services/api'
 
 export default function InventoryStatus() {
   const qc = useQueryClient()
   const [skuFilter, setSkuFilter] = useState('')
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [inventorySort, setInventorySort] = useState<{
+    key: 'seller_skuid' | 'available' | 'in_transit' | 'reserved_allocated' | 'sold_3m_units' | 'sold_1m_units'
+    dir: 'asc' | 'desc'
+  }>({ key: 'seller_skuid', dir: 'asc' })
 
   const summaryQuery = useQuery({
     queryKey: ['inventory-status', 'summary'],
@@ -20,6 +24,10 @@ export default function InventoryStatus() {
   const inventoryQuery = useQuery({
     queryKey: ['inventory-status', 'inventory'],
     queryFn: async () => (await inventoryStatusAPI.listInventory()).data,
+  })
+  const inboundOrdersQuery = useQuery({
+    queryKey: ['inventory-status', 'inbound-orders', 6],
+    queryFn: async () => (await inventoryStatusAPI.listInboundOrders({ months_back: 6 })).data,
   })
 
   const syncMappings = useMutation({
@@ -38,7 +46,23 @@ export default function InventoryStatus() {
   const summary = summaryQuery.data
   const mappings: OCSkuMapping[] = mappingsQuery.data ?? []
   const inventoryRows: OCSkuInventoryRow[] = inventoryQuery.data ?? []
+  const inboundOrders: OCInboundOrderRow[] = inboundOrdersQuery.data ?? []
   const hasRequiredCredentials = summary?.has_required_credentials ?? false
+  const sortedInventoryRows = [...inventoryRows].sort((a, b) => {
+    const mult = inventorySort.dir === 'asc' ? 1 : -1
+    if (inventorySort.key === 'seller_skuid') {
+      return mult * (a.seller_skuid || '').localeCompare(b.seller_skuid || '')
+    }
+    return mult * ((a[inventorySort.key] as number) - (b[inventorySort.key] as number))
+  })
+  const handleInventorySort = (
+    key: 'seller_skuid' | 'available' | 'in_transit' | 'reserved_allocated' | 'sold_3m_units' | 'sold_1m_units'
+  ) => {
+    setInventorySort((prev) => ({
+      key,
+      dir: prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : (key === 'seller_skuid' ? 'asc' : 'desc'),
+    }))
+  }
 
   return (
     <div className="px-4 py-6 sm:px-0">
@@ -127,27 +151,99 @@ export default function InventoryStatus() {
             <table className="min-w-full text-sm border border-gray-200">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-3 py-2 text-left">MFSKUID</th>
-                  <th className="px-3 py-2 text-left">Region</th>
-                  <th className="px-3 py-2 text-right">Available</th>
-                  <th className="px-3 py-2 text-right">In transit</th>
-                  <th className="px-3 py-2 text-right">Received</th>
-                  <th className="px-3 py-2 text-right">Reserved alloc</th>
-                  <th className="px-3 py-2 text-right">Reserved hold</th>
-                  <th className="px-3 py-2 text-right">Reserved VAS</th>
+                  <th
+                    className="px-3 py-2 text-left cursor-pointer hover:text-gray-900"
+                    onClick={() => handleInventorySort('seller_skuid')}
+                  >
+                    Seller SKU {inventorySort.key === 'seller_skuid' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className="px-3 py-2 text-right cursor-pointer hover:text-gray-900"
+                    onClick={() => handleInventorySort('available')}
+                  >
+                    Available {inventorySort.key === 'available' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className="px-3 py-2 text-right cursor-pointer hover:text-gray-900"
+                    onClick={() => handleInventorySort('in_transit')}
+                  >
+                    In transit {inventorySort.key === 'in_transit' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className="px-3 py-2 text-right cursor-pointer hover:text-gray-900"
+                    onClick={() => handleInventorySort('reserved_allocated')}
+                  >
+                    Reserved alloc {inventorySort.key === 'reserved_allocated' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className="px-3 py-2 text-right cursor-pointer hover:text-gray-900"
+                    onClick={() => handleInventorySort('sold_3m_units')}
+                  >
+                    Sold last 3 months {inventorySort.key === 'sold_3m_units' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className="px-3 py-2 text-right cursor-pointer hover:text-gray-900"
+                    onClick={() => handleInventorySort('sold_1m_units')}
+                  >
+                    Sold last 1 month {inventorySort.key === 'sold_1m_units' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {inventoryRows.map((row) => (
+                {sortedInventoryRows.map((row) => (
                   <tr key={row.id} className="border-t border-gray-100">
-                    <td className="px-3 py-2 font-mono">{row.mfskuid}</td>
-                    <td className="px-3 py-2">{row.service_region}</td>
+                    <td className="px-3 py-2 font-mono">{row.seller_skuid || '—'}</td>
                     <td className="px-3 py-2 text-right">{row.available}</td>
                     <td className="px-3 py-2 text-right">{row.in_transit}</td>
-                    <td className="px-3 py-2 text-right">{row.received}</td>
                     <td className="px-3 py-2 text-right">{row.reserved_allocated}</td>
-                    <td className="px-3 py-2 text-right">{row.reserved_hold}</td>
-                    <td className="px-3 py-2 text-right">{row.reserved_vas}</td>
+                    <td className="px-3 py-2 text-right">{row.sold_3m_units}</td>
+                    <td className="px-3 py-2 text-right">{row.sold_1m_units}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="bg-white rounded-lg border border-gray-200 p-4 mt-6">
+        <h2 className="text-lg font-semibold text-gray-800 mb-3">Inbound orders</h2>
+        <p className="text-sm text-gray-600 mb-3">
+          Evamp-ops workflows always involve these OC marketplaces together: `UK`, `DE`, `US`, `AU`. This table pulls inbound orders from all four regions.
+        </p>
+        {inboundOrdersQuery.isLoading ? (
+          <p className="text-sm text-gray-500">Loading inbound orders...</p>
+        ) : inboundOrders.length === 0 ? (
+          <p className="text-sm text-gray-500">No inbound orders found for UK/DE/US/AU in the last 6 months.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm border border-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-3 py-2 text-left">Seller inbound no.</th>
+                  <th className="px-3 py-2 text-left">OC inbound no.</th>
+                  <th className="px-3 py-2 text-left">Status</th>
+                  <th className="px-3 py-2 text-left">Warehouse</th>
+                  <th className="px-3 py-2 text-left">SKU count</th>
+                  <th className="px-3 py-2 text-left">Put away qty</th>
+                  <th className="px-3 py-2 text-left">Shipping method</th>
+                </tr>
+              </thead>
+              <tbody>
+                {inboundOrders.map((row, idx) => (
+                  <tr
+                    key={`${row.seller_inbound_number}-${row.oc_inbound_number || idx}`}
+                    className="border-t border-gray-100"
+                  >
+                    <td className="px-3 py-2 font-mono">
+                      {row.seller_inbound_number || row.oc_inbound_number || '—'}
+                    </td>
+                    <td className="px-3 py-2 font-mono">{row.oc_inbound_number || '—'}</td>
+                    <td className="px-3 py-2">{row.status || '—'}</td>
+                    <td className="px-3 py-2">{row.warehouse_code || row.region || '—'}</td>
+                    <td className="px-3 py-2">{row.sku_qty}</td>
+                    <td className="px-3 py-2">{row.put_away_qty}</td>
+                    <td className="px-3 py-2">{row.shipping_method || '—'}</td>
                   </tr>
                 ))}
               </tbody>

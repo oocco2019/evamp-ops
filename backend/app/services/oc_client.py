@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, urljoin, urlparse
 from uuid import uuid4
@@ -272,6 +272,43 @@ def _extract_list(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return filtered if filtered else rows
 
 
+async def _fetch_snapshot_rows(
+    db: AsyncSession,
+    conn: OCConnection,
+    regions: List[str],
+    page_size: int = 200,
+) -> List[Dict[str, Any]]:
+    snapshot_rows: List[Dict[str, Any]] = []
+    for region in regions:
+        page = 1
+        while True:
+            body = {
+                "data": {
+                    "pageNumber": page,
+                    "pageSize": page_size,
+                    "skuList": [],
+                    "serviceRegionList": [{"serviceRegion": region}],
+                },
+                "messageId": str(uuid4()),
+                "timestamp": int(time.time() * 1000),
+            }
+            resp = await _call_oc(db, conn, "POST", "/openapi/3pp/inventory/v2/snapshot", body_obj=body)
+            data = resp.get("data") if isinstance(resp, dict) else {}
+            rows = []
+            if isinstance(data, dict):
+                rows = data.get("SKUList") or data.get("skuList") or []
+            if not isinstance(rows, list):
+                rows = []
+            rows = [r for r in rows if isinstance(r, dict)]
+            snapshot_rows.extend(rows)
+            if len(rows) < page_size:
+                break
+            page += 1
+            if page > 500:
+                break
+    return snapshot_rows
+
+
 async def oc_test_connection(db: AsyncSession) -> Dict[str, Any]:
     conn = await _get_active_connection(db)
     resp = await _call_oc(
@@ -291,36 +328,13 @@ async def oc_test_connection(db: AsyncSession) -> Dict[str, Any]:
 
 async def oc_sync_sku_mappings(db: AsyncSession) -> List[Dict[str, Any]]:
     conn = await _get_active_connection(db)
-    region = (conn.region or "UK").strip().upper()
+    base_region = (conn.region or "UK").strip().upper()
+    regions = [base_region, "US", "DE", "AU"]
+    # preserve order while deduping
+    regions = list(dict.fromkeys([r for r in regions if r]))
 
-    # Phase 1: StockSnapshot sweep to discover all MFSKUIDs in region.
-    snapshot_rows: List[Dict[str, Any]] = []
-    page = 1
-    page_size = 200
-    while True:
-        body = {
-            "data": {
-                "pageNumber": page,
-                "pageSize": page_size,
-                "skuList": [],
-                "serviceRegionList": [{"serviceRegion": region}],
-            },
-            "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
-        }
-        resp = await _call_oc(db, conn, "POST", "/openapi/3pp/inventory/v2/snapshot", body_obj=body)
-        data = resp.get("data") if isinstance(resp, dict) else {}
-        rows = []
-        if isinstance(data, dict):
-            rows = data.get("SKUList") or data.get("skuList") or []
-        if not isinstance(rows, list):
-            rows = []
-        rows = [r for r in rows if isinstance(r, dict)]
-        snapshot_rows.extend(rows)
-        if len(rows) < page_size:
-            break
-        page += 1
-        if page > 500:
-            break
+    # Phase 1: StockSnapshot sweep to discover all MFSKUIDs across configured regions.
+    snapshot_rows = await _fetch_snapshot_rows(db, conn, regions=regions)
 
     mfskus = []
     for r in snapshot_rows:
@@ -405,9 +419,318 @@ async def oc_sync_sku_mappings(db: AsyncSession) -> List[Dict[str, Any]]:
                 "reserved_vas": int(match.get("reservedVAS") or 0),
                 "suspend": int(match.get("suspend") or 0),
                 "unfulfillable": int(match.get("unfulfillable") or 0),
-                "service_region": str(match.get("serviceRegion") or region).strip() or region,
+                "service_region": str(match.get("serviceRegion") or base_region).strip() or base_region,
             }
     return mapped
+
+
+async def oc_fetch_inventory_rows(db: AsyncSession) -> List[Dict[str, Any]]:
+    conn = await _get_active_connection(db)
+    base_region = (conn.region or "UK").strip().upper()
+    regions = list(dict.fromkeys([base_region, "US", "DE", "AU"]))
+    snapshot_rows = await _fetch_snapshot_rows(db, conn, regions=regions)
+    out: List[Dict[str, Any]] = []
+    for row in snapshot_rows:
+        mfskuid = str(row.get("MFSKUID") or row.get("mfskuid") or row.get("mfSkuId") or "").strip()
+        if not mfskuid:
+            continue
+        out.append(
+            {
+                "mfskuid": mfskuid,
+                "service_region": str(row.get("serviceRegion") or "").strip() or base_region,
+                "available": int(row.get("available") or 0),
+                "in_transit": int(row.get("inTransit") or 0),
+                "received": int(row.get("received") or 0),
+                "reserved_allocated": int(row.get("reservedAllocated") or 0),
+                "reserved_hold": int(row.get("reservedHold") or 0),
+                "reserved_vas": int(row.get("reservedVAS") or 0),
+                "suspend": int(row.get("suspend") or 0),
+                "unfulfillable": int(row.get("unfulfillable") or 0),
+            }
+        )
+    # Dedup by mfskuid+region keeping last seen
+    dedup: Dict[str, Dict[str, Any]] = {}
+    for x in out:
+        dedup[f"{x['mfskuid'].lower()}::{x['service_region'].upper()}"] = x
+    return list(dedup.values())
+
+
+async def oc_fetch_inbound_orders(
+    db: AsyncSession,
+    service_region: str = "UK",
+    page: int = 1,
+    page_size: int = 200,
+    months_back: int = 6,
+) -> List[Dict[str, Any]]:
+    """
+    Read-only inbound order list from OC.
+    Uses OC inbound List Query which is time-range based (ISO+offset with +0000).
+    """
+    conn = await _get_active_connection(db)
+    _ = conn  # explicit; connection is used for signing/auth in _call_oc
+
+    now = datetime.utcnow()
+    months = max(int(months_back or 6), 0)
+    # OC docs show format like "2025-01-01T00:00:00+0000". We use UTC.
+    start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=months * 30)
+    end_dt = now.replace(hour=23, minute=59, second=59, microsecond=0)
+
+    # OC rejects time slots longer than 7 days. We must chunk the query window.
+    chunk_days = 7
+
+    # Tenant inbound list endpoint (your tenant returns 404 for other inbound paths).
+    endpoint = "/openapi/3pp/inbound/v1/query"
+
+    def _extract_inbound_rows(resp: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(resp, dict):
+            return []
+        data = resp.get("data")
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+        if isinstance(data, dict):
+            # If it's already a single order object.
+            if any(k in data for k in ("inboundOrderNumber", "referenceNumber", "warehouseCode", "status")):
+                return [data]
+            for key in (
+                "inboundOrderList",
+                "inboundOrders",
+                "inboundOrderResult",
+                "inboundList",
+                "orderList",
+                "orders",
+                "rows",
+                "records",
+                "list",
+                "items",
+            ):
+                val = data.get(key)
+                if isinstance(val, list):
+                    return [x for x in val if isinstance(x, dict)]
+        return []
+
+    def _infer_region_from_warehouse(warehouse_code: str | None) -> str | None:
+        if not warehouse_code:
+            return None
+        # Expected pattern: "UK-xxx", "DE-xxx", "AU-xxx", "US-xxx"
+        normalized = (warehouse_code or "").strip().upper()
+        if not normalized:
+            return None
+        if "-" in normalized:
+            return normalized.split("-", 1)[0].strip().upper()
+        if normalized in {"UK", "DE", "AU", "US"}:
+            return normalized
+        return None
+
+    def _get_ci(d: Dict[str, Any], *names: str) -> Any:
+        """
+        Case-insensitive getter for OC responses.
+        OC sometimes uses mixed casing like SKUQuantity vs putawayQuantity.
+        """
+        if not isinstance(d, dict):
+            return None
+        lower_map = {str(k).lower(): v for k, v in d.items()}
+        for n in names:
+            key = (n or "").lower()
+            if key and key in lower_map:
+                return lower_map[key]
+        return None
+
+    def _dt_to_oc_time(dt: datetime) -> str:
+        return dt.strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+    dedup: Dict[str, Dict[str, Any]] = {}
+    results: List[Dict[str, Any]] = []
+
+    chunk_start = start_dt
+    while chunk_start <= end_dt:
+        chunk_end = min(chunk_start + timedelta(days=chunk_days) - timedelta(seconds=1), end_dt)
+        start_time = _dt_to_oc_time(chunk_start)
+        end_time = _dt_to_oc_time(chunk_end)
+
+        timestamp_ms = int(time.time() * 1000)
+        message_id = str(uuid4())
+
+        # Pagination keys vary by tenant/version, so we try a few variants for the same chunk.
+        data_variants: List[Dict[str, Any]] = [
+            {"startTime": start_time, "endTime": end_time},
+            {"startTime": start_time, "endTime": end_time, "page": page, "limit": page_size},
+            {"startTime": start_time, "endTime": end_time, "pageNumber": page, "pageSize": page_size},
+        ]
+
+        chunk_rows: List[Dict[str, Any]] = []
+        for data_variant in data_variants:
+            body_obj = {"messageId": message_id, "timestamp": timestamp_ms, "data": data_variant}
+            resp = await _call_oc(db, conn, "POST", endpoint, body_obj=body_obj)
+            rows = _extract_inbound_rows(resp)
+            if not rows:
+                continue
+
+            out: List[Dict[str, Any]] = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                warehouse_code = (
+                    _get_ci(r, "warehouseCode", "warehouse_code")
+                    or _get_ci(r, "serviceRegion", "service_region")
+                    or _get_ci(r, "region")
+                    or None
+                )
+                out.append(
+                    {
+                        "seller_inbound_number": str(
+                            _get_ci(
+                                r,
+                                "referenceNumber",
+                                "sellerInboundNumber",
+                                "sellerInboundNo",
+                                "sellerinboundNumber",
+                                "sellerinboundNo",
+                            )
+                            or ""
+                        ).strip(),
+                        "oc_inbound_number": str(
+                            _get_ci(r, "inboundOrderNumber", "inboundNumber", "inboundNo") or ""
+                        ).strip()
+                        or None,
+                        "status": str(_get_ci(r, "status", "inboundStatus") or "").strip() or None,
+                        "warehouse_code": str(warehouse_code).strip() if warehouse_code is not None else None,
+                        "region": _infer_region_from_warehouse(str(warehouse_code)) or None,
+                        "shipping_method": str(
+                            _get_ci(r, "shippingMethod", "shipping_method")
+                            or ""
+                        ).strip()
+                        or None,
+                        "sku_qty": int(_get_ci(r, "skuQty", "sku_qty", "SKUQuantity") or 0),
+                        "put_away_qty": int(_get_ci(r, "putAwayQty", "put_away_qty", "putawayQuantity") or 0),
+                        "raw_payload": r,
+                    }
+                )
+
+            chunk_rows = out
+            break
+
+        for row in chunk_rows:
+            k = f"{(row.get('oc_inbound_number') or '').strip().lower()}::{(row.get('seller_inbound_number') or '').strip().lower()}"
+            if k and k in dedup:
+                continue
+            dedup[k] = row
+            results.append(row)
+
+        # Advance to the next chunk.
+        chunk_start = chunk_end + timedelta(seconds=1)
+
+    return results
+
+
+async def oc_debug_inbound_orders_calls(
+    db: AsyncSession, service_region: str = "UK", page: int = 1, page_size: int = 200, months_back: int = 6
+) -> Dict[str, Any]:
+    """
+    Debug helper: tries multiple inbound query endpoints/bodies and returns verbatim OC responses.
+    Intended for schema alignment when inbound parsing returns empty rows.
+    """
+    conn = await _get_active_connection(db)
+    _ = conn
+    now = datetime.utcnow()
+    months = max(int(months_back or 6), 0)
+    start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=months * 30)
+    end_dt = now.replace(hour=23, minute=59, second=59, microsecond=0)
+
+    # OC rejects time slots longer than 7 days.
+    # For debug, we chunk and show the first few calls.
+    chunk_days = 7
+    max_chunks_debug = 6
+
+    def _dt_to_oc_time(dt: datetime) -> str:
+        return dt.strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+    endpoint = "/openapi/3pp/inbound/v1/query"
+
+    def _extract_inbound_rows(resp: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(resp, dict):
+            return []
+        data = resp.get("data")
+        if isinstance(data, dict):
+            for key in (
+                "inboundOrderList",
+                "inboundOrders",
+                "inboundOrderResult",
+                "inboundList",
+                "orderList",
+                "orders",
+                "rows",
+                "records",
+            ):
+                val = data.get(key)
+                if isinstance(val, list) and val:
+                    dict_items = [x for x in val if isinstance(x, dict)]
+                    if dict_items:
+                        return dict_items
+        return _extract_list(resp)
+
+    attempts: List[Dict[str, Any]] = []
+    last_resp: Dict[str, Any] | None = None
+
+    chunk_start = start_dt
+    chunk_idx = 0
+    while chunk_start <= end_dt and chunk_idx < max_chunks_debug:
+        chunk_end = min(chunk_start + timedelta(days=chunk_days) - timedelta(seconds=1), end_dt)
+        start_time = _dt_to_oc_time(chunk_start)
+        end_time = _dt_to_oc_time(chunk_end)
+        timestamp_ms = int(time.time() * 1000)
+        message_id = str(uuid4())
+
+        # For debug we keep it minimal: first page only.
+        data_variants: List[Dict[str, Any]] = [
+            {"startTime": start_time, "endTime": end_time},
+            {"startTime": start_time, "endTime": end_time, "page": page, "limit": page_size},
+            {"startTime": start_time, "endTime": end_time, "pageNumber": page, "pageSize": page_size},
+        ]
+
+        for data_variant in data_variants:
+            body_obj = {"data": data_variant, "messageId": message_id, "timestamp": timestamp_ms}
+            try:
+                resp = await _call_oc(db, conn, "POST", endpoint, body_obj=body_obj)
+                last_resp = resp
+                extracted = _extract_inbound_rows(resp)
+                attempts.append(
+                    {
+                        "chunk_start": start_time,
+                        "chunk_end": end_time,
+                        "endpoint": endpoint,
+                        "request_body": body_obj,
+                        "oc_response": resp,
+                        "extracted_rows": len(extracted),
+                    }
+                )
+            except Exception as e:  # noqa: BLE001
+                attempts.append(
+                    {
+                        "chunk_start": start_time,
+                        "chunk_end": end_time,
+                        "endpoint": endpoint,
+                        "request_body": body_obj,
+                        "error": str(e),
+                    }
+                )
+
+        chunk_start = chunk_end + timedelta(seconds=1)
+        chunk_idx += 1
+
+    return {
+        "connection": {
+            "region": conn.region,
+            "environment": conn.environment,
+            "oauth_base_url": conn.oauth_base_url,
+            "api_base_url": conn.api_base_url,
+            "signature_mode": conn.signature_mode,
+        },
+        "service_region": service_region,
+        "page": page,
+        "page_size": page_size,
+        "attempts": attempts,
+        "last_response": last_resp,
+    }
 
 
 async def oc_debug_raw_calls(
