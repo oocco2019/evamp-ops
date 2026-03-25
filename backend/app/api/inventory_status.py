@@ -4,6 +4,7 @@ Inventory status API (OrangeConnex, read-only).
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from datetime import datetime, date, timedelta
 from typing import List, Optional
 
@@ -430,10 +431,10 @@ async def list_oc_inventory(
             sold_by_sku_3m[sku_key] = int(s.sold_3m or 0)
             sold_by_sku_1m[sku_key] = int(s.sold_1m or 0)
 
-    payload: List[OCSkuInventoryResponse] = []
+    flat: List[OCSkuInventoryResponse] = []
     for r in rows:
         seller_sku = by_mf.get((r.mfskuid or "").strip().lower()) or None
-        payload.append(
+        flat.append(
             OCSkuInventoryResponse(
                 id=r.id,
                 seller_skuid=seller_sku,
@@ -452,6 +453,46 @@ async def list_oc_inventory(
                 synced_at=r.synced_at,
             )
         )
+
+    # One row per seller SKU: sum OC quantities across regions (UK, US-South, etc.).
+    by_seller: dict[str, List[OCSkuInventoryResponse]] = defaultdict(list)
+    unmapped: List[OCSkuInventoryResponse] = []
+    for p in flat:
+        sk = (p.seller_skuid or "").strip()
+        if sk:
+            by_seller[sk].append(p)
+        else:
+            unmapped.append(p)
+
+    payload: List[OCSkuInventoryResponse] = []
+    for sk in sorted(by_seller.keys(), key=lambda x: x.lower()):
+        items = by_seller[sk]
+        mfs_joined = ",".join(
+            sorted({(p.mfskuid or "").strip() for p in items if (p.mfskuid or "").strip()})
+        )
+        regions_joined = ",".join(
+            sorted({(p.service_region or "").strip() for p in items if (p.service_region or "").strip()})
+        )
+        payload.append(
+            OCSkuInventoryResponse(
+                id=min(p.id for p in items),
+                seller_skuid=sk,
+                mfskuid=mfs_joined or (items[0].mfskuid if items else ""),
+                service_region=regions_joined or (items[0].service_region if items else ""),
+                available=sum(p.available for p in items),
+                in_transit=sum(p.in_transit for p in items),
+                received=sum(p.received for p in items),
+                reserved_allocated=sum(p.reserved_allocated for p in items),
+                reserved_hold=sum(p.reserved_hold for p in items),
+                reserved_vas=sum(p.reserved_vas for p in items),
+                suspend=sum(p.suspend for p in items),
+                unfulfillable=sum(p.unfulfillable for p in items),
+                sold_3m_units=items[0].sold_3m_units,
+                sold_1m_units=items[0].sold_1m_units,
+                synced_at=max(p.synced_at for p in items),
+            )
+        )
+    payload.extend(sorted(unmapped, key=lambda p: (p.mfskuid or "").lower()))
     return payload
 
 

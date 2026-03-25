@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy import select, func, or_, case
 from pydantic import BaseModel, Field
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from app.core.database import get_db
 from app.core.config import settings as app_settings
@@ -730,11 +730,14 @@ async def get_analytics_by_sku(
         qty = sku_qty.get(sku_code, 0)
         profit = sku_profit.get(sku_code, Decimal(0))
         profit_eur = profit * Decimal(str(gbp_to_eur))
+        ppu: Optional[Decimal] = None
+        if qty > 0:
+            ppu = (profit / Decimal(qty)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
         out.append(
             AnalyticsBySkuPoint(
                 sku_code=sku_code,
                 quantity_sold=qty,
-                profit_per_unit=None,
+                profit_per_unit=ppu,
                 profit=profit,
                 profit_eur=profit_eur,
             )

@@ -191,7 +191,7 @@ export default function InventoryStatus() {
               </thead>
               <tbody>
                 {sortedInventoryRows.map((row) => (
-                  <tr key={row.id} className="border-t border-gray-100">
+                  <tr key={row.seller_skuid || `inv-${row.id}`} className="border-t border-gray-100">
                     <td className="px-3 py-2 font-mono">{row.seller_skuid || '—'}</td>
                     <td className="px-3 py-2 text-right">{row.available}</td>
                     <td className="px-3 py-2 text-right">{row.in_transit}</td>

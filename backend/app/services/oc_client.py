@@ -272,6 +272,35 @@ def _extract_list(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return filtered if filtered else rows
 
 
+def _expand_snapshot_service_regions(regions: List[str]) -> List[str]:
+    """
+    OC stock snapshot filters by serviceRegion. Some tenants use coarse codes (UK, DE, AU)
+    but US inventory is keyed under granular regions (e.g. US-South), not plain "US".
+    Inbound list responses show serviceRegion like "US-South"; snapshot with only "US" can return no US rows.
+    """
+    out: List[str] = []
+    seen: set[str] = set()
+    for raw in regions:
+        r = (raw or "").strip()
+        if not r:
+            continue
+        variants: List[str] = [r]
+        if r.upper() == "US":
+            variants.extend(
+                [
+                    "US-South",
+                    "US-North",
+                    "US-West",
+                    "US-East",
+                ]
+            )
+        for v in variants:
+            if v not in seen:
+                seen.add(v)
+                out.append(v)
+    return out
+
+
 async def _fetch_snapshot_rows(
     db: AsyncSession,
     conn: OCConnection,
@@ -279,7 +308,7 @@ async def _fetch_snapshot_rows(
     page_size: int = 200,
 ) -> List[Dict[str, Any]]:
     snapshot_rows: List[Dict[str, Any]] = []
-    for region in regions:
+    for region in _expand_snapshot_service_regions(regions):
         page = 1
         while True:
             body = {
@@ -407,8 +436,33 @@ async def oc_sync_sku_mappings(db: AsyncSession) -> List[Dict[str, Any]]:
         }
     mapped.extend(dedup.values())
     # Attach snapshot rows so caller can persist inventory quantities.
+    def _snapshot_region_matches(pref_u: str, snap_region: str) -> bool:
+        s_u = (snap_region or "").strip().upper()
+        if not pref_u or not s_u:
+            return False
+        if pref_u == s_u:
+            return True
+        # SKU query may return "US" while snapshot rows use "US-South", etc.
+        if pref_u == "US" and s_u.startswith("US"):
+            return True
+        return False
+
     for m in mapped:
-        match = next((s for s in snapshot_rows if str(s.get("MFSKUID") or s.get("mfskuid") or s.get("mfSkuId") or "").strip() == m["mfskuid"]), None)
+        mfs_key = str(m.get("mfskuid") or "").strip()
+        pref = str(m.get("service_region") or "").strip().upper()
+        candidates = [
+            s
+            for s in snapshot_rows
+            if str(s.get("MFSKUID") or s.get("mfskuid") or s.get("mfSkuId") or "").strip() == mfs_key
+        ]
+        match = None
+        if pref and candidates:
+            match = next(
+                (s for s in candidates if _snapshot_region_matches(pref, str(s.get("serviceRegion") or ""))),
+                None,
+            )
+        if match is None and candidates:
+            match = candidates[0]
         if match:
             m["inventory"] = {
                 "available": int(match.get("available") or 0),

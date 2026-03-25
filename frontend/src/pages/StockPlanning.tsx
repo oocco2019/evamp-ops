@@ -1,12 +1,45 @@
 import { useState, useEffect, useCallback } from 'react'
 import { stockAPI, type SKU } from '../services/api'
 
+const formatLocalDate = (d: Date): string => {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+/** GBP profit per unit from Sales Analytics (same logic as /analytics/by-sku). */
+async function fetchHistoricalProfitPerUnitGbp(lookbackDays: number): Promise<Map<string, number>> {
+  const to = new Date()
+  const fromDate = new Date(to)
+  fromDate.setDate(fromDate.getDate() - (lookbackDays - 1))
+  const from = formatLocalDate(fromDate)
+  const toStr = formatLocalDate(to)
+  const res = await stockAPI.getAnalyticsBySku({ from, to: toStr })
+  const m = new Map<string, number>()
+  for (const p of res.data) {
+    let ppu = p.profit_per_unit != null ? Number(p.profit_per_unit) : NaN
+    if (!Number.isFinite(ppu) || ppu <= 0) {
+      if (p.quantity_sold > 0) {
+        const total = parseFloat(p.profit)
+        ppu = Number.isFinite(total) ? total / p.quantity_sold : NaN
+      }
+    }
+    if (Number.isFinite(ppu) && ppu > 0) {
+      m.set(p.sku_code, ppu)
+    }
+  }
+  return m
+}
+
 interface PlanRow {
   sku_code: string
   title: string
   landed_cost: number
   profit_per_unit: number
   units: number
+  /** Realized avg profit per unit (GBP) from sales analytics for the lookback window. */
+  analytics_profit_per_unit_gbp: number | null
 }
 
 export default function StockPlanning() {
@@ -18,6 +51,7 @@ export default function StockPlanning() {
   const [showMessageModal, setShowMessageModal] = useState(false)
   const [orderMessage, setOrderMessage] = useState('')
   const [generatingMessage, setGeneratingMessage] = useState(false)
+  const [analyticsLookbackDays, setAnalyticsLookbackDays] = useState(90)
 
   const loadSkus = useCallback(async () => {
     setLoading(true)
@@ -26,7 +60,6 @@ export default function StockPlanning() {
       const res = await stockAPI.listSKUs()
       const sorted = [...res.data].sort((a, b) => a.sku_code.localeCompare(b.sku_code))
       setSkus(sorted)
-      // Initialize plan rows with units = 0
       setPlanRows(
         sorted.map((s) => ({
           sku_code: s.sku_code,
@@ -34,6 +67,7 @@ export default function StockPlanning() {
           landed_cost: Number(s.landed_cost) || 0,
           profit_per_unit: Number(s.profit_per_unit) || 0,
           units: 0,
+          analytics_profit_per_unit_gbp: null,
         }))
       )
     } catch (e: unknown) {
@@ -47,20 +81,68 @@ export default function StockPlanning() {
     loadSkus()
   }, [loadSkus])
 
+  // Merge Sales Analytics profit/unit (GBP) whenever SKUs load or lookback changes — does not reset units.
+  useEffect(() => {
+    if (skus.length === 0) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const profitMap = await fetchHistoricalProfitPerUnitGbp(analyticsLookbackDays)
+        if (cancelled) return
+        setPlanRows((prev) => {
+          if (prev.length === 0) {
+            return skus.map((s) => ({
+              sku_code: s.sku_code,
+              title: s.title,
+              landed_cost: Number(s.landed_cost) || 0,
+              profit_per_unit: Number(s.profit_per_unit) || 0,
+              units: 0,
+              analytics_profit_per_unit_gbp: profitMap.get(s.sku_code) ?? null,
+            }))
+          }
+          return prev.map((r) => ({
+            ...r,
+            analytics_profit_per_unit_gbp: profitMap.get(r.sku_code) ?? null,
+          }))
+        })
+      } catch {
+        // non-fatal
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [skus, analyticsLookbackDays])
+
   const updateUnits = (skuCode: string, units: number) => {
     setPlanRows((prev) =>
       prev.map((row) => (row.sku_code === skuCode ? { ...row, units: Math.max(0, units) } : row))
     )
   }
 
-  // Calculate totals
-  const calculateCost = (row: PlanRow) => row.landed_cost * row.units
-  const calculateCostUSD = (row: PlanRow) => calculateCost(row) * 1.35
-  const calculateProfit = (row: PlanRow) => row.units * row.profit_per_unit * 0.8
+  // Landed cost is stored in USD. Line extension in USD = landed_cost × units.
+  // GBP uses fixed rate: 1 GBP = USD_PER_GBP USD (so GBP = USD / USD_PER_GBP).
+  const USD_PER_GBP = 1.35
+
+  const calculateCostUSD = (row: PlanRow) => row.landed_cost * row.units
+  const calculateCostGBP = (row: PlanRow) => calculateCostUSD(row) / USD_PER_GBP
+  /**
+   * Est. profit in GBP: prefer realized avg from Sales Analytics (same methodology as Analytics → by SKU).
+   * Otherwise manual SKU `profit_per_unit` with ×0.8 planning haircut.
+   */
+  const calculateProfit = (row: PlanRow) => {
+    const u = row.units
+    if (u <= 0) return 0
+    const hist = row.analytics_profit_per_unit_gbp
+    if (hist != null && hist > 0) {
+      return u * hist
+    }
+    return u * row.profit_per_unit * 0.8
+  }
 
   const totalUnits = planRows.reduce((sum, r) => sum + r.units, 0)
-  const totalCost = planRows.reduce((sum, r) => sum + calculateCost(r), 0)
   const totalCostUSD = planRows.reduce((sum, r) => sum + calculateCostUSD(r), 0)
+  const totalCostGBP = totalCostUSD / USD_PER_GBP
   const totalProfit = planRows.reduce((sum, r) => sum + calculateProfit(r), 0)
 
   // Only show rows with units > 0 in summary
@@ -69,9 +151,10 @@ export default function StockPlanning() {
   const handleCopyPlan = () => {
     if (activeRows.length === 0) return
     const lines = activeRows.map(
-      (r) => `${r.sku_code}\t${r.title}\t${r.units}\t${calculateCost(r).toFixed(2)}`
+      (r) =>
+        `${r.sku_code}\t${r.title}\t${r.units}\t${calculateCostUSD(r).toFixed(2)}\t${calculateCostGBP(r).toFixed(2)}`
     )
-    const text = `SKU\tTitle\tUnits\tCost\n${lines.join('\n')}\n\nTotal: ${totalUnits} units, Cost: ${totalCost.toFixed(2)}`
+    const text = `SKU\tTitle\tUnits\tCost USD\tCost GBP\n${lines.join('\n')}\n\nTotal: ${totalUnits} units, USD: ${totalCostUSD.toFixed(2)}, GBP: ${totalCostGBP.toFixed(2)}`
     navigator.clipboard.writeText(text)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
@@ -110,9 +193,29 @@ export default function StockPlanning() {
   return (
     <div className="px-4 py-6 sm:px-0">
       <h1 className="text-3xl font-bold text-gray-900 mb-4">Stock Planning</h1>
-      <p className="text-gray-600 mb-6">
-        Enter units to order for each SKU. Costs and profit are calculated automatically.
+      <p className="text-gray-600 mb-4">
+        Enter units to order for each SKU. Landed cost is in USD; line totals show GBP (÷ {USD_PER_GBP}{' '}
+        USD/GBP) and USD.
       </p>
+      <div className="flex flex-wrap items-center gap-3 mb-6 text-sm text-gray-700">
+        <label className="flex items-center gap-2">
+          <span className="text-gray-600">Profit lookback (Sales Analytics)</span>
+          <select
+            className="rounded border border-gray-300 px-2 py-1"
+            value={analyticsLookbackDays}
+            onChange={(e) => setAnalyticsLookbackDays(Number(e.target.value))}
+          >
+            <option value={30}>Last 30 days</option>
+            <option value={90}>Last 90 days</option>
+            <option value={180}>Last 180 days</option>
+            <option value={365}>Last 365 days</option>
+          </select>
+        </label>
+        <span className="text-gray-500">
+          Est. profit (GBP) = planned units × average profit/unit from that window (same logic as Sales
+          Analytics → by SKU). If a SKU has no sales in the window, we use the manual SKU profit field ×0.8.
+        </span>
+      </div>
 
       {error && (
         <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
@@ -127,15 +230,15 @@ export default function StockPlanning() {
           <p className="text-2xl font-bold text-gray-900">{totalUnits}</p>
         </div>
         <div className="bg-white shadow rounded-lg p-4">
-          <p className="text-sm text-gray-500">Total Cost</p>
-          <p className="text-2xl font-bold text-gray-900">{totalCost.toFixed(2)}</p>
+          <p className="text-sm text-gray-500">Total Cost (GBP)</p>
+          <p className="text-2xl font-bold text-gray-900">{totalCostGBP.toFixed(2)}</p>
         </div>
         <div className="bg-white shadow rounded-lg p-4">
-          <p className="text-sm text-gray-500">Cost USD (×1.35)</p>
+          <p className="text-sm text-gray-500">Total Cost (USD)</p>
           <p className="text-2xl font-bold text-gray-900">{totalCostUSD.toFixed(2)}</p>
         </div>
         <div className="bg-white shadow rounded-lg p-4">
-          <p className="text-sm text-gray-500">Est. Profit (×0.8)</p>
+          <p className="text-sm text-gray-500">Est. profit (GBP)</p>
           <p className="text-2xl font-bold text-green-600">{totalProfit.toFixed(2)}</p>
         </div>
       </div>
@@ -223,17 +326,20 @@ export default function StockPlanning() {
                 <tr className="bg-gray-50">
                   <th className="px-4 py-3 text-left font-medium text-gray-700">SKU</th>
                   <th className="px-4 py-3 text-left font-medium text-gray-700">Title</th>
-                  <th className="px-4 py-3 text-right font-medium text-gray-700">Landed Cost</th>
+                  <th className="px-4 py-3 text-right font-medium text-gray-700">Landed Cost (USD)</th>
                   <th className="px-4 py-3 text-right font-medium text-gray-700">Units</th>
-                  <th className="px-4 py-3 text-right font-medium text-gray-700">Cost</th>
-                  <th className="px-4 py-3 text-right font-medium text-gray-700">Cost USD</th>
-                  <th className="px-4 py-3 text-right font-medium text-gray-700">Profit</th>
+                  <th className="px-4 py-3 text-right font-medium text-gray-700">Cost (GBP)</th>
+                  <th className="px-4 py-3 text-right font-medium text-gray-700">Cost (USD)</th>
+                  <th className="px-4 py-3 text-right font-medium text-gray-700" title="From Sales Analytics for the lookback window">
+                    Avg £/unit (hist.)
+                  </th>
+                  <th className="px-4 py-3 text-right font-medium text-gray-700">Est. profit (GBP)</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-200">
                 {planRows.map((row) => {
-                  const cost = calculateCost(row)
                   const costUSD = calculateCostUSD(row)
+                  const costGBP = calculateCostGBP(row)
                   const profit = calculateProfit(row)
                   return (
                     <tr
@@ -260,10 +366,15 @@ export default function StockPlanning() {
                         />
                       </td>
                       <td className="px-4 py-2 text-right text-gray-700">
-                        {row.units > 0 ? cost.toFixed(2) : '-'}
+                        {row.units > 0 ? costGBP.toFixed(2) : '-'}
                       </td>
                       <td className="px-4 py-2 text-right text-gray-700">
                         {row.units > 0 ? costUSD.toFixed(2) : '-'}
+                      </td>
+                      <td className="px-4 py-2 text-right text-gray-600 text-xs">
+                        {row.analytics_profit_per_unit_gbp != null && row.analytics_profit_per_unit_gbp > 0
+                          ? row.analytics_profit_per_unit_gbp.toFixed(4)
+                          : '—'}
                       </td>
                       <td className="px-4 py-2 text-right text-green-600 font-medium">
                         {row.units > 0 ? profit.toFixed(2) : '-'}
@@ -279,8 +390,9 @@ export default function StockPlanning() {
                       Totals
                     </td>
                     <td className="px-4 py-3 text-right">{totalUnits}</td>
-                    <td className="px-4 py-3 text-right">{totalCost.toFixed(2)}</td>
+                    <td className="px-4 py-3 text-right">{totalCostGBP.toFixed(2)}</td>
                     <td className="px-4 py-3 text-right">{totalCostUSD.toFixed(2)}</td>
+                    <td className="px-4 py-3 text-right">—</td>
                     <td className="px-4 py-3 text-right text-green-600">{totalProfit.toFixed(2)}</td>
                   </tr>
                 </tfoot>
