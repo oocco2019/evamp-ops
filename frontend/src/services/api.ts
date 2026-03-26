@@ -3,7 +3,11 @@
  */
 import axios from 'axios'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+/**
+ * Empty base URL = same-origin requests to `/api/...` (works with Vite dev proxy).
+ * Set VITE_API_URL only when the API is on another origin (e.g. production).
+ */
+const API_BASE_URL = import.meta.env.VITE_API_URL ?? ''
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -101,6 +105,25 @@ export interface OCInboundOrderRow {
   shipping_method: string | null
   sku_qty: number
   put_away_qty: number
+}
+
+export interface InboundOrderStatusSlice {
+  status: string
+  count: number
+}
+
+export interface InboundOrderStatusSummary {
+  from_date: string
+  to_date: string
+  total_orders: number
+  slices: InboundOrderStatusSlice[]
+  last_sync_at: string | null
+}
+
+export interface InboundSyncResponse {
+  synced: number
+  message: string
+  full: boolean
 }
 
 // Settings API
@@ -224,6 +247,47 @@ export interface AnalyticsByCountryPoint {
   profit_eur?: string | null
 }
 
+/** Matches GET /api/stock/analytics/order-details (same profit rules as by-sku). */
+export interface OrderDetailRow {
+  ebay_order_id: string
+  order_date: string
+  country: string
+  sku: string
+  quantity: number
+  total_due_seller: string | null
+  total_due_seller_currency: string | null
+  order_currency: string | null
+  price_total: string | null
+  tax_total: string | null
+  line_total: string | null
+  price_gbp: string
+  line_landed_gbp: string
+  line_postage_gbp: string
+  line_cost_gbp: string
+  order_cost_gbp: string
+  vat_gbp: string
+  order_gross_profit_gbp: string | null
+  profit_tax_rate: number
+  order_net_profit_gbp: string | null
+  allocation_share: string
+  line_gross_profit_gbp: string | null
+  line_net_profit_gbp: string | null
+}
+
+export interface OrderDetailsTotals {
+  row_count: number
+  units: number
+  sum_line_cost_gbp: string
+  sum_line_net_profit_gbp: string
+  sum_line_gross_profit_gbp: string
+  sum_order_payout_gbp: string
+}
+
+export interface OrderDetailsResponse {
+  rows: OrderDetailRow[]
+  totals: OrderDetailsTotals
+}
+
 export interface OrderLineItemRow {
   id: number
   ebay_line_item_id: string
@@ -238,6 +302,7 @@ export interface OrderLineItemRow {
 
 export interface OrderWithLines {
   order_id: number
+  sales_channel: string
   ebay_order_id: string
   date: string
   country: string
@@ -327,6 +392,13 @@ export const stockAPI = {
     to: string
     sku?: string
   }) => api.get<AnalyticsByCountryPoint[]>('/api/stock/analytics/by-country', { params }),
+
+  getOrderDetails: (params: {
+    from: string
+    to: string
+    country?: string
+    sku?: string
+  }) => api.get<OrderDetailsResponse>('/api/stock/analytics/order-details', { params }),
 
   getLatestOrders: (limit = 10) =>
     api.get<OrderWithLines[]>('/api/stock/orders/latest', { params: { limit } }),
@@ -451,10 +523,15 @@ export const messagesAPI = {
     })
   },
   /** Refetch messages for this thread from eBay (single API call). Use after send instead of full sync. */
-  refreshThread: (threadId: string) =>
-    api.post<void>(`/api/messages/threads/${threadId}/refresh`),
+  refreshThread: (threadId: string, timeoutMs = 30000) =>
+    api.post<void>(`/api/messages/threads/${threadId}/refresh`, {}, { timeout: timeoutMs }),
+  /** Incremental: default 90s. Full backfill: 5 min (align reverse-proxy timeouts in production). */
   sync: (timeoutMs = 90000, full = false) =>
-    api.post<{ message: string; synced: number }>('/api/messages/sync', {}, { timeout: timeoutMs, params: { full: full ? 'true' : undefined } }),
+    api.post<{ message: string; synced: number }>(
+      '/api/messages/sync',
+      {},
+      { timeout: full ? 300000 : timeoutMs, params: { full: full ? 'true' : undefined } }
+    ),
   toggleFlag: (threadId: string, isFlagged: boolean) =>
     api.patch<{ thread_id: string; is_flagged: boolean }>(
       `/api/messages/threads/${threadId}/flag`,
@@ -679,6 +756,16 @@ export const inventoryStatusAPI = {
       params: sku ? { sku } : {},
     }),
   listInventory: () => api.get<OCSkuInventoryRow[]>('/api/inventory-status/inventory'),
+  /** Cached counts from DB; run syncInboundOrders to refresh from OC. */
+  getInboundOrderStatusSummary: () =>
+    api.get<InboundOrderStatusSummary>('/api/inventory-status/inbound-orders/status-summary'),
+  /** Pull inbound orders from OC into DB. Incremental by default; full=true backfills from 2024-01-01 (slow). */
+  syncInboundOrders: (full = false) =>
+    api.post<InboundSyncResponse>(
+      '/api/inventory-status/inbound-orders/sync',
+      {},
+      { params: { full: full ? 'true' : undefined }, timeout: 300_000 }
+    ),
   listInboundOrders: (params?: { months_back?: number }) =>
     api.get<OCInboundOrderRow[]>('/api/inventory-status/inbound-orders', { params: params ?? {} }),
 }

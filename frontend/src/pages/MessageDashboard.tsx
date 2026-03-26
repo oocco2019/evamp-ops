@@ -90,6 +90,8 @@ export default function MessageDashboard() {
   const [translatingReply, setTranslatingReply] = useState(false)
   const [detectedLang, setDetectedLang] = useState<string>('en')
   const syncingRef = useRef(false)
+  /** Increments on each thread click so stale eBay refresh results are ignored if user switched threads. */
+  const selectThreadSeqRef = useRef(0)
   const [replyHeight, setReplyHeight] = useState(() => getStoredHeight(REPLY_HEIGHT_STORAGE_KEY))
   const [aiPromptHeight, setAiPromptHeight] = useState(() => getStoredHeight(AI_PROMPT_HEIGHT_STORAGE_KEY))
   const replyTextareaRef = useRef<HTMLTextAreaElement | null>(null)
@@ -217,10 +219,13 @@ export default function MessageDashboard() {
     }
   }, [selectedEmailTemplate])
 
-  const loadThreads = useCallback(async () => {
-    setLoading(true)
-    setError(null)
-    setThreadsStatus('Loading threads...')
+  const loadThreads = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent ?? false
+    if (!silent) {
+      setLoading(true)
+      setError(null)
+      setThreadsStatus('Loading threads...')
+    }
     try {
       const params: { filter?: 'unread' | 'flagged'; search?: string; sender_type?: 'customer' | 'ebay' } = {}
       if (filter !== 'all') params.filter = filter
@@ -228,49 +233,78 @@ export default function MessageDashboard() {
       if (senderType !== 'all') params.sender_type = senderType
       const res = await messagesAPI.listThreads(params)
       setThreads(res.data)
-      const searchNote = searchQuery.trim() ? ` matching "${searchQuery}"` : ''
-      setThreadsStatus(`Loaded ${res.data.length} thread${res.data.length !== 1 ? 's' : ''}${searchNote}.`)
+      if (!silent) {
+        const searchNote = searchQuery.trim() ? ` matching "${searchQuery}"` : ''
+        setThreadsStatus(`Loaded ${res.data.length} thread${res.data.length !== 1 ? 's' : ''}${searchNote}.`)
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to load threads'
-      setError(msg)
-      setThreads([])
-      const ax = e as { response?: { status?: number; data?: { detail?: string } } }
-      const detail = ax.response?.data?.detail ?? ax.response?.status ?? ''
-      setThreadsStatus(`Error: ${msg}${detail ? ` (${detail})` : ''}`)
+      if (!silent) {
+        setError(msg)
+        setThreads([])
+        const ax = e as { response?: { status?: number; data?: { detail?: string } } }
+        const detail = ax.response?.data?.detail ?? ax.response?.status ?? ''
+        setThreadsStatus(`Error: ${msg}${detail ? ` (${detail})` : ''}`)
+      }
     } finally {
-      setLoading(false)
+      if (!silent) setLoading(false)
     }
   }, [filter, searchQuery, senderType])
 
-  const loadThread = useCallback(async (threadId: string) => {
-    setLoading(true)
-    setError(null)
-    setDraft('')
-    setReplyContent('')
-    setReplyTranslation(null)
-    try {
-      const res = await messagesAPI.getThread(threadId)
-      setSelectedThread(res.data)
-      const hasTranslations = res.data.messages.some((m) => m.translated_content)
-      setShowTranslation(hasTranslations)
-      const nonEnglishMsg = res.data.messages.find(
-        (m) => m.detected_language && m.detected_language !== 'en'
-      )
-      setDetectedLang(nonEnglishMsg?.detected_language || 'en')
-      messagesAPI.markThreadRead(threadId).catch(() => {})
-      loadFlaggedCount()
-      loadThreads()
-    } catch (e: unknown) {
-      const ax = e as { response?: { data?: { detail?: string | string[] }; status?: number }; message?: string }
-      const detail = ax.response?.data?.detail
-      const detailStr = Array.isArray(detail) ? detail.join(' ') : typeof detail === 'string' ? detail : ''
-      const msg = detailStr || (e instanceof Error ? e.message : 'Failed to load thread')
-      setError(msg)
-      setSelectedThread(null)
-    } finally {
-      setLoading(false)
-    }
-  }, [loadFlaggedCount, loadThreads])
+  const loadThread = useCallback(
+    async (threadId: string, opts?: { silent?: boolean }) => {
+      const silent = opts?.silent ?? false
+      if (!silent) {
+        setLoading(true)
+        setError(null)
+        setDraft('')
+        setReplyContent('')
+        setReplyTranslation(null)
+      }
+      try {
+        const res = await messagesAPI.getThread(threadId)
+        setSelectedThread(res.data)
+        const hasTranslations = res.data.messages.some((m) => m.translated_content)
+        setShowTranslation(hasTranslations)
+        const nonEnglishMsg = res.data.messages.find(
+          (m) => m.detected_language && m.detected_language !== 'en'
+        )
+        setDetectedLang(nonEnglishMsg?.detected_language || 'en')
+        messagesAPI.markThreadRead(threadId).catch(() => {})
+        loadFlaggedCount()
+        loadThreads({ silent })
+      } catch (e: unknown) {
+        const ax = e as { response?: { data?: { detail?: string | string[] }; status?: number }; message?: string }
+        const detail = ax.response?.data?.detail
+        const detailStr = Array.isArray(detail) ? detail.join(' ') : typeof detail === 'string' ? detail : ''
+        const msg = detailStr || (e instanceof Error ? e.message : 'Failed to load thread')
+        if (!silent) {
+          setError(msg)
+          setSelectedThread(null)
+        }
+      } finally {
+        if (!silent) setLoading(false)
+      }
+    },
+    [loadFlaggedCount, loadThreads]
+  )
+
+  /** Load thread from DB, then latest from eBay (no global sync lock), then reload. */
+  const openThread = useCallback(
+    async (threadId: string) => {
+      const seq = ++selectThreadSeqRef.current
+      await loadThread(threadId)
+      if (selectThreadSeqRef.current !== seq) return
+      try {
+        await messagesAPI.refreshThread(threadId)
+      } catch (e) {
+        console.warn('Thread refresh from eBay failed:', e)
+      }
+      if (selectThreadSeqRef.current !== seq) return
+      await loadThread(threadId, { silent: true })
+    },
+    [loadThread]
+  )
 
   const handleSync = useCallback(async (full = false) => {
     if (syncingRef.current) return
@@ -278,11 +312,15 @@ export default function MessageDashboard() {
     setSyncing(true)
     setError(null)
     setSyncStatus('syncing')
-    setSyncMessage(full ? 'Full sync: fetching all threads from eBay...' : 'Syncing with eBay... this may take up to a minute.')
+    setSyncMessage(
+      full
+        ? 'Full backfill: scanning all threads from eBay (may take several minutes; list updates as pages complete)...'
+        : 'Quick sync: fetching recent activity from eBay...'
+    )
     try {
       const res = await messagesAPI.sync(90000, full)
       setSyncStatus('success')
-      setSyncMessage(res.data.message ?? `Synced: ${res.data.synced ?? 0} threads.`)
+      setSyncMessage(res.data.message ?? `Synced: ${res.data.synced ?? 0} messages.`)
       loadThreads()
       loadFlaggedCount()
     } catch (e: unknown) {
@@ -296,7 +334,9 @@ export default function MessageDashboard() {
       const isAlreadySyncing = statusCode === 503
       setSyncMessage(
         isTimeout
-          ? 'Sync failed: Request timed out (90s). Check backend is running and try again.'
+          ? full
+            ? 'Full sync timed out (5 min client limit). Partial progress may be saved; try Quick sync or open a thread to refresh.'
+            : 'Sync failed: Request timed out (90s). Check backend is running and try again.'
           : isConflict
             ? (detail || 'Sync conflict. Please try again.')
             : isAlreadySyncing
@@ -469,18 +509,22 @@ export default function MessageDashboard() {
     loadThreads()
   }, [loadThreads])
 
-  // Poll backend sync status to show accurate state (backend might be syncing from another request)
+  // Poll backend sync status; while a sync runs, refresh thread list silently (chunked commits surface new rows progressively)
   useEffect(() => {
     const checkSyncStatus = async () => {
       try {
         const res = await messagesAPI.getSyncStatus()
-        if (res.data.is_syncing && syncStatus !== 'syncing') {
-          setSyncStatus('syncing')
-          setSyncMessage('Sync already in progress.')
+        if (res.data.is_syncing) {
+          loadThreads({ silent: true })
+          if (syncStatus !== 'syncing') {
+            setSyncStatus('syncing')
+            setSyncMessage('Sync already in progress.')
+          }
         } else if (!res.data.is_syncing && syncStatus === 'syncing' && !syncingRef.current) {
           // Backend finished but we didn't get the response (e.g. timeout), reset to idle
           setSyncStatus('idle')
           setSyncMessage('')
+          loadThreads({ silent: true })
         }
       } catch {
         // Ignore errors polling sync status
@@ -488,7 +532,7 @@ export default function MessageDashboard() {
     }
     const interval = setInterval(checkSyncStatus, 2000) // Check every 2s
     return () => clearInterval(interval)
-  }, [syncStatus])
+  }, [syncStatus, loadThreads])
 
   const SYNC_POLL_INTERVAL_MS = 90_000
 
@@ -666,7 +710,7 @@ export default function MessageDashboard() {
           </li>
           <li>
             <span className="text-gray-500">Sync:</span>{' '}
-            {syncStatus === 'idle' && 'Idle. Click "Sync messages" to run.'}
+            {syncStatus === 'idle' && 'Idle. Use Quick sync or open a thread (auto-refreshes from eBay).'}
             {syncStatus === 'syncing' && (
               <span className="text-blue-600">
                 <span className="inline-block animate-spin mr-2">&#8635;</span>
@@ -694,12 +738,21 @@ export default function MessageDashboard() {
       <div className="flex flex-wrap gap-2 mb-4 items-center">
         <button
           type="button"
-          onClick={() => handleSync(true)}
+          onClick={() => handleSync(false)}
           disabled={syncing}
           className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 text-sm font-medium"
-          title="Full sync: fetches all threads from eBay (including where you were last to reply)"
+          title="Quick sync: recent buyer activity (incremental)"
         >
-          {syncing ? 'Syncing...' : 'Sync messages'}
+          {syncing ? 'Syncing...' : 'Quick sync'}
+        </button>
+        <button
+          type="button"
+          onClick={() => handleSync(true)}
+          disabled={syncing}
+          className="px-3 py-2 border border-gray-300 text-gray-800 rounded hover:bg-gray-50 disabled:opacity-50 text-sm"
+          title="Full backfill: all member threads (slower; may take several minutes)"
+        >
+          Full backfill
         </button>
         <select
           value={filter}
@@ -779,7 +832,7 @@ export default function MessageDashboard() {
           ) : threads.length === 0 ? (
             <p className="p-4 text-gray-500 text-sm">
               {filter === 'all'
-                ? 'No threads. Click "Sync messages" to pull messages from eBay.'
+                ? 'No threads. Click Quick sync to pull messages from eBay.'
                 : 'No messages found for the selected filter.'}
             </p>
           ) : (
@@ -788,7 +841,7 @@ export default function MessageDashboard() {
                 <li key={t.thread_id}>
                   <button
                     type="button"
-                    onClick={() => loadThread(t.thread_id)}
+                    onClick={() => openThread(t.thread_id)}
                     className={`w-full text-left p-4 hover:bg-gray-50 ${
                       selectedThread?.thread_id === t.thread_id ? 'bg-blue-50 border-l-4 border-blue-600' : ''
                     }`}

@@ -6,6 +6,7 @@ This doc captures how the Sales Analytics page works and why, so context is pres
 
 - **Filters:** From / To date, Group by (day/week/month), Country, SKU. All drive the analytics queries.
 - **Cards:** Units sold (total); Profit (GBP and EUR, after 30% tax) – see [ANALYTICS_PROFIT_LOGIC.md](ANALYTICS_PROFIT_LOGIC.md).
+- **Order details (separate page):** For **line-level transparency** (payout, COGS, VAT, allocated profit per line), use the **Order details** nav item (`/order-details`). See [ORDER_DETAILS_AND_ANALYTICS_TRANSPARENCY.md](ORDER_DETAILS_AND_ANALYTICS_TRANSPARENCY.md).
 - **Chart:** Units sold by period (bar chart).
 - **Tables:** Sales by Country; Sales by SKU. Both show quantity sold and profit (GBP only in the tables).
 

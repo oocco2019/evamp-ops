@@ -4,17 +4,19 @@ Inventory status API (OrangeConnex, read-only).
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
-from datetime import datetime, date, timedelta
-from typing import List, Optional
+from datetime import datetime, date, timedelta, timezone, time as dt_time
+from typing import Any, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.models.settings import APICredential, OCConnection, OCSkuMapping, OCSkuInventory
+from app.models.settings import APICredential, OCConnection, OCSkuMapping, OCSkuInventory, OCInboundOrder
+from app.models.messages import SyncMetadata
 from app.models.stock import LineItem, Order
 from app.core.security import encryption_service
 from app.services.oc_client import (
@@ -30,6 +32,9 @@ from app.services.oc_client import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+SYNC_META_INBOUND_LAST = "oc_inbound_last_sync_at"
 
 
 class OCConnectionUpsertRequest(BaseModel):
@@ -156,6 +161,133 @@ class OCInboundOrderResponse(BaseModel):
     shipping_method: Optional[str] = None
     sku_qty: int = 0
     put_away_qty: int = 0
+
+
+class InboundOrderStatusSlice(BaseModel):
+    status: str
+    count: int
+
+
+class InboundOrderStatusSummaryResponse(BaseModel):
+    """Aggregated inbound order counts by status (cached DB; sync via POST /inbound-orders/sync)."""
+
+    from_date: str
+    to_date: str
+    total_orders: int
+    slices: List[InboundOrderStatusSlice]
+    last_sync_at: Optional[str] = None
+
+
+class InboundSyncResponse(BaseModel):
+    synced: int
+    message: str
+    full: bool
+
+
+# Earliest date for historic inbound status chart (inclusive, UTC).
+INBOUND_STATUS_CHART_FROM = date(2024, 1, 1)
+
+
+async def _active_oc_connection_id(db: AsyncSession) -> Optional[int]:
+    r = await db.execute(select(OCConnection.id).where(OCConnection.is_active == True).limit(1))
+    row = r.first()
+    return int(row[0]) if row else None
+
+
+def _inbound_dedup_key(seller: str, oc: Optional[str]) -> str:
+    s = (seller or "").strip().lower()
+    o = (oc or "").strip().lower()
+    return f"{o}::{s}"
+
+
+def _parse_inbound_at(raw: Any) -> Optional[datetime]:
+    if not isinstance(raw, dict):
+        return None
+    lower = {str(k).lower(): v for k, v in raw.items()}
+    for k in ("createtime", "createdtime", "inboundcreatetime", "createddate", "inboundcreatedtime"):
+        v = lower.get(k)
+        if v is None:
+            continue
+        try:
+            ts = str(v).strip()
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            dt = datetime.fromisoformat(ts)
+            return dt.replace(tzinfo=None) if dt.tzinfo else dt
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+async def _get_sync_meta_value(db: AsyncSession, key: str) -> Optional[str]:
+    r = await db.execute(select(SyncMetadata.value).where(SyncMetadata.key == key))
+    row = r.first()
+    return str(row[0]) if row and row[0] else None
+
+
+async def _set_sync_meta_value(db: AsyncSession, key: str, value: str) -> None:
+    r = await db.execute(select(SyncMetadata).where(SyncMetadata.key == key))
+    row = r.scalar_one_or_none()
+    if row:
+        row.value = value
+    else:
+        db.add(SyncMetadata(key=key, value=value))
+
+
+async def _upsert_inbound_rows(db: AsyncSession, connection_id: int, rows: List[dict]) -> int:
+    """Upsert OC inbound rows into oc_inbound_orders. Returns number of input rows processed."""
+    now = datetime.utcnow()
+    n = 0
+    for r in rows:
+        seller = str(r.get("seller_inbound_number") or "").strip()
+        oc = r.get("oc_inbound_number")
+        dk = _inbound_dedup_key(seller, oc)
+        if dk in ("", "::"):
+            continue
+        raw = r.get("raw_payload")
+        inbound_at = _parse_inbound_at(raw) if isinstance(raw, dict) else None
+        raw_s = json.dumps(raw, ensure_ascii=False) if raw is not None else None
+        existing_r = await db.execute(
+            select(OCInboundOrder).where(
+                OCInboundOrder.connection_id == connection_id,
+                OCInboundOrder.dedup_key == dk,
+            )
+        )
+        existing = existing_r.scalar_one_or_none()
+        if existing:
+            existing.seller_inbound_number = seller
+            existing.oc_inbound_number = oc
+            existing.status = r.get("status")
+            existing.warehouse_code = r.get("warehouse_code")
+            existing.region = r.get("region")
+            existing.shipping_method = r.get("shipping_method")
+            existing.sku_qty = int(r.get("sku_qty") or 0)
+            existing.put_away_qty = int(r.get("put_away_qty") or 0)
+            if inbound_at:
+                existing.inbound_at = inbound_at
+            if raw_s:
+                existing.raw_payload = raw_s
+            existing.synced_at = now
+        else:
+            db.add(
+                OCInboundOrder(
+                    connection_id=connection_id,
+                    dedup_key=dk,
+                    seller_inbound_number=seller,
+                    oc_inbound_number=oc,
+                    status=r.get("status"),
+                    warehouse_code=r.get("warehouse_code"),
+                    region=r.get("region"),
+                    shipping_method=r.get("shipping_method"),
+                    sku_qty=int(r.get("sku_qty") or 0),
+                    put_away_qty=int(r.get("put_away_qty") or 0),
+                    inbound_at=inbound_at,
+                    raw_payload=raw_s,
+                    synced_at=now,
+                )
+            )
+        n += 1
+    return n
 
 
 @router.get("/summary", response_model=InventoryStatusSummary)
@@ -496,33 +628,146 @@ async def list_oc_inventory(
     return payload
 
 
+@router.post("/inbound-orders/sync", response_model=InboundSyncResponse)
+async def sync_oc_inbound_orders_to_db(
+    full: bool = Query(False, description="If true, re-fetch from 2024-01-01 through now. If false, incremental since last sync (min 7-day overlap)."),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Pull inbound orders from OrangeConnex and upsert into `oc_inbound_orders`.
+    Logs each chunk to the application logger. Use `full=true` for a complete backfill.
+    """
+    cid = await _active_oc_connection_id(db)
+    if not cid:
+        raise HTTPException(status_code=400, detail="No active OC connection configured.")
+    end = datetime.now(timezone.utc).replace(tzinfo=None)
+    if full:
+        date_from = INBOUND_STATUS_CHART_FROM
+        logger.info("OC inbound DB sync: FULL from %s to %s", date_from, end.date())
+    else:
+        raw_last = await _get_sync_meta_value(db, SYNC_META_INBOUND_LAST)
+        if raw_last:
+            try:
+                last = datetime.fromisoformat(raw_last.replace("Z", "+00:00")).replace(tzinfo=None)
+                overlap_start = last - timedelta(days=7)
+                floor = datetime.combine(INBOUND_STATUS_CHART_FROM, dt_time.min)
+                date_from = max(floor, overlap_start).date()
+            except (ValueError, TypeError):
+                date_from = INBOUND_STATUS_CHART_FROM
+        else:
+            date_from = INBOUND_STATUS_CHART_FROM
+        logger.info("OC inbound DB sync: incremental from %s to %s", date_from, end.date())
+
+    processed = 0
+    try:
+        rows = await oc_fetch_inbound_orders(
+            db,
+            months_back=6,
+            date_from=date_from,
+            date_to=end,
+        )
+        logger.info("OC inbound DB sync: fetched %d unique orders from API, upserting", len(rows))
+        processed = await _upsert_inbound_rows(db, cid, rows)
+        await _set_sync_meta_value(db, SYNC_META_INBOUND_LAST, datetime.now(timezone.utc).isoformat())
+        await db.commit()
+        logger.info("OC inbound DB sync: committed %d rows", processed)
+    except (OCConfigError, OCAPIError) as e:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        await db.rollback()
+        logger.exception("OC inbound DB sync failed: %s", e)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC inbound sync failed: {e}") from e
+
+    return InboundSyncResponse(
+        synced=processed,
+        message="Inbound orders cached. Charts and tables read from the database.",
+        full=full,
+    )
+
+
+@router.get("/inbound-orders/status-summary", response_model=InboundOrderStatusSummaryResponse)
+async def inbound_orders_status_summary(db: AsyncSession = Depends(get_db)):
+    """
+    Count inbound orders by status from the cached `oc_inbound_orders` table (fast).
+    Run POST /inbound-orders/sync to refresh from OrangeConnex.
+    """
+    cid = await _active_oc_connection_id(db)
+    if not cid:
+        return InboundOrderStatusSummaryResponse(
+            from_date=INBOUND_STATUS_CHART_FROM.isoformat(),
+            to_date=date.today().isoformat(),
+            total_orders=0,
+            slices=[],
+            last_sync_at=None,
+        )
+
+    status_expr = func.coalesce(OCInboundOrder.status, "(no status)")
+    stmt = (
+        select(status_expr, func.count())
+        .where(OCInboundOrder.connection_id == cid)
+        .group_by(status_expr)
+    )
+    result = await db.execute(stmt)
+    counts: dict[str, int] = {}
+    total = 0
+    for st_val, cnt in result.all():
+        k = str(st_val) if st_val is not None else "(no status)"
+        c = int(cnt)
+        counts[k] = c
+        total += c
+    slices = [
+        InboundOrderStatusSlice(status=k, count=v)
+        for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))
+    ]
+    last_sync = await _get_sync_meta_value(db, SYNC_META_INBOUND_LAST)
+    return InboundOrderStatusSummaryResponse(
+        from_date=INBOUND_STATUS_CHART_FROM.isoformat(),
+        to_date=date.today().isoformat(),
+        total_orders=total,
+        slices=slices,
+        last_sync_at=last_sync,
+    )
+
+
 @router.get("/inbound-orders", response_model=List[OCInboundOrderResponse])
 async def list_oc_inbound_orders(
     months_back: int = 6,
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        rows = await oc_fetch_inbound_orders(db, months_back=months_back)
+    """List cached inbound orders; approximate window using `months_back` (30-day months)."""
+    cid = await _active_oc_connection_id(db)
+    if not cid:
+        return []
 
-        payload: List[OCInboundOrderResponse] = []
-        for r in rows:
-            payload.append(
-                OCInboundOrderResponse(
-                    seller_inbound_number=str(r.get("seller_inbound_number") or "").strip(),
-                    oc_inbound_number=r.get("oc_inbound_number"),
-                    status=r.get("status"),
-                    warehouse_code=r.get("warehouse_code"),
-                    region=r.get("region"),
-                    shipping_method=r.get("shipping_method"),
-                    sku_qty=int(r.get("sku_qty") or 0),
-                    put_away_qty=int(r.get("put_away_qty") or 0),
-                )
+    cutoff = date.today() - timedelta(days=max(months_back, 1) * 30)
+    cutoff_dt = datetime.combine(cutoff, dt_time.min)
+    coalesced = func.coalesce(OCInboundOrder.inbound_at, OCInboundOrder.synced_at)
+    stmt = (
+        select(OCInboundOrder)
+        .where(
+            OCInboundOrder.connection_id == cid,
+            coalesced >= cutoff_dt,
+        )
+        .order_by(coalesced.desc())
+    )
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    payload: List[OCInboundOrderResponse] = []
+    for r in rows:
+        payload.append(
+            OCInboundOrderResponse(
+                seller_inbound_number=r.seller_inbound_number or "",
+                oc_inbound_number=r.oc_inbound_number,
+                status=r.status,
+                warehouse_code=r.warehouse_code,
+                region=r.region,
+                shipping_method=r.shipping_method,
+                sku_qty=r.sku_qty,
+                put_away_qty=r.put_away_qty,
             )
-        return payload
-    except (OCConfigError, OCAPIError) as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC inbound orders fetch failed: {e}")
+        )
+    return payload
 
 
 @router.get("/debug-raw", response_model=OCRawDebugResponse)

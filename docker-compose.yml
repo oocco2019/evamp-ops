@@ -60,7 +60,8 @@ services:
     networks:
       - evamp-internal
     environment:
-      - VITE_API_URL=http://localhost:8000
+      # Browser uses same-origin /api; Vite proxies to backend (localhost fails inside the container).
+      - VITE_PROXY_API_TARGET=http://backend:8000
     command: npm run dev -- --host
 
 volumes:

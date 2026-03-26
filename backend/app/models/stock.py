@@ -14,14 +14,19 @@ from app.core.database import Base
 
 class Order(Base):
     """
-    eBay orders imported via API (SM02).
+    Marketplace orders (eBay, Shopify, …) imported via API (SM02).
     Used for sales analytics (SM01).
-    All pricing/tax/fee fields from Fulfillment API (pricingSummary, totalMarketplaceFee, etc.).
+    eBay: pricing/tax/fee fields from Fulfillment API (pricingSummary, totalMarketplaceFee, etc.).
+    `ebay_order_id` stores the raw marketplace order id; pair with `sales_channel` is unique.
     """
     __tablename__ = "orders"
     
     order_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    ebay_order_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    sales_channel: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="ebay",
+        comment="ebay | shopify — scopes external order id",
+    )
+    ebay_order_id: Mapped[str] = mapped_column(String(100), nullable=False)
     date: Mapped[date] = mapped_column(Date, nullable=False)
     country: Mapped[str] = mapped_column(String(2), nullable=False)
     last_modified: Mapped[datetime] = mapped_column(DateTime, nullable=False)
@@ -68,11 +73,11 @@ class Order(Base):
     )
     
     __table_args__ = (
-        UniqueConstraint('ebay_order_id', name='uq_ebay_order_id'),
+        UniqueConstraint("sales_channel", "ebay_order_id", name="uq_orders_sales_channel_ebay_order_id"),
     )
     
     def __repr__(self) -> str:
-        return f"<Order {self.ebay_order_id} ({self.country})>"
+        return f"<Order {self.sales_channel}:{self.ebay_order_id} ({self.country})>"
 
 
 class LineItem(Base):

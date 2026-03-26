@@ -613,6 +613,32 @@ def _order_currency_to_gbp_rate(order_currency: Optional[str]) -> float:
     return getattr(app_settings, "USD_TO_GBP_RATE", 0.79)
 
 
+def _uk_vat_gbp(
+    country: Optional[str],
+    tax_total: Optional[Decimal],
+    price_gbp: Decimal,
+    order_currency_to_gbp_rate: Decimal,
+) -> Decimal:
+    """
+    UK (ship-to GB): subtract VAT from gross profit. If eBay sends tax_total > 0, use that (converted to GBP).
+
+    If tax_total is missing or zero, assume order total is VAT-inclusive at UK_VAT_DEFAULT_RATE (default 20%).
+    VAT element = price_gbp × rate / (1 + rate) — e.g. 20% VAT on a £129.99 gross ≈ £21.67, not 20% of £129.99.
+    Non-UK: 0.
+    """
+    is_uk = (country or "").strip().upper()[:2] == "GB"
+    if not is_uk:
+        return Decimal(0)
+    tax_amt = tax_total if tax_total is not None else Decimal(0)
+    tax_from_ebay_gbp = tax_amt * order_currency_to_gbp_rate
+    if tax_amt > 0:
+        return tax_from_ebay_gbp
+    default = Decimal(str(getattr(app_settings, "UK_VAT_DEFAULT_RATE", 0.20)))
+    # VAT-inclusive retail price: extract tax (same as gross × rate/(1+rate), or gross/6 at 20%).
+    inclusive_vat = price_gbp * default / (Decimal(1) + default)
+    return inclusive_vat.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
 def _order_profit_gbp(
     total_due_seller: Optional[Decimal],
     price_total: Optional[Decimal],
@@ -620,22 +646,34 @@ def _order_profit_gbp(
     order_currency: Optional[str],
     country: Optional[str],
     line_cost_usd_total: Decimal,
+    line_postage_usd_total: Decimal,
     usd_to_gbp: float,
 ) -> Optional[Decimal]:
     """
-    Profit (GBP) = Total Due Seller (GBP) - (landed+postage in USD converted to GBP)
-    - 2% of Price Total in GBP - (if UK: VAT/tax_total in GBP).
+    Profit (GBP) = Total Due Seller (GBP) - cost (GBP) - (if UK: VAT in GBP).
+
+    UK: eBay tax_total if present; else VAT extracted from VAT-inclusive price at UK_VAT_DEFAULT_RATE (default 20%).
+
+    Normal orders: cost = (landed+postage) USD converted to GBP.
+
+    Refund / clawback (total_due_seller <= 0): assume inventory is returned; landed COGS is not lost.
+    Cost = 2× outbound postage only (USD summed as line_postage_usd_total, then ×2, then to GBP).
+    UK VAT is not applied on these orders (refund reverses the sale for VAT purposes in this model).
     """
     if total_due_seller is None:
         return None
     rate = _order_currency_to_gbp_rate(order_currency)
-    price_gbp = (price_total or Decimal(0)) * Decimal(str(rate))
-    tax_gbp = (tax_total or Decimal(0)) * Decimal(str(rate))
-    cost_gbp = line_cost_usd_total * Decimal(str(usd_to_gbp))
-    two_pct = Decimal("0.02") * price_gbp
-    is_uk = (country or "").strip().upper()[:2] == "GB"
-    vat_gbp = tax_gbp if is_uk else Decimal(0)
-    return total_due_seller - cost_gbp - two_pct - vat_gbp
+    rate_d = Decimal(str(rate))
+    price_gbp = (price_total or Decimal(0)) * rate_d
+    usd_to_gbp_d = Decimal(str(usd_to_gbp))
+    if total_due_seller <= 0:
+        cost_gbp = (Decimal("2") * line_postage_usd_total) * usd_to_gbp_d
+    else:
+        cost_gbp = line_cost_usd_total * usd_to_gbp_d
+    vat_gbp = _uk_vat_gbp(country, tax_total, price_gbp, rate_d)
+    if total_due_seller <= 0:
+        vat_gbp = Decimal(0)
+    return total_due_seller - cost_gbp - vat_gbp
 
 
 def _profit_after_tax(gross_profit: Decimal) -> Decimal:
@@ -660,7 +698,7 @@ async def get_analytics_by_sku(
     sku: Optional[str] = Query(None, description="Filter by line item SKU"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Sales by SKU: quantity sold and profit. Profit = Total Due Seller (GBP) - (landed+postage USD->GBP) - 2%% price (GBP) - UK VAT if GB."""
+    """Sales by SKU: quantity sold and profit. Profit = Total Due Seller (GBP) - (landed+postage USD->GBP) - UK VAT if GB."""
     if from_date > to_date:
         raise HTTPException(status_code=400, detail="from must be <= to")
 
@@ -696,6 +734,7 @@ async def get_analytics_by_sku(
         if price_total == 0:
             continue
         line_cost_usd = Decimal(0)
+        line_postage_usd = Decimal(0)
         line_proportions = []
         for li in o.line_items:
             if sku and li.sku != sku.strip():
@@ -705,6 +744,7 @@ async def get_analytics_by_sku(
             postage = (s.postage_price or Decimal(0)) if s else Decimal(0)
             qty = li.quantity or 0
             line_cost_usd += (landed + postage) * qty
+            line_postage_usd += postage * qty
             line_total = li.line_total or Decimal(0)
             line_proportions.append((li.sku or "", qty, line_total / price_total))
         if sku and not line_proportions:
@@ -716,6 +756,7 @@ async def get_analytics_by_sku(
             o.order_currency,
             o.country,
             line_cost_usd,
+            line_postage_usd,
             usd_to_gbp,
         )
         if order_profit is None:
@@ -768,7 +809,7 @@ async def get_analytics_by_country(
     sku: Optional[str] = Query(None, description="Filter by line item SKU"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Sales by country: quantity sold and profit. Profit = Total Due Seller (GBP) - costs - 2%% price - UK VAT if GB. PR/VI merged into US."""
+    """Sales by country: quantity sold and profit. Profit = Total Due Seller (GBP) - costs - UK VAT if GB. PR/VI merged into US."""
     if from_date > to_date:
         raise HTTPException(status_code=400, detail="from must be <= to")
 
@@ -797,6 +838,7 @@ async def get_analytics_by_country(
     country_profit = {}
     for o in orders:
         line_cost_usd = Decimal(0)
+        line_postage_usd = Decimal(0)
         qty_for_country = 0
         for li in o.line_items:
             if sku and li.sku != sku.strip():
@@ -806,6 +848,7 @@ async def get_analytics_by_country(
             postage = (s.postage_price or Decimal(0)) if s else Decimal(0)
             qty = li.quantity or 0
             line_cost_usd += (landed + postage) * qty
+            line_postage_usd += postage * qty
             qty_for_country += qty
         order_profit = _order_profit_gbp(
             o.total_due_seller,
@@ -814,6 +857,7 @@ async def get_analytics_by_country(
             o.order_currency,
             o.country,
             line_cost_usd,
+            line_postage_usd,
             usd_to_gbp,
         )
         if order_profit is None:
@@ -836,6 +880,220 @@ async def get_analytics_by_country(
             )
         )
     return out
+
+
+class OrderDetailRow(BaseModel):
+    """One line item with order-level fee columns and allocated profit (same rules as /analytics/by-sku)."""
+
+    ebay_order_id: str
+    order_date: date
+    country: str
+    sku: str
+    quantity: int
+    total_due_seller: Optional[Decimal] = None
+    total_due_seller_currency: Optional[str] = None
+    order_currency: Optional[str] = None
+    price_total: Optional[Decimal] = None
+    tax_total: Optional[Decimal] = None
+    line_total: Optional[Decimal] = None
+    price_gbp: Decimal
+    line_landed_gbp: Decimal
+    line_postage_gbp: Decimal
+    line_cost_gbp: Decimal
+    order_cost_gbp: Decimal
+    vat_gbp: Decimal
+    order_gross_profit_gbp: Optional[Decimal] = None
+    profit_tax_rate: float
+    order_net_profit_gbp: Optional[Decimal] = None
+    allocation_share: Decimal
+    line_gross_profit_gbp: Optional[Decimal] = None
+    line_net_profit_gbp: Optional[Decimal] = None
+
+
+class OrderDetailsTotals(BaseModel):
+    row_count: int
+    units: int
+    sum_line_cost_gbp: Decimal
+    sum_line_net_profit_gbp: Decimal
+    sum_line_gross_profit_gbp: Decimal
+    sum_order_payout_gbp: Decimal
+
+
+class OrderDetailsResponse(BaseModel):
+    rows: List[OrderDetailRow]
+    totals: OrderDetailsTotals
+
+
+@router.get("/analytics/order-details", response_model=OrderDetailsResponse)
+async def get_analytics_order_details(
+    from_date: date = Query(..., alias="from", description="Start date (YYYY-MM-DD)"),
+    to_date: date = Query(..., alias="to", description="End date (YYYY-MM-DD)"),
+    country: Optional[str] = Query(None, description="Filter by order country (2-letter code)"),
+    sku: Optional[str] = Query(None, description="Filter lines by SKU"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Per line item: payout, buyer totals, per-line landed/postage in GBP, order-level VAT,
+    gross/net order profit, allocation share (line_total / order price_total), allocated line profit.
+    Same formula as /analytics/by-sku. Omits orders with no price_total or no total_due_seller.
+    """
+    if from_date > to_date:
+        raise HTTPException(status_code=400, detail="from must be <= to")
+    stmt = (
+        select(Order)
+        .options(selectinload(Order.line_items))
+        .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
+    )
+    if country and country.strip():
+        cc = country.strip().upper()[:2]
+        if cc == "US":
+            stmt = stmt.where(Order.country.in_(["US", "PR", "VI"]))
+        else:
+            stmt = stmt.where(Order.country == cc)
+    result = await db.execute(stmt)
+    orders = result.scalars().unique().all()
+    sku_want = (sku or "").strip().upper() or None
+
+    sku_codes: set = set()
+    for o in orders:
+        for li in o.line_items:
+            if not li.sku:
+                continue
+            if sku_want and (li.sku or "").strip().upper() != sku_want:
+                continue
+            sku_codes.add(li.sku)
+    sku_map: dict = {}
+    if sku_codes:
+        sku_result = await db.execute(select(SKU).where(SKU.sku_code.in_(sku_codes)))
+        sku_map = {s.sku_code: s for s in sku_result.scalars().all()}
+    usd_to_gbp = getattr(app_settings, "USD_TO_GBP_RATE", 0.79)
+    profit_tax_rate = float(getattr(app_settings, "PROFIT_TAX_RATE", 0.30))
+
+    rows: List[OrderDetailRow] = []
+    payout_by_order: dict = {}
+    sum_line_cost = Decimal(0)
+    sum_line_net = Decimal(0)
+    sum_line_gross = Decimal(0)
+
+    for o in orders:
+        price_total = o.price_total or Decimal(0)
+        if price_total == 0:
+            continue
+        if o.total_due_seller is None:
+            continue
+
+        line_items_iter = list(o.line_items)
+        if sku_want:
+            line_items_iter = [
+                li for li in line_items_iter if (li.sku or "").strip().upper() == sku_want
+            ]
+        if not line_items_iter:
+            continue
+
+        line_cost_usd = Decimal(0)
+        line_postage_usd = Decimal(0)
+        for li in o.line_items:
+            s = sku_map.get(li.sku) if li.sku else None
+            landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
+            postage = (s.postage_price or Decimal(0)) if s else Decimal(0)
+            qty = li.quantity or 0
+            line_cost_usd += (landed + postage) * qty
+            line_postage_usd += postage * qty
+
+        refund_mode = o.total_due_seller is not None and o.total_due_seller <= 0
+        rate = _order_currency_to_gbp_rate(o.order_currency)
+        rate_d = Decimal(str(rate))
+        price_gbp = price_total * rate_d
+        usd_to_gbp_d = Decimal(str(usd_to_gbp))
+        if refund_mode:
+            order_cost_gbp = (Decimal("2") * line_postage_usd) * usd_to_gbp_d
+        else:
+            order_cost_gbp = line_cost_usd * usd_to_gbp_d
+        vat_gbp = _uk_vat_gbp(o.country, o.tax_total, price_gbp, rate_d)
+        if refund_mode:
+            vat_gbp = Decimal(0)
+
+        order_profit = _order_profit_gbp(
+            o.total_due_seller,
+            o.price_total,
+            o.tax_total,
+            o.order_currency,
+            o.country,
+            line_cost_usd,
+            line_postage_usd,
+            usd_to_gbp,
+        )
+        if order_profit is None:
+            continue
+        order_net = _profit_after_tax(order_profit)
+        order_gross_after_fees = order_profit
+
+        for li in line_items_iter:
+            s = sku_map.get(li.sku) if li.sku else None
+            landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
+            postage = (s.postage_price or Decimal(0)) if s else Decimal(0)
+            qty = li.quantity or 0
+            line_landed_gbp = landed * Decimal(qty) * usd_to_gbp_d
+            line_postage_gbp = postage * Decimal(qty) * usd_to_gbp_d
+            line_cost_gbp = line_landed_gbp + line_postage_gbp
+            if refund_mode:
+                line_landed_gbp = Decimal(0)
+                line_postage_gbp = line_postage_gbp * Decimal("2")
+                line_cost_gbp = line_postage_gbp
+            line_total = li.line_total or Decimal(0)
+            alloc = line_total / price_total if price_total > 0 else Decimal(0)
+
+            line_gross = order_gross_after_fees * alloc
+            line_net = order_net * alloc
+
+            rows.append(
+                OrderDetailRow(
+                    ebay_order_id=o.ebay_order_id,
+                    order_date=o.date,
+                    country=o.country or "",
+                    sku=li.sku or "",
+                    quantity=qty,
+                    total_due_seller=o.total_due_seller,
+                    total_due_seller_currency=o.total_due_seller_currency,
+                    order_currency=o.order_currency,
+                    price_total=o.price_total,
+                    tax_total=o.tax_total,
+                    line_total=li.line_total,
+                    price_gbp=price_gbp,
+                    line_landed_gbp=line_landed_gbp,
+                    line_postage_gbp=line_postage_gbp,
+                    line_cost_gbp=line_cost_gbp,
+                    order_cost_gbp=order_cost_gbp,
+                    vat_gbp=vat_gbp,
+                    order_gross_profit_gbp=order_gross_after_fees,
+                    profit_tax_rate=profit_tax_rate,
+                    order_net_profit_gbp=order_net,
+                    allocation_share=alloc,
+                    line_gross_profit_gbp=line_gross,
+                    line_net_profit_gbp=line_net,
+                )
+            )
+            sum_line_cost += line_cost_gbp
+            sum_line_net += line_net
+            sum_line_gross += line_gross
+            oid = o.ebay_order_id
+            if oid not in payout_by_order:
+                payout_by_order[oid] = o.total_due_seller or Decimal(0)
+
+    rows.sort(key=lambda r: (r.order_date, r.ebay_order_id, r.sku))
+    sum_payout = sum(payout_by_order.values(), Decimal(0))
+
+    return OrderDetailsResponse(
+        rows=rows,
+        totals=OrderDetailsTotals(
+            row_count=len(rows),
+            units=int(sum(r.quantity for r in rows)),
+            sum_line_cost_gbp=sum_line_cost,
+            sum_line_net_profit_gbp=sum_line_net,
+            sum_line_gross_profit_gbp=sum_line_gross,
+            sum_order_payout_gbp=sum_payout,
+        ),
+    )
 
 
 # === Debug: raw eBay order (paymentSummary / Order earnings) ===

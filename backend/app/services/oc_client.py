@@ -4,8 +4,9 @@ OrangeConnex (OC) API client for read-only inventory status integration.
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date, time as dt_time_min
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, urljoin, urlparse
 from uuid import uuid4
@@ -16,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import encryption_service
 from app.models.settings import APICredential, OCConnection
+
+logger = logging.getLogger(__name__)
 
 
 class OCConfigError(Exception):
@@ -515,19 +518,35 @@ async def oc_fetch_inbound_orders(
     page: int = 1,
     page_size: int = 200,
     months_back: int = 6,
+    date_from: Optional[date] = None,
+    date_to: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """
     Read-only inbound order list from OC.
     Uses OC inbound List Query which is time-range based (ISO+offset with +0000).
+
+    If ``date_from`` is set, the window is [date_from 00:00 UTC, date_to or now] (inclusive end-of-day).
+    Otherwise uses rolling ``months_back`` (30-day months) from today.
+    OC rejects ranges longer than 7 days; we chunk in 7-day slices (many API calls for long ranges).
     """
     conn = await _get_active_connection(db)
     _ = conn  # explicit; connection is used for signing/auth in _call_oc
 
     now = datetime.utcnow()
-    months = max(int(months_back or 6), 0)
-    # OC docs show format like "2025-01-01T00:00:00+0000". We use UTC.
-    start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=months * 30)
-    end_dt = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    if date_from is not None:
+        start_dt = datetime.combine(date_from, dt_time_min.min)
+        if date_to is not None:
+            end_dt = date_to
+        else:
+            end_dt = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    else:
+        months = max(int(months_back or 6), 0)
+        # OC docs show format like "2025-01-01T00:00:00+0000". We use UTC.
+        start_dt = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=months * 30)
+        end_dt = now.replace(hour=23, minute=59, second=59, microsecond=0)
+
+    if start_dt > end_dt:
+        return []
 
     # OC rejects time slots longer than 7 days. We must chunk the query window.
     chunk_days = 7
@@ -596,7 +615,15 @@ async def oc_fetch_inbound_orders(
     results: List[Dict[str, Any]] = []
 
     chunk_start = start_dt
+    chunk_index = 0
+    logger.info(
+        "OC inbound fetch window: %s → %s (UTC), ~%d day(s)",
+        _dt_to_oc_time(start_dt),
+        _dt_to_oc_time(end_dt),
+        max(0, (end_dt - start_dt).days + 1),
+    )
     while chunk_start <= end_dt:
+        chunk_index += 1
         chunk_end = min(chunk_start + timedelta(days=chunk_days) - timedelta(seconds=1), end_dt)
         start_time = _dt_to_oc_time(chunk_start)
         end_time = _dt_to_oc_time(chunk_end)
@@ -663,16 +690,28 @@ async def oc_fetch_inbound_orders(
             chunk_rows = out
             break
 
+        before_chunk = len(results)
         for row in chunk_rows:
             k = f"{(row.get('oc_inbound_number') or '').strip().lower()}::{(row.get('seller_inbound_number') or '').strip().lower()}"
             if k and k in dedup:
                 continue
             dedup[k] = row
             results.append(row)
+        added = len(results) - before_chunk
+        logger.info(
+            "OC inbound chunk %d: %s → %s, rows_in_chunk=%d, new_unique=%d, total_unique=%d",
+            chunk_index,
+            start_time,
+            end_time,
+            len(chunk_rows),
+            added,
+            len(results),
+        )
 
         # Advance to the next chunk.
         chunk_start = chunk_end + timedelta(seconds=1)
 
+    logger.info("OC inbound fetch done: total_unique_orders=%d", len(results))
     return results
 
 

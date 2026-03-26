@@ -192,7 +192,10 @@ async def list_threads(
     if buyer_usernames:
         order_result = await db.execute(
             select(Order.buyer_username, Order.ebay_order_id)
-            .where(Order.buyer_username.in_(buyer_usernames))
+            .where(
+                Order.sales_channel == "ebay",
+                Order.buyer_username.in_(buyer_usernames),
+            )
             .order_by(Order.date.desc())
         )
         for row in order_result.all():
@@ -777,10 +780,19 @@ async def refresh_thread_messages(
         if not msg_id:
             continue
         existing = existing_by_id.get(msg_id)
+        sender_raw = (m.get("senderUsername") or "").strip()
+        sender_type = _member_message_sender_type(
+            m.get("senderUsername"), m.get("recipientUsername"), seller_username
+        )
+        display_username = _member_message_display_username(
+            sender_type, sender_raw, thread.buyer_username
+        )
         if existing:
             existing.is_read = bool(m.get("readStatus", False))
             media_list = _normalize_message_media(m.get("messageMedia") or [])
             existing.media = media_list if media_list else None
+            existing.sender_type = sender_type
+            existing.sender_username = display_username
             if media_list:
                 messages_with_media.append((msg_id, media_list))
             continue
@@ -798,14 +810,12 @@ async def refresh_thread_messages(
                     attachment_strs.append(f"[Attachment {i+1}]")
             if attachment_strs:
                 body = body + "\n" + " ".join(attachment_strs) if body else " ".join(attachment_strs)
-        sender = (m.get("senderUsername") or "").strip()
-        sender_type = "seller" if seller_username and sender.lower() == seller_username else "buyer"
         ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
         new_msg = Message(
             message_id=msg_id,
             thread_id=thread_id,
             sender_type=sender_type,
-            sender_username=sender or None,
+            sender_username=display_username,
             subject=(m.get("subject") or "").strip() or None,
             content=body,
             media=media_list if media_list else None,
@@ -1141,6 +1151,51 @@ def _is_seller_username(username: Optional[str]) -> bool:
     return False
 
 
+def _sender_is_seller_account(username: Optional[str], seller_username_lower: str) -> bool:
+    """True if this participant is the seller (config username or evamp_ prefix)."""
+    if not username or not str(username).strip():
+        return False
+    u = str(username).strip().lower()
+    if seller_username_lower and u == seller_username_lower:
+        return True
+    return _is_seller_username(username)
+
+
+def _member_message_sender_type(
+    sender_username_raw: Optional[str],
+    recipient_username_raw: Optional[str],
+    seller_username_lower: str,
+) -> str:
+    """
+    Classify buyer vs seller for FROM_MEMBERS messages.
+
+    eBay sometimes omits senderUsername; use recipientUsername: in a two-party thread, if the
+    recipient is the seller the message is from the buyer; otherwise the sender is the seller.
+    """
+    s = (sender_username_raw or "").strip()
+    r = (recipient_username_raw or "").strip()
+    if s:
+        return "seller" if _sender_is_seller_account(s, seller_username_lower) else "buyer"
+    if r:
+        return "buyer" if _sender_is_seller_account(r, seller_username_lower) else "seller"
+    return "buyer"
+
+
+def _member_message_display_username(
+    sender_type: str,
+    raw_sender: str,
+    thread_buyer_username: Optional[str],
+) -> Optional[str]:
+    """Stored username for UI when API omits senderUsername."""
+    if raw_sender.strip():
+        return raw_sender.strip()
+    if sender_type == "seller":
+        return (settings.EBAY_SELLER_USERNAME or "").strip() or None
+    if sender_type == "buyer" and thread_buyer_username:
+        return thread_buyer_username.strip() or None
+    return None
+
+
 async def _find_order_for_buyer(db: AsyncSession, buyer_username: Optional[str]) -> Optional[str]:
     """
     Look up the most recent eBay order ID for a buyer username.
@@ -1150,7 +1205,10 @@ async def _find_order_for_buyer(db: AsyncSession, buyer_username: Optional[str])
         return None
     result = await db.execute(
         select(Order.ebay_order_id)
-        .where(Order.buyer_username == buyer_username)
+        .where(
+            Order.sales_channel == "ebay",
+            Order.buyer_username == buyer_username,
+        )
         .order_by(Order.date.desc())
         .limit(1)
     )
@@ -1230,10 +1288,12 @@ async def _sync_from_members_full(
     limit: int,
     seller_username: str,
 ) -> tuple[int, int]:
-    """Run FROM_MEMBERS full sync (no start_time): paginate all conversations, fetch messages, upsert. Returns (threads_added, messages_added). Commits once at end."""
+    """Run FROM_MEMBERS full sync (no start_time): paginate all conversations, fetch messages, upsert.
+
+    Commits after each page so partial progress survives timeouts; media blobs stored per page like FROM_EBAY.
+    """
     threads_added = 0
     messages_added = 0
-    messages_with_media: List[tuple] = []
     offset = 0
     while True:
         try:
@@ -1254,6 +1314,7 @@ async def _sync_from_members_full(
         conversations = conv_page.get("conversations") or []
         if not conversations:
             break
+        page_messages_with_media: List[tuple] = []
         sem = asyncio.Semaphore(10)
 
         async def fetch_messages_full(cid: str):
@@ -1319,12 +1380,21 @@ async def _sync_from_members_full(
                     if not msg_id:
                         continue
                     existing = existing_by_id.get(msg_id)
+                    sender_raw = (m.get("senderUsername") or "").strip()
+                    sender_type = _member_message_sender_type(
+                        m.get("senderUsername"), m.get("recipientUsername"), seller_username
+                    )
+                    display_username = _member_message_display_username(
+                        sender_type, sender_raw, buyer_name
+                    )
                     if existing:
                         existing.is_read = bool(m.get("readStatus", False))
                         media_list = _normalize_message_media(m.get("messageMedia") or [])
                         existing.media = media_list if media_list else None
+                        existing.sender_type = sender_type
+                        existing.sender_username = display_username
                         if media_list:
-                            messages_with_media.append((msg_id, media_list))
+                            page_messages_with_media.append((msg_id, media_list))
                         continue
                     body = m.get("messageBody") or ""
                     media = m.get("messageMedia") or []
@@ -1340,14 +1410,12 @@ async def _sync_from_members_full(
                                 attachment_strs.append(f"[Attachment {i+1}]")
                         if attachment_strs:
                             body = body + "\n" + " ".join(attachment_strs) if body else " ".join(attachment_strs)
-                    sender = (m.get("senderUsername") or "").strip()
-                    sender_type = "seller" if seller_username and sender.lower() == seller_username else "buyer"
                     ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
                     new_msg = Message(
                         message_id=msg_id,
                         thread_id=conversation_id,
                         sender_type=sender_type,
-                        sender_username=sender or None,
+                        sender_username=display_username,
                         subject=(m.get("subject") or "").strip() or None,
                         content=body,
                         media=media_list if media_list else None,
@@ -1357,7 +1425,7 @@ async def _sync_from_members_full(
                     db.add(new_msg)
                     messages_added += 1
                     if media_list:
-                        messages_with_media.append((msg_id, media_list))
+                        page_messages_with_media.append((msg_id, media_list))
                 except Exception as e:
                     logger.warning("Sync: skip message in conversation %s (msg %s): %s", conversation_id, m.get("messageId"), e)
             if msgs:
@@ -1367,13 +1435,13 @@ async def _sync_from_members_full(
                 thread.last_message_preview = (body_preview[:500] + "…") if len(body_preview) > 500 else (body_preview or None)
                 thread.message_count = len(msgs)
                 thread.unread_count = sum(1 for m in msgs if not m.get("readStatus", False))
+        await db.commit()
+        for mid, mlist in page_messages_with_media:
+            await _store_message_media_blobs(db, mid, mlist)
         total = conv_page.get("total") or 0
         offset += limit
         if offset >= total or not conv_page.get("next"):
             break
-    await db.commit()
-    for mid, mlist in messages_with_media:
-        await _store_message_media_blobs(db, mid, mlist)
     return (threads_added, messages_added)
 
 
@@ -1539,10 +1607,19 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                         if not msg_id:
                             continue
                         existing = existing_by_id.get(msg_id)
+                        sender_raw = (m.get("senderUsername") or "").strip()
+                        sender_type = _member_message_sender_type(
+                            m.get("senderUsername"), m.get("recipientUsername"), seller_username
+                        )
+                        display_username = _member_message_display_username(
+                            sender_type, sender_raw, buyer_name
+                        )
                         if existing:
                             existing.is_read = bool(m.get("readStatus", False))
                             media_list = _normalize_message_media(m.get("messageMedia") or [])
                             existing.media = media_list if media_list else None
+                            existing.sender_type = sender_type
+                            existing.sender_username = display_username
                             if media_list:
                                 incr_messages_with_media.append((msg_id, media_list))
                             continue
@@ -1560,14 +1637,12 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                                     attachment_strs.append(f"[Attachment {i+1}]")
                             if attachment_strs:
                                 body = body + "\n" + " ".join(attachment_strs) if body else " ".join(attachment_strs)
-                        sender = (m.get("senderUsername") or "").strip()
-                        sender_type = "seller" if seller_username and sender.lower() == seller_username else "buyer"
                         ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
                         new_msg = Message(
                             message_id=msg_id,
                             thread_id=cid,
                             sender_type=sender_type,
-                            sender_username=sender or None,
+                            sender_username=display_username,
                             subject=(m.get("subject") or "").strip() or None,
                             content=body,
                             media=media_list if media_list else None,

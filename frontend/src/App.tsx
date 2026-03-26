@@ -9,6 +9,7 @@ const SupplierOrders = lazy(() => import('./pages/SupplierOrders'))
 const MessageDashboard = lazy(() => import('./pages/MessageDashboard'))
 const VideoManagement = lazy(() => import('./pages/VideoManagement'))
 const InventoryStatus = lazy(() => import('./pages/InventoryStatus'))
+const OrderDetails = lazy(() => import('./pages/OrderDetails'))
 
 function App() {
   return (
@@ -28,6 +29,12 @@ function App() {
                     className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                   >
                     Sales Analytics
+                  </Link>
+                  <Link
+                    to="/order-details"
+                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+                  >
+                    Order details
                   </Link>
                   <Link
                     to="/planning"
@@ -83,6 +90,7 @@ function App() {
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/analytics" element={<SalesAnalytics />} />
+              <Route path="/order-details" element={<OrderDetails />} />
               <Route path="/planning" element={<StockPlanning />} />
               <Route path="/skus" element={<SKUManager />} />
               <Route path="/supplier-orders" element={<SupplierOrders />} />

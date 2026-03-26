@@ -1,6 +1,25 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { inventoryStatusAPI, type OCInboundOrderRow, type OCSkuInventoryRow, type OCSkuMapping } from '../services/api'
+import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import {
+  inventoryStatusAPI,
+  type OCInboundOrderRow,
+  type OCSkuInventoryRow,
+  type OCSkuMapping,
+} from '../services/api'
+
+const INBOUND_STATUS_CHART_COLORS = [
+  '#2563eb',
+  '#16a34a',
+  '#ca8a04',
+  '#dc2626',
+  '#9333ea',
+  '#0891b2',
+  '#ea580c',
+  '#64748b',
+  '#4f46e5',
+  '#db2777',
+]
 
 export default function InventoryStatus() {
   const qc = useQueryClient()
@@ -25,9 +44,29 @@ export default function InventoryStatus() {
     queryKey: ['inventory-status', 'inventory'],
     queryFn: async () => (await inventoryStatusAPI.listInventory()).data,
   })
+  const inboundStatusSummaryQuery = useQuery({
+    queryKey: ['inventory-status', 'inbound-status-summary'],
+    queryFn: async () => (await inventoryStatusAPI.getInboundOrderStatusSummary()).data,
+  })
   const inboundOrdersQuery = useQuery({
     queryKey: ['inventory-status', 'inbound-orders', 6],
     queryFn: async () => (await inventoryStatusAPI.listInboundOrders({ months_back: 6 })).data,
+  })
+
+  const syncInboundMutation = useMutation({
+    mutationFn: (full: boolean) => inventoryStatusAPI.syncInboundOrders(full),
+    onSuccess: (res) => {
+      const data = res.data
+      setError(null)
+      setNotice(
+        `Inbound cache updated: ${data.synced} order(s) from OC (${data.full ? 'full backfill' : 'incremental'}).`
+      )
+      qc.invalidateQueries({ queryKey: ['inventory-status', 'inbound-status-summary'] })
+      qc.invalidateQueries({ queryKey: ['inventory-status', 'inbound-orders'] })
+    },
+    onError: (e: unknown) => {
+      setError(e instanceof Error ? e.message : 'Inbound sync failed')
+    },
   })
 
   const syncMappings = useMutation({
@@ -36,6 +75,7 @@ export default function InventoryStatus() {
       setNotice(`SKU mappings synced: ${res.data.synced} (skipped ${res.data.skipped}), inventory rows: ${res.data.inventory_rows}`)
       setError(null)
       qc.invalidateQueries({ queryKey: ['inventory-status'] })
+      qc.invalidateQueries({ queryKey: ['inventory-status', 'inbound-status-summary'] })
     },
     onError: (e: unknown) => {
       const msg = e instanceof Error ? e.message : 'SKU sync failed'
@@ -207,9 +247,100 @@ export default function InventoryStatus() {
       </section>
 
       <section className="bg-white rounded-lg border border-gray-200 p-4 mt-6">
+        <div className="flex flex-wrap items-center gap-2 mb-2">
+          <h2 className="text-lg font-semibold text-gray-800">Inbound orders by status</h2>
+          <button
+            type="button"
+            onClick={() => syncInboundMutation.mutate(false)}
+            disabled={syncInboundMutation.isPending}
+            className="text-sm px-2 py-1 rounded border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            title="Incremental sync from OrangeConnex into the database (fast after first full load)"
+          >
+            {syncInboundMutation.isPending ? 'Syncing from OC…' : 'Sync from OC'}
+          </button>
+          <button
+            type="button"
+            onClick={() => syncInboundMutation.mutate(true)}
+            disabled={syncInboundMutation.isPending}
+            className="text-sm px-2 py-1 rounded border border-amber-300 text-amber-900 hover:bg-amber-50 disabled:opacity-50"
+            title="Full backfill from 2024-01-01 (many API calls; check server logs)"
+          >
+            Full backfill (2024+)
+          </button>
+        </div>
+        <p className="text-sm text-gray-600 mb-3">
+          Chart and table read from the <strong>local cache</strong>. Use <strong>Sync from OC</strong> to pull updates
+          (incremental after the first run). <strong>Full backfill</strong> re-fetches from 2024-01-01 UTC (slow; server
+          logs each 7-day chunk). All OC warehouse locations are included when the API returns them.
+        </p>
+        {inboundStatusSummaryQuery.data?.last_sync_at && (
+          <p className="text-xs text-gray-500 mb-6 font-mono">
+            Cache last updated: {new Date(inboundStatusSummaryQuery.data.last_sync_at).toLocaleString()}
+          </p>
+        )}
+        {inboundStatusSummaryQuery.isLoading ? (
+          <p className="text-sm text-gray-500">Loading cached status distribution…</p>
+        ) : inboundStatusSummaryQuery.isError ? (
+          <p className="text-sm text-red-700">
+            {inboundStatusSummaryQuery.error instanceof Error
+              ? inboundStatusSummaryQuery.error.message
+              : 'Failed to load status summary'}
+          </p>
+        ) : !inboundStatusSummaryQuery.data?.slices.length ? (
+          <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded p-3">
+            No cached inbound orders yet. Click <strong>Sync from OC</strong> (or <strong>Full backfill</strong> for
+            complete history from 2024). Watch the backend log for chunk progress.
+          </div>
+        ) : (
+          <div className="flex flex-col lg:flex-row lg:items-start gap-6 mt-2">
+            <div className="h-80 w-full max-w-md mx-auto lg:mx-0 pt-2">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart margin={{ top: 28, right: 8, bottom: 8, left: 8 }}>
+                  <Pie
+                    data={inboundStatusSummaryQuery.data.slices.map((s) => ({
+                      name: s.status,
+                      value: s.count,
+                    }))}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={100}
+                    label={({ name, value }) => `${name}: ${value}`}
+                  >
+                    {inboundStatusSummaryQuery.data.slices.map((_, index) => (
+                      <Cell
+                        key={`cell-${index}`}
+                        fill={INBOUND_STATUS_CHART_COLORS[index % INBOUND_STATUS_CHART_COLORS.length]}
+                      />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(value: number) => [value, 'Orders']} />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="text-sm text-gray-600 space-y-1">
+              <p>
+                <span className="text-gray-500">Total orders in range:</span>{' '}
+                <span className="font-semibold text-gray-900">{inboundStatusSummaryQuery.data.total_orders}</span>
+              </p>
+              <p>
+                <span className="text-gray-500">Range:</span>{' '}
+                <span className="font-mono">
+                  {inboundStatusSummaryQuery.data.from_date} → {inboundStatusSummaryQuery.data.to_date}
+                </span>
+              </p>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="bg-white rounded-lg border border-gray-200 p-4 mt-6">
         <h2 className="text-lg font-semibold text-gray-800 mb-3">Inbound orders</h2>
         <p className="text-sm text-gray-600 mb-3">
-          Evamp-ops workflows always involve these OC marketplaces together: `UK`, `DE`, `US`, `AU`. This table pulls inbound orders from all four regions.
+          Evamp-ops workflows always involve these OC marketplaces together: `UK`, `DE`, `US`, `AU`. Rows come from the
+          same cache as above (last ~6 months by date); run <strong>Sync from OC</strong> to refresh.
         </p>
         {inboundOrdersQuery.isLoading ? (
           <p className="text-sm text-gray-500">Loading inbound orders...</p>

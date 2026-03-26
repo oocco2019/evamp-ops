@@ -193,3 +193,30 @@ class OCSkuInventory(Base):
     __table_args__ = (
         UniqueConstraint("connection_id", "mfskuid", "service_region", name="uq_oc_inventory_conn_mf_region"),
     )
+
+
+class OCInboundOrder(Base):
+    """
+    Cached OrangeConnex inbound orders (synced from OC API; avoids repeated long fetches).
+    """
+
+    __tablename__ = "oc_inbound_orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    connection_id: Mapped[int] = mapped_column(ForeignKey("oc_connections.id", ondelete="CASCADE"), nullable=False)
+    dedup_key: Mapped[str] = mapped_column(String(320), nullable=False)
+    seller_inbound_number: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    oc_inbound_number: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    status: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    warehouse_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    region: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    shipping_method: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    sku_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    put_away_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    inbound_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    raw_payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("connection_id", "dedup_key", name="uq_oc_inbound_conn_dedup"),
+    )
