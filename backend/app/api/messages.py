@@ -10,7 +10,7 @@ from typing import Any, List, Optional
 
 _sync_lock = asyncio.Lock()
 _sync_in_progress = False
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, Integer, func
@@ -225,21 +225,29 @@ async def list_threads(
     ]
 
 
-def _media_url_for_response(request: Request, message_id: str, media_index: int, fallback_url: Optional[str]) -> str:
-    """Return URL for our stored-media endpoint so the frontend can load the image. Use API_PUBLIC_BASE_URL when set (e.g. behind proxy)."""
-    base = (settings.API_PUBLIC_BASE_URL or "").strip() or str(request.base_url).rstrip("/")
-    return f"{base}/api/messages/media/{message_id}/{media_index}"
+def _media_url_for_response(message_id: str, media_index: int) -> str:
+    """
+    Return URL for our stored-media endpoint so the frontend can load the image.
+
+    Prefer API_PUBLIC_BASE_URL when the API is on a different public host than the SPA.
+    Otherwise return a same-origin path `/api/messages/media/...` so the browser uses the
+    page origin (Vite proxy in dev, reverse proxy in prod). Do not use request.base_url
+    (internal host:port) — that breaks <img src> when the UI is served from another origin.
+    """
+    public = (settings.API_PUBLIC_BASE_URL or "").strip().rstrip("/")
+    if public:
+        return f"{public}/api/messages/media/{message_id}/{media_index}"
+    return f"/api/messages/media/{message_id}/{media_index}"
 
 
 @router.get("/threads/{thread_id}", response_model=ThreadDetail)
 async def get_thread(
     thread_id: str,
-    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Get a thread with all messages. Media URLs point to our stored blobs when available."""
     try:
-        return await _get_thread_impl(thread_id, request, db)
+        return await _get_thread_impl(thread_id, db)
     except HTTPException:
         raise
     except Exception as e:
@@ -252,7 +260,6 @@ async def get_thread(
 
 async def _get_thread_impl(
     thread_id: str,
-    request: Request,
     db: AsyncSession,
 ) -> ThreadDetail:
     """Implementation of get_thread so we can catch and report any exception."""
@@ -280,12 +287,16 @@ async def _get_thread_impl(
         for i, x in enumerate(m.media):
             url = (x.get("mediaUrl") or x.get("mediaURL") or "").strip() if isinstance(x, dict) else None
             if (m.message_id, i) in stored_set:
-                url = _media_url_for_response(request, m.message_id, i, url)
+                url = _media_url_for_response(m.message_id, i)
             if isinstance(x, dict):
+                raw_type = (x.get("mediaType") or x.get("type") or "FILE")
+                raw_type = str(raw_type).strip().upper()
+                if raw_type not in ("IMAGE", "DOC", "PDF", "TXT"):
+                    raw_type = "FILE"
                 out.append(
                     MessageMediaItem(
                         mediaName=x.get("mediaName") or "",
-                        mediaType=x.get("mediaType") or "FILE",
+                        mediaType=raw_type,
                         mediaUrl=url,
                     )
                 )

@@ -8,6 +8,25 @@ function ebayImageFullSizeUrl(url: string): string {
   return url.replace(/\$_1\./, '$_57.').replace(/\$_12\./, '$_57.')
 }
 
+const API_BASE = (import.meta.env.VITE_API_URL ?? '').replace(/\/$/, '')
+
+/** Stored blobs use `/api/messages/media/...`; prepend API base when SPA and API are on different origins. */
+function resolveMessageMediaUrl(url: string | null | undefined): string {
+  if (!url) return ''
+  if (url.startsWith('http://') || url.startsWith('https://')) return url
+  if (url.startsWith('/')) return API_BASE ? `${API_BASE}${url}` : url
+  return url
+}
+
+/** Remove sync-appended markers like "[IMAGE: photo.jpg]" when we render attachments below. */
+function stripSyncedAttachmentMarkers(content: string): string {
+  if (!content) return content
+  return content
+    .replace(/\n?\s*\[(?:IMAGE|DOC|PDF|TXT|FILE)(?:\s*:\s*[^\]]+)\]/gi, '')
+    .replace(/\n?\s*\[\s*Attachment\s+\d+\s*\]/gi, '')
+    .trimEnd()
+}
+
 /** Line-art image icon for attach button (eBay-style). */
 function ImageAttachmentIcon({ className }: { className?: string }) {
   return (
@@ -1163,7 +1182,7 @@ export default function MessageDashboard() {
                           className="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 rounded text-sm"
                         >
                           {att.mediaUrl ? (
-                            <img src={att.mediaUrl} alt="" className="h-8 w-8 object-cover rounded" />
+                            <img src={resolveMessageMediaUrl(att.mediaUrl)} alt="" className="h-8 w-8 object-cover rounded" />
                           ) : null}
                           <span className="truncate max-w-[120px]">{att.mediaName}</span>
                           <button
@@ -1286,6 +1305,12 @@ function MessageBubble({ message, showTranslation }: { message: MessageResp; sho
   // Use stored translation from DB
   const translation = showTranslation ? message.translated_content : null
 
+  const bodyText =
+    message.media && message.media.length > 0
+      ? stripSyncedAttachmentMarkers(message.content)
+      : message.content
+  const isImage = (t: string | undefined) => (t || '').toUpperCase() === 'IMAGE'
+
   return (
     <div className={`rounded-lg p-3 max-w-[85%] ${bubbleClass}`}>
       <p className={`text-xs mb-1 ${metaClass}`}>
@@ -1294,20 +1319,25 @@ function MessageBubble({ message, showTranslation }: { message: MessageResp; sho
       {message.subject && (
         <p className={`text-sm font-medium mb-1 ${subjectClass}`}>{message.subject}</p>
       )}
-      <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+      <p className="text-sm whitespace-pre-wrap">{bodyText}</p>
       {message.media && message.media.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-2">
-          {message.media.map((att, idx) => (
-            att.mediaUrl && att.mediaType === 'IMAGE'
+          {message.media.map((att, idx) => {
+            const resolved = resolveMessageMediaUrl(att.mediaUrl)
+            return isImage(att.mediaType) && resolved
               ? (
-                  <a key={idx} href={ebayImageFullSizeUrl(att.mediaUrl)} target="_blank" rel="noopener noreferrer" className="block" title="Open full size">
-                    <img src={att.mediaUrl} alt={att.mediaName} className="max-h-48 rounded border object-contain bg-gray-100 cursor-pointer hover:opacity-90" />
+                  <a key={idx} href={ebayImageFullSizeUrl(resolved)} target="_blank" rel="noopener noreferrer" className="block" title="Open full size">
+                    <img
+                      src={resolved}
+                      alt={att.mediaName}
+                      className="max-h-48 rounded border object-contain bg-gray-100 cursor-pointer hover:opacity-90"
+                    />
                   </a>
                 )
               : (
                   <a
                     key={idx}
-                    href={att.mediaUrl || '#'}
+                    href={resolved || '#'}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-sm text-blue-600 hover:underline"
@@ -1315,7 +1345,7 @@ function MessageBubble({ message, showTranslation }: { message: MessageResp; sho
                     {att.mediaName} {att.mediaType !== 'FILE' ? `(${att.mediaType})` : ''}
                   </a>
                 )
-          ))}
+          })}
         </div>
       )}
       {translation && (

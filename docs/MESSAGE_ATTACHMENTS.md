@@ -33,7 +33,7 @@ Each message can have `media`: a JSON array of `{ mediaName, mediaType, mediaUrl
 
 When you open a thread, the API returns each message’s `media` array. For each attachment:
 
-- **If we have a stored blob** (`message_media_blobs`): the API returns **our** URL, e.g. `https://your-api.com/api/messages/media/{message_id}/{index}`. The frontend loads the image from that URL (same API the app uses).
+- **If we have a stored blob** (`message_media_blobs`): the API returns **our** URL: either `API_PUBLIC_BASE_URL` + `/api/messages/media/...` when set, or a **same-origin path** `/api/messages/media/{message_id}/{index}` so the browser loads from the SPA host (Vite proxy / reverse proxy). The frontend’s `resolveMessageMediaUrl()` prepends `VITE_API_URL` when the API is on another origin.
 - **If we don’t have a blob yet**: the API returns the **eBay** `mediaUrl` from `messages.media` (eBay CDN). The frontend loads from eBay.
 
 So for images to show you need **at least one** of:
@@ -159,7 +159,7 @@ To send a non-image file (DOC, PDF, TXT), host the file at an HTTPS URL and pass
 **File:** `backend/app/api/messages.py`. Keep this behavior when editing.
 
 1. **GET thread — media URL base**  
-   `_media_url_for_response()` builds the URL for our blob endpoint. **`request.base_url` is a Starlette `URL` object, not a string.** Use `str(request.base_url).rstrip("/")` (or `API_PUBLIC_BASE_URL` when set). Using `.rstrip()` directly on `request.base_url` raises `AttributeError: 'URL' object has no attribute 'rstrip'`.
+   `_media_url_for_response(message_id, media_index)` builds the URL for our blob endpoint. **Do not use `request.base_url`:** it reflects the internal API host (e.g. `http://127.0.0.1:8000`), so `<img src>` from the UI on another port or domain fails. Use **`API_PUBLIC_BASE_URL`** when the API’s public origin differs from the SPA, otherwise return **`/api/messages/media/...`** (relative path).
 
 2. **GET thread — sorting messages**  
    `msgs = sorted(thread.messages, key=lambda m: m.ebay_created_at)` can raise if any `m.ebay_created_at` is `None`. Use a fallback in the key, e.g. `key=lambda m: m.ebay_created_at or datetime.min.replace(tzinfo=None)`.
