@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   BarChart,
@@ -563,6 +564,15 @@ export default function SalesAnalytics() {
           Loading analytics...
         </div>
       )}
+
+      <div className="mt-10 pt-6 border-t border-gray-200">
+        <p className="text-sm text-gray-500">
+          <Link to="/order-details" className="text-blue-600 hover:text-blue-800 hover:underline">
+            Order details
+          </Link>
+          <span className="text-gray-500"> — use when I need to audit numbers.</span>
+        </p>
+      </div>
     </div>
   )
 }

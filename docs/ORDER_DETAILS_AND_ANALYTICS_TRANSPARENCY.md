@@ -18,7 +18,7 @@ Aggregated views (Sales Analytics by SKU, by country, summary cards) answer “h
 
 ### Frontend
 
-- **Route:** `/order-details` (nav: **Order details**).
+- **Route:** `/order-details` (linked from the **bottom of Sales Analytics**, not the top nav).
 - **Page:** `frontend/src/pages/OrderDetails.tsx`
   - Filters: period presets, from/to dates, country, SKU (options from `GET /api/stock/analytics/filter-options`).
   - Summary cards: row count, units, payout sum (orders counted once), sum of line costs, sum of line gross/net profit.
