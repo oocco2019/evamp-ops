@@ -324,6 +324,13 @@ function parcelsAppTrackingUrl(tracking: string, countryIso: string | null): str
   return `${path}?country=${encodeURIComponent(countryIso)}`
 }
 
+/** OrangeConnex seller portal inbound detail (UK fulfillment host for all regions). */
+function ocInboundDetailUrl(ocInboundNumber: string): string | null {
+  const order = ocInboundNumber.trim()
+  if (!order) return null
+  return `https://fulfillment-uk.orangeconnex.com/inbound/detail?orderNumber=${encodeURIComponent(order)}`
+}
+
 const ETA_OVERRIDE_STORAGE_KEY = 'evampops.inventoryStatus.inboundEtaOverrides'
 
 function loadEtaOverrides(): Record<string, string> {
@@ -1268,12 +1275,28 @@ export default function InventoryStatus() {
                   const etaIsEdited = etaOverride !== undefined
                   const trackingPairs = getInboundTrackingPairs(row.raw)
                   const countryIso = inferInboundCountryIso(row.region, row.warehouse_code)
+                  const ocInboundNo = row.oc_inbound_number?.trim()
+                  const ocDetailHref = ocInboundNo ? ocInboundDetailUrl(ocInboundNo) : null
                   return (
                   <tr
                     key={rowKey}
                     className="border-t border-gray-100"
                   >
-                    <td className="px-3 py-2 font-mono">{row.oc_inbound_number || '—'}</td>
+                    <td className="px-3 py-2 font-mono">
+                      {ocDetailHref ? (
+                        <a
+                          href={ocDetailHref}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:underline"
+                          title="Open inbound in OrangeConnex fulfillment portal"
+                        >
+                          {ocInboundNo}
+                        </a>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
                     <td className="px-3 py-2">{row.status || '—'}</td>
                     <td className="px-3 py-2">{row.sku_qty}</td>
                     <td className="px-3 py-2">{row.put_away_qty}</td>
@@ -1306,14 +1329,16 @@ export default function InventoryStatus() {
                         title="Defaults to create time + 3 months. Edit to override; green = saved override."
                       />
                     </td>
-                    <td className="px-3 py-2 text-xs text-gray-800 align-top max-w-[9rem] break-words">
+                    <td className="px-3 py-2 text-xs text-gray-800 align-top max-w-[9rem]">
                       {trackingPairs.length === 0 ? (
                         '—'
                       ) : (
-                        <span className="inline-flex flex-wrap gap-x-1 gap-y-0.5 items-center">
+                        <span className="inline-flex flex-wrap items-baseline gap-y-0.5">
                           {trackingPairs.map((p, i) => (
-                            <span key={p.tracking}>
-                              {i > 0 ? <span className="text-gray-400">, </span> : null}
+                            <span
+                              key={p.tracking}
+                              className="inline-flex items-baseline whitespace-nowrap"
+                            >
                               <a
                                 href={parcelsAppTrackingUrl(p.tracking, countryIso)}
                                 target="_blank"
@@ -1327,6 +1352,11 @@ export default function InventoryStatus() {
                               >
                                 {p.carrier}
                               </a>
+                              {i < trackingPairs.length - 1 ? (
+                                <span className="text-gray-400" aria-hidden>
+                                  ,{' '}
+                                </span>
+                              ) : null}
                             </span>
                           ))}
                         </span>
