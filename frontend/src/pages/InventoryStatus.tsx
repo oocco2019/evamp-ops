@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import {
@@ -7,6 +7,465 @@ import {
   type OCSkuInventoryRow,
   type OCSkuMapping,
 } from '../services/api'
+
+function inboundGetCi(obj: Record<string, unknown>, ...names: string[]): unknown {
+  const lower = Object.fromEntries(Object.entries(obj).map(([k, v]) => [k.toLowerCase(), v]))
+  for (const n of names) {
+    const v = lower[n.toLowerCase()]
+    if (v !== undefined && v !== null) return v
+  }
+  return undefined
+}
+
+/** OC detail uses skulist / SKUList with sellerSKUID, skuquantity, etc. */
+function getInboundSkuListParts(raw: OCInboundOrderRow['raw']): string[] {
+  if (!raw || typeof raw !== 'object') return []
+  const list = inboundGetCi(raw as Record<string, unknown>, 'skulist', 'SKUList', 'skuList')
+  if (!Array.isArray(list)) return []
+  const parts: string[] = []
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const sku =
+      inboundGetCi(o, 'sellerSKUID', 'sellerSkuid', 'ocskuid', 'OCSKUID', 'mfSkuId', 'MFSKUID') ?? ''
+    const qty = inboundGetCi(o, 'skuquantity', 'skuQuantity', 'SKUQuantity', 'sku_qty')
+    const sid = String(sku).trim()
+    const q = qty !== undefined && qty !== null && qty !== '' ? String(qty) : ''
+    if (sid || q) parts.push(sid && q ? `${sid} × ${q}` : sid || q)
+  }
+  return parts
+}
+
+function formatInboundSkuList(raw: OCInboundOrderRow['raw']): string {
+  const parts = getInboundSkuListParts(raw)
+  return parts.length ? parts.join('; ') : '—'
+}
+
+function InboundSkuListCell({ raw }: { raw: OCInboundOrderRow['raw'] }) {
+  const parts = getInboundSkuListParts(raw)
+  if (parts.length === 0) return '—'
+  return (
+    <span className="inline-flex flex-wrap items-baseline gap-y-0.5">
+      {parts.map((p, i) => (
+        <span key={i} className="whitespace-nowrap">
+          {p}
+          {i < parts.length - 1 ? <span className="text-gray-400">; </span> : null}
+        </span>
+      ))}
+    </span>
+  )
+}
+
+/** `YYYY-MM-DD HH:MM:SS` in local time, matching OC portal list style. */
+function formatOcDateTimeLocal(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+/** OC often sends `2026-03-18 09:50:01` (space, no T) — JS parsing is unreliable without normalizing. */
+function normalizeOcTimestampString(s: string): string {
+  let t = s.trim()
+  if (!t) return t
+  // "YYYY-MM-DD HH:MM:SS" or with fractional seconds
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(t)) {
+    t = t.replace(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})/, '$1T$2')
+  }
+  if (t.endsWith('Z')) t = `${t.slice(0, -1)}+00:00`
+  if (t.endsWith('+0000')) t = `${t.slice(0, -5)}+00:00`
+  return t
+}
+
+function formatOcTimestamp(value: unknown): string {
+  if (value === undefined || value === null || value === '') return '—'
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (value > 1e11) return formatOcDateTimeLocal(new Date(value))
+    if (value > 1e9) return formatOcDateTimeLocal(new Date(value * 1000))
+  }
+  let s = String(value).trim()
+  if (!s) return '—'
+  s = normalizeOcTimestampString(s)
+  const d = new Date(s)
+  if (!Number.isNaN(d.getTime())) return formatOcDateTimeLocal(d)
+  return '—'
+}
+
+type InboundWalkEntry = { keyLower: string; value: unknown }
+
+/** Depth-first walk: OC nests times under varying objects. */
+function walkInboundRaw(obj: unknown, depth = 0): InboundWalkEntry[] {
+  if (depth > 8 || obj === null || obj === undefined) return []
+  if (typeof obj !== 'object') return []
+  if (Array.isArray(obj)) {
+    return obj.flatMap((item) => walkInboundRaw(item, depth + 1))
+  }
+  const o = obj as Record<string, unknown>
+  const out: InboundWalkEntry[] = []
+  for (const [k, v] of Object.entries(o)) {
+    out.push({ keyLower: k.toLowerCase(), value: v })
+    if (v && typeof v === 'object') {
+      out.push(...walkInboundRaw(v, depth + 1))
+    }
+  }
+  return out
+}
+
+function pickWalkedValue(entries: InboundWalkEntry[], test: (keyLower: string) => boolean): unknown {
+  for (const { keyLower, value } of entries) {
+    if (!test(keyLower)) continue
+    if (value === undefined || value === null || value === '') continue
+    if (typeof value === 'object' && !Array.isArray(value)) continue
+    return value
+  }
+  return undefined
+}
+
+function discoverCreateFromWalk(entries: InboundWalkEntry): unknown {
+  const tries = [
+    (k: string) =>
+      k === 'createtime' ||
+      k === 'create_time' ||
+      k === 'createdtime' ||
+      k === 'gmtcreate' ||
+      k === 'gmt_create',
+    (k: string) => (k.includes('create') || k.includes('gmt')) && (k.includes('time') || k.includes('date')),
+    (k: string) => k.includes('inbound') && k.includes('create'),
+  ]
+  for (const t of tries) {
+    const v = pickWalkedValue(entries, t)
+    if (v !== undefined) return v
+  }
+  return undefined
+}
+
+function discoverPutawayFromWalk(entries: InboundWalkEntry): unknown {
+  const tries = [
+    (k: string) =>
+      k === 'putawaytime' ||
+      k === 'put_away_time' ||
+      k === 'completeputawaytime' ||
+      (k.includes('putaway') && k.includes('time')),
+    (k: string) => k.includes('putaway') && !k.includes('qty') && !k.includes('quantity'),
+  ]
+  for (const t of tries) {
+    const v = pickWalkedValue(entries, t)
+    if (v !== undefined) return v
+  }
+  return undefined
+}
+
+function discoverArrivedFromWalk(entries: InboundWalkEntry): unknown {
+  const tries = [
+    (k: string) =>
+      (k.includes('arrival') || k.includes('arrived') || k.includes('actualarrival')) &&
+      !k.includes('estimate') &&
+      !k.includes('eta'),
+    (k: string) => k === 'arrivaltime' || k === 'arrivedtime',
+  ]
+  for (const t of tries) {
+    const v = pickWalkedValue(entries, t)
+    if (v !== undefined) return v
+  }
+  return undefined
+}
+
+/** OC UI uses `--` for missing times in the create/putaway column. */
+function ocPortalDash(formatted: string): string {
+  return formatted === '—' || formatted.trim() === '' ? '--' : formatted
+}
+
+/** Create time: explicit keys, then deep scan, then DB `inbound_at` from sync. */
+function formatInboundCreateTime(raw: OCInboundOrderRow['raw'], inboundAtIso: string | null | undefined): string {
+  if (!raw || typeof raw !== 'object') {
+    return inboundAtIso ? formatOcTimestamp(inboundAtIso) : '—'
+  }
+  const o = raw as Record<string, unknown>
+  let v: unknown = inboundGetCi(
+    o,
+    'createTime',
+    'create_time',
+    'createdTime',
+    'inboundCreateTime',
+    'inboundcreatetime',
+    'createDate',
+    'createdDate',
+    'gmtCreate',
+    'gmt_create',
+  )
+  if (v === undefined || v === null || v === '') {
+    v = discoverCreateFromWalk(walkInboundRaw(raw))
+  }
+  if ((v === undefined || v === null || v === '') && inboundAtIso) {
+    v = inboundAtIso
+  }
+  return formatOcTimestamp(v)
+}
+
+function formatInboundPutawayTime(raw: OCInboundOrderRow['raw']): string {
+  if (!raw || typeof raw !== 'object') return '—'
+  const o = raw as Record<string, unknown>
+  let v: unknown = inboundGetCi(
+    o,
+    'putAwayTime',
+    'putawayTime',
+    'putawaytime',
+    'putAwayDateTime',
+    'completePutawayTime',
+    'putawayDate',
+    'completePutawayDateTime',
+  )
+  if (v === undefined || v === null || v === '') {
+    v = discoverPutawayFromWalk(walkInboundRaw(raw))
+  }
+  return formatOcTimestamp(v)
+}
+
+/**
+ * Arrived: explicit keys, deep scan, then batchList[].arrivalTime (epoch ms).
+ */
+function formatInboundArrivedTime(raw: OCInboundOrderRow['raw']): string {
+  if (!raw || typeof raw !== 'object') return '—'
+  const o = raw as Record<string, unknown>
+  let v: unknown = inboundGetCi(
+    o,
+    'arrivedTime',
+    'arrivalTime',
+    'arrivedtime',
+    'arrivedDateTime',
+    'actualArrivalTime',
+    'actualArrivalDateTime',
+  )
+  if (v === undefined || v === null || v === '') {
+    v = discoverArrivedFromWalk(walkInboundRaw(raw))
+  }
+  if (v === undefined || v === null || v === '') {
+    const bl = inboundGetCi(o, 'batchList', 'batchlist')
+    if (Array.isArray(bl)) {
+      const ms: number[] = []
+      for (const item of bl) {
+        if (!item || typeof item !== 'object') continue
+        const row = item as Record<string, unknown>
+        const at = row.arrivalTime ?? inboundGetCi(row, 'arrivaltime')
+        if (typeof at === 'number' && at > 0) ms.push(at)
+      }
+      if (ms.length) v = Math.min(...ms)
+    }
+  }
+  return formatOcTimestamp(v)
+}
+
+/** Unique tracking numbers from trackingList (ignores carton number). */
+function formatInboundTrackingNumbers(raw: OCInboundOrderRow['raw']): string {
+  if (!raw || typeof raw !== 'object') return '—'
+  const list = inboundGetCi(raw as Record<string, unknown>, 'trackingList', 'trackinglist')
+  if (!Array.isArray(list)) return '—'
+  const seen = new Set<string>()
+  const nums: string[] = []
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const tn = inboundGetCi(o, 'trackingNumber', 'trackingnumber')
+    if (tn === undefined || tn === null) continue
+    const s = String(tn).trim()
+    if (!s) continue
+    const key = s.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    nums.push(s)
+  }
+  return nums.length ? nums.join(', ') : '—'
+}
+
+type InboundTrackingPair = { carrier: string; tracking: string }
+
+/** One row per unique tracking #; carrier label for ParcelsApp link. */
+function getInboundTrackingPairs(raw: OCInboundOrderRow['raw']): InboundTrackingPair[] {
+  if (!raw || typeof raw !== 'object') return []
+  const list = inboundGetCi(raw as Record<string, unknown>, 'trackingList', 'trackinglist')
+  if (!Array.isArray(list)) return []
+  const out: InboundTrackingPair[] = []
+  const seen = new Set<string>()
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue
+    const o = item as Record<string, unknown>
+    const tn = inboundGetCi(o, 'trackingNumber', 'trackingnumber')
+    if (tn === undefined || tn === null) continue
+    const tracking = String(tn).trim()
+    if (!tracking) continue
+    const key = tracking.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    const carrierRaw = inboundGetCi(o, 'carrier', 'Carrier')
+    const carrier =
+      carrierRaw != null && String(carrierRaw).trim() !== '' ? String(carrierRaw).trim() : 'Track'
+    out.push({ carrier, tracking })
+  }
+  return out
+}
+
+/** Map OC region / warehouse prefix to ISO country for ParcelsApp hint (optional query). */
+function inferInboundCountryIso(
+  region: string | null | undefined,
+  warehouseCode: string | null | undefined
+): string | null {
+  const r = (region ?? '').trim().toUpperCase()
+  if (r === 'UK') return 'GB'
+  if (['DE', 'US', 'AU', 'FR', 'IT'].includes(r)) return r
+  const w = (warehouseCode ?? '').trim().toUpperCase()
+  const prefix = w.includes('-') ? w.split('-')[0] : w
+  if (prefix === 'UK') return 'GB'
+  if (['DE', 'US', 'AU', 'FR', 'IT'].includes(prefix)) return prefix
+  return null
+}
+
+/** ParcelsApp universal tracking URL; optional country helps destination hint. */
+function parcelsAppTrackingUrl(tracking: string, countryIso: string | null): string {
+  const path = `https://parcelsapp.com/en/tracking/${encodeURIComponent(tracking)}`
+  if (!countryIso) return path
+  return `${path}?country=${encodeURIComponent(countryIso)}`
+}
+
+const ETA_OVERRIDE_STORAGE_KEY = 'evampops.inventoryStatus.inboundEtaOverrides'
+
+function loadEtaOverrides(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(ETA_OVERRIDE_STORAGE_KEY)
+    if (!raw) return {}
+    const p = JSON.parse(raw) as Record<string, unknown>
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(p)) {
+      if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) out[k] = v
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function persistEtaOverrides(next: Record<string, string>) {
+  try {
+    if (Object.keys(next).length === 0) {
+      localStorage.removeItem(ETA_OVERRIDE_STORAGE_KEY)
+    } else {
+      localStorage.setItem(ETA_OVERRIDE_STORAGE_KEY, JSON.stringify(next))
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function formatYmd(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/** Parse display/create strings such as `YYYY-MM-DD HH:MM:SS` (local). */
+function parseInboundDisplayToDate(s: string): Date | null {
+  const t = s.trim()
+  if (!t || t === '—' || t === '--') return null
+  const n = normalizeOcTimestampString(t)
+  const d = new Date(n)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+/** ETA date (calendar day) = create + 3 months. */
+function defaultEtaYmdFromCreateDisplay(createDisplay: string): string {
+  const d = parseInboundDisplayToDate(createDisplay)
+  if (!d) return ''
+  const eta = new Date(d)
+  eta.setMonth(eta.getMonth() + 3)
+  return formatYmd(eta)
+}
+
+/** Whole days from create to putaway (lead time). */
+function formatOrderTimeDays(createDisplay: string, putawayDisplay: string): string {
+  const c = parseInboundDisplayToDate(createDisplay)
+  const p = parseInboundDisplayToDate(putawayDisplay)
+  if (!c || !p) return '—'
+  const days = Math.round((p.getTime() - c.getTime()) / 86400000)
+  return String(days)
+}
+
+function inboundRowStableKey(row: OCInboundOrderRow, idx: number): string {
+  const oc = row.oc_inbound_number?.trim()
+  if (oc) return oc
+  const s = row.seller_inbound_number?.trim()
+  if (s) return `seller:${s}`
+  return `idx:${idx}`
+}
+
+function normalizeInboundStatus(row: OCInboundOrderRow): string {
+  const s = row.status?.trim()
+  return s || '—'
+}
+
+function getUniqueInboundStatuses(orders: OCInboundOrderRow[]): string[] {
+  const set = new Set<string>()
+  for (const r of orders) set.add(normalizeInboundStatus(r))
+  return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+}
+
+function getInboundCreateTimeMs(row: OCInboundOrderRow): number | null {
+  const s = row.create_time ?? formatInboundCreateTime(row.raw, row.inbound_at)
+  const d = parseInboundDisplayToDate(s)
+  return d ? d.getTime() : null
+}
+
+function getInboundArrivedTimeMs(row: OCInboundOrderRow): number | null {
+  const s = row.arrived_time ?? formatInboundArrivedTime(row.raw)
+  const d = parseInboundDisplayToDate(s)
+  return d ? d.getTime() : null
+}
+
+function parseYmdToSortMs(ymd: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return null
+  const d = new Date(`${ymd}T12:00:00`)
+  return Number.isNaN(d.getTime()) ? null : d.getTime()
+}
+
+function getInboundEtaSortMs(
+  row: OCInboundOrderRow,
+  rowKey: string,
+  etaOverrides: Record<string, string>
+): number | null {
+  const createDisplay = row.create_time ?? formatInboundCreateTime(row.raw, row.inbound_at)
+  const defaultYmd = defaultEtaYmdFromCreateDisplay(createDisplay)
+  const ymd = etaOverrides[rowKey] ?? defaultYmd
+  if (!ymd) return null
+  return parseYmdToSortMs(ymd)
+}
+
+type InboundSortKey = 'sku_list' | 'create_time' | 'eta' | 'arrived'
+
+const INBOUND_SORT_STORAGE_KEY = 'evampops.inventoryStatus.inboundSort'
+const INBOUND_SKU5_FILTER_STORAGE_KEY = 'evampops.inventoryStatus.inboundSkuCountMin5'
+
+function loadInboundSort(): { key: InboundSortKey; dir: 'asc' | 'desc' } {
+  try {
+    const raw = localStorage.getItem(INBOUND_SORT_STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as { key?: string; dir?: string }
+      const key = parsed?.key
+      const dir = parsed?.dir
+      if (
+        (key === 'sku_list' || key === 'create_time' || key === 'eta' || key === 'arrived') &&
+        (dir === 'asc' || dir === 'desc')
+      ) {
+        return { key, dir }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { key: 'create_time', dir: 'desc' }
+}
+
+function loadSku5Filter(): boolean {
+  try {
+    return localStorage.getItem(INBOUND_SKU5_FILTER_STORAGE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
 
 const INBOUND_STATUS_CHART_COLORS = [
   '#2563eb',
@@ -26,11 +485,20 @@ export default function InventoryStatus() {
   const [skuFilter, setSkuFilter] = useState('')
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [etaOverrides, setEtaOverrides] = useState<Record<string, string>>(() => loadEtaOverrides())
+  const [inboundSort, setInboundSort] = useState<{ key: InboundSortKey; dir: 'asc' | 'desc' }>(loadInboundSort)
+  const [skuCountFilterMin5, setSkuCountFilterMin5] = useState<boolean>(loadSku5Filter)
+  const [statusExcluded, setStatusExcluded] = useState<Set<string>>(() => new Set())
+  const statusFilterHydratedRef = useRef(false)
+  const lastSavedExcludedRef = useRef<string | null>(null)
+  const [statusFilterOpen, setStatusFilterOpen] = useState(false)
+  const statusFilterButtonRef = useRef<HTMLButtonElement>(null)
+  const statusFilterPanelRef = useRef<HTMLDivElement>(null)
+  const [statusFilterPos, setStatusFilterPos] = useState({ top: 0, left: 0 })
   const [inventorySort, setInventorySort] = useState<{
     key: 'seller_skuid' | 'available' | 'in_transit' | 'reserved_allocated' | 'sold_3m_units' | 'sold_1m_units'
     dir: 'asc' | 'desc'
   }>({ key: 'seller_skuid', dir: 'asc' })
-
   const summaryQuery = useQuery({
     queryKey: ['inventory-status', 'summary'],
     queryFn: async () => (await inventoryStatusAPI.getSummary()).data,
@@ -49,8 +517,22 @@ export default function InventoryStatus() {
     queryFn: async () => (await inventoryStatusAPI.getInboundOrderStatusSummary()).data,
   })
   const inboundOrdersQuery = useQuery({
-    queryKey: ['inventory-status', 'inbound-orders', 6],
-    queryFn: async () => (await inventoryStatusAPI.listInboundOrders({ months_back: 6 })).data,
+    queryKey: ['inventory-status', 'inbound-orders', 6, 'full'],
+    queryFn: async () =>
+      (await inventoryStatusAPI.listInboundOrders({ months_back: 6, include_raw: true })).data,
+  })
+  const inboundStatusFilterQuery = useQuery({
+    queryKey: ['inventory-status', 'inbound-status-filter'],
+    queryFn: async () => (await inventoryStatusAPI.getInboundStatusFilter()).data,
+  })
+
+  const saveInboundStatusFilterMutation = useMutation({
+    mutationFn: (excluded: string[]) =>
+      inventoryStatusAPI.putInboundStatusFilter({ excluded }).then((r) => r.data),
+    onSuccess: (data) => {
+      qc.setQueryData(['inventory-status', 'inbound-status-filter'], data)
+      lastSavedExcludedRef.current = JSON.stringify([...data.excluded].sort())
+    },
   })
 
   const syncInboundMutation = useMutation({
@@ -87,6 +569,229 @@ export default function InventoryStatus() {
   const mappings: OCSkuMapping[] = mappingsQuery.data ?? []
   const inventoryRows: OCSkuInventoryRow[] = inventoryQuery.data ?? []
   const inboundOrders: OCInboundOrderRow[] = inboundOrdersQuery.data ?? []
+  const uniqueInboundStatuses = useMemo(() => getUniqueInboundStatuses(inboundOrders), [inboundOrders])
+
+  const inboundRowsAfterSku = useMemo(() => {
+    const base = inboundOrders.map((row, idx) => ({
+      row,
+      rowKey: inboundRowStableKey(row, idx),
+    }))
+    return skuCountFilterMin5 ? base.filter(({ row }) => row.sku_qty >= 5) : base
+  }, [inboundOrders, skuCountFilterMin5])
+
+  const inboundRowsForTable = useMemo(() => {
+    const filtered = inboundRowsAfterSku.filter(({ row }) => !statusExcluded.has(normalizeInboundStatus(row)))
+    const { key, dir } = inboundSort
+
+    const sorted = [...filtered].sort((a, b) => {
+      const { row: ra, rowKey: ka } = a
+      const { row: rb, rowKey: kb } = b
+
+      if (key === 'sku_list') {
+        const sa = formatInboundSkuList(ra.raw).replace(/[—-]/g, '').trim()
+        const sb = formatInboundSkuList(rb.raw).replace(/[—-]/g, '').trim()
+        const c = sa.localeCompare(sb, undefined, { sensitivity: 'base' })
+        return dir === 'asc' ? c : -c
+      }
+
+      const cmpNullableMs = (x: number | null, y: number | null): number => {
+        if (x === null && y === null) return 0
+        if (x === null) return 1
+        if (y === null) return -1
+        const diff = x - y
+        return dir === 'asc' ? diff : -diff
+      }
+
+      if (key === 'create_time') {
+        return cmpNullableMs(getInboundCreateTimeMs(ra), getInboundCreateTimeMs(rb))
+      }
+      if (key === 'arrived') {
+        return cmpNullableMs(getInboundArrivedTimeMs(ra), getInboundArrivedTimeMs(rb))
+      }
+      if (key === 'eta') {
+        return cmpNullableMs(
+          getInboundEtaSortMs(ra, ka, etaOverrides),
+          getInboundEtaSortMs(rb, kb, etaOverrides)
+        )
+      }
+      return 0
+    })
+
+    return sorted
+  }, [inboundRowsAfterSku, statusExcluded, inboundSort, etaOverrides])
+
+  useEffect(() => {
+    const unique = new Set(uniqueInboundStatuses)
+    setStatusExcluded((prev) => {
+      const next = new Set(prev)
+      for (const x of [...next]) {
+        if (!unique.has(x)) next.delete(x)
+      }
+      return next
+    })
+  }, [uniqueInboundStatuses])
+
+  useEffect(() => {
+    if (statusFilterHydratedRef.current) return
+    if (inboundStatusFilterQuery.isError) {
+      statusFilterHydratedRef.current = true
+      lastSavedExcludedRef.current = JSON.stringify([])
+      return
+    }
+    if (!inboundStatusFilterQuery.isSuccess || inboundStatusFilterQuery.data === undefined) return
+    statusFilterHydratedRef.current = true
+    setStatusExcluded(new Set(inboundStatusFilterQuery.data.excluded))
+    lastSavedExcludedRef.current = JSON.stringify([...inboundStatusFilterQuery.data.excluded].sort())
+  }, [
+    inboundStatusFilterQuery.isSuccess,
+    inboundStatusFilterQuery.isError,
+    inboundStatusFilterQuery.data,
+  ])
+
+  useEffect(() => {
+    if (!statusFilterHydratedRef.current) return
+    const serialized = JSON.stringify([...statusExcluded].sort())
+    if (serialized === lastSavedExcludedRef.current) return
+    const t = window.setTimeout(() => {
+      saveInboundStatusFilterMutation.mutate([...statusExcluded])
+    }, 400)
+    return () => window.clearTimeout(t)
+  }, [statusExcluded, saveInboundStatusFilterMutation])
+
+  useLayoutEffect(() => {
+    if (!statusFilterOpen) return
+    const update = () => {
+      const btn = statusFilterButtonRef.current
+      if (!btn) return
+      const r = btn.getBoundingClientRect()
+      setStatusFilterPos({ top: r.bottom + 4, left: r.left })
+    }
+    update()
+    window.addEventListener('scroll', update, true)
+    window.addEventListener('resize', update)
+    return () => {
+      window.removeEventListener('scroll', update, true)
+      window.removeEventListener('resize', update)
+    }
+  }, [statusFilterOpen])
+
+  useEffect(() => {
+    if (!statusFilterOpen) return
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node
+      if (statusFilterButtonRef.current?.contains(t)) return
+      if (statusFilterPanelRef.current?.contains(t)) return
+      setStatusFilterOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [statusFilterOpen])
+
+  const handleInboundSort = (sortKey: InboundSortKey) => {
+    setInboundSort((prev) => {
+      const next = {
+        key: sortKey,
+        dir:
+          prev.key === sortKey
+            ? prev.dir === 'asc'
+              ? 'desc'
+              : 'asc'
+            : sortKey === 'sku_list'
+              ? 'asc'
+              : 'desc',
+      }
+      try {
+        localStorage.setItem(INBOUND_SORT_STORAGE_KEY, JSON.stringify(next))
+      } catch {
+        // ignore
+      }
+      return next
+    })
+  }
+
+  const toggleSkuCountMin5Filter = () => {
+    setSkuCountFilterMin5((v) => {
+      const next = !v
+      try {
+        if (next) localStorage.setItem(INBOUND_SKU5_FILTER_STORAGE_KEY, '1')
+        else localStorage.removeItem(INBOUND_SKU5_FILTER_STORAGE_KEY)
+      } catch {
+        // ignore
+      }
+      return next
+    })
+  }
+
+  /** Top horizontal scrollbar above the table header, synced with the table body scroll. */
+  const inboundTableScrollRef = useRef<HTMLDivElement>(null)
+  const inboundTopScrollRef = useRef<HTMLDivElement>(null)
+  const inboundScrollSyncLock = useRef(false)
+  const [inboundScrollContentWidth, setInboundScrollContentWidth] = useState(0)
+  const [inboundNeedsHorizontalScroll, setInboundNeedsHorizontalScroll] = useState(false)
+
+  const updateInboundScrollMetrics = () => {
+    const el = inboundTableScrollRef.current
+    if (!el) return
+    const apply = () => {
+      const sw = el.scrollWidth
+      const cw = el.clientWidth
+      setInboundScrollContentWidth(sw)
+      setInboundNeedsHorizontalScroll(sw > cw + 2)
+    }
+    apply()
+    // Table width can settle after fonts/layout; second frame catches flex/min-width cases.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(apply)
+    })
+  }
+
+  useLayoutEffect(() => {
+    updateInboundScrollMetrics()
+  }, [inboundRowsForTable])
+
+  useEffect(() => {
+    const el = inboundTableScrollRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => updateInboundScrollMetrics())
+    ro.observe(el)
+    window.addEventListener('resize', updateInboundScrollMetrics)
+    return () => {
+      ro.disconnect()
+      window.removeEventListener('resize', updateInboundScrollMetrics)
+    }
+  }, [inboundRowsForTable])
+
+  const syncInboundTopFromMain = () => {
+    if (inboundScrollSyncLock.current) return
+    const main = inboundTableScrollRef.current
+    const top = inboundTopScrollRef.current
+    if (!main || !top) return
+    inboundScrollSyncLock.current = true
+    top.scrollLeft = main.scrollLeft
+    requestAnimationFrame(() => {
+      inboundScrollSyncLock.current = false
+    })
+  }
+
+  const syncInboundMainFromTop = () => {
+    if (inboundScrollSyncLock.current) return
+    const main = inboundTableScrollRef.current
+    const top = inboundTopScrollRef.current
+    if (!main || !top) return
+    inboundScrollSyncLock.current = true
+    main.scrollLeft = top.scrollLeft
+    requestAnimationFrame(() => {
+      inboundScrollSyncLock.current = false
+    })
+  }
+
+  useEffect(() => {
+    if (!inboundNeedsHorizontalScroll) return
+    const main = inboundTableScrollRef.current
+    const top = inboundTopScrollRef.current
+    if (main && top) top.scrollLeft = main.scrollLeft
+  }, [inboundNeedsHorizontalScroll, inboundScrollContentWidth])
+
   const hasRequiredCredentials = summary?.has_required_credentials ?? false
   const sortedInventoryRows = [...inventoryRows].sort((a, b) => {
     const mult = inventorySort.dir === 'asc' ? 1 : -1
@@ -102,6 +807,21 @@ export default function InventoryStatus() {
       key,
       dir: prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : (key === 'seller_skuid' ? 'asc' : 'desc'),
     }))
+  }
+
+  const setInboundEtaOverride = (rowKey: string, ymd: string | null, computedDefaultYmd: string) => {
+    setEtaOverrides((prev) => {
+      const next = { ...prev }
+      if (ymd === null || ymd === '') {
+        delete next[rowKey]
+      } else if (ymd === computedDefaultYmd) {
+        delete next[rowKey]
+      } else {
+        next[rowKey] = ymd
+      }
+      persistEtaOverrides(next)
+      return next
+    })
   }
 
   return (
@@ -336,50 +1056,296 @@ export default function InventoryStatus() {
         )}
       </section>
 
-      <section className="bg-white rounded-lg border border-gray-200 p-4 mt-6">
+      <section className="bg-white rounded-lg border border-gray-200 p-4 mt-6 max-w-full min-w-0 overflow-x-hidden">
         <h2 className="text-lg font-semibold text-gray-800 mb-3">Inbound orders</h2>
         <p className="text-sm text-gray-600 mb-3">
           Evamp-ops workflows always involve these OC marketplaces together: `UK`, `DE`, `US`, `AU`. Rows come from the
-          same cache as above (last ~6 months by date); run <strong>Sync from OC</strong> to refresh.
+          same cache as above (last ~6 months by date). Create / putaway / arrived are parsed from that cache on the
+          server. The <span className="font-mono text-xs">CREATE TIME/PUTAWAY TIME</span> column matches OC: create on
+          the first line, putaway on the second (<code className="text-xs bg-gray-100 px-1 rounded">--</code> when
+          unknown). <strong>Tracking #</strong> comes from OC <span className="font-mono text-xs">trackingList</span>.
+          <strong> ETA</strong> (after SKU list) defaults to create date + 3 months (local); edit to override—overrides
+          are saved in this browser and shown with a green background. <strong>Courier</strong> links open{' '}
+          <span className="font-mono text-xs">parcelsapp.com</span> with the tracking number (country hint from region /
+          warehouse when available). <strong>Order time (days)</strong> is whole days from create to putaway. Run{' '}
+          <strong>Sync from OC</strong> to refresh data; if times stay empty, the API may not include those fields for
+          your tenant. Click column headers to sort (▲/▼); <strong>CREATE TIME/PUTAWAY</strong> sorts by{' '}
+          <em>create</em> time only. Click <strong>SKU count</strong> to keep only orders with SKU count ≥ 5 (header
+          uses the same mint highlight as an edited ETA).
         </p>
         {inboundOrdersQuery.isLoading ? (
           <p className="text-sm text-gray-500">Loading inbound orders...</p>
         ) : inboundOrders.length === 0 ? (
           <p className="text-sm text-gray-500">No inbound orders found for UK/DE/US/AU in the last 6 months.</p>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm border border-gray-200">
+          <>
+            <div className="w-full max-w-full min-w-0 rounded-lg border border-gray-200 overflow-hidden">
+              {inboundNeedsHorizontalScroll && inboundScrollContentWidth > 0 && (
+                <div
+                  ref={inboundTopScrollRef}
+                  role="presentation"
+                  className="overflow-x-scroll overflow-y-hidden border-b border-gray-200 bg-gray-50 min-h-[14px] py-1"
+                  onScroll={syncInboundMainFromTop}
+                  aria-label="Scroll inbound table horizontally"
+                >
+                  <div style={{ width: inboundScrollContentWidth, height: 1 }} />
+                </div>
+              )}
+              <div
+                ref={inboundTableScrollRef}
+                className={`w-full max-w-full min-w-0 overflow-x-auto bg-white ${
+                  inboundNeedsHorizontalScroll
+                    ? '[scrollbar-width:none] [&::-webkit-scrollbar]:h-0'
+                    : ''
+                }`}
+                onScroll={syncInboundTopFromMain}
+              >
+            <table className="w-full min-w-0 text-sm border-collapse">
               <thead className="bg-gray-50">
                 <tr>
-                  <th className="px-3 py-2 text-left">Seller inbound no.</th>
                   <th className="px-3 py-2 text-left">OC inbound no.</th>
-                  <th className="px-3 py-2 text-left">Status</th>
-                  <th className="px-3 py-2 text-left">Warehouse</th>
-                  <th className="px-3 py-2 text-left">SKU count</th>
+                  <th className="px-3 py-2 text-left align-top">
+                    <button
+                      ref={statusFilterButtonRef}
+                      type="button"
+                      disabled={inboundStatusFilterQuery.isLoading && !inboundStatusFilterQuery.isError}
+                      className={`inline-flex max-w-full items-center gap-1 rounded border px-1.5 py-0.5 text-left text-sm font-medium disabled:cursor-wait disabled:opacity-70 ${
+                        statusExcluded.size > 0
+                          ? 'border-gray-200 bg-[#DFFFEA] text-gray-900 hover:bg-[#cef9e0]'
+                          : 'border-transparent text-gray-900 hover:bg-gray-100'
+                      }`}
+                      onClick={() => setStatusFilterOpen((v) => !v)}
+                      aria-expanded={statusFilterOpen}
+                      aria-haspopup="listbox"
+                      title={
+                        inboundStatusFilterQuery.isLoading && !inboundStatusFilterQuery.isError
+                          ? 'Loading saved filter from server…'
+                          : 'Filter rows by status. Selection is saved on the server for all sessions.'
+                      }
+                    >
+                      Status
+                      <span className="text-[10px] leading-none text-gray-500" aria-hidden>
+                        ▼
+                      </span>
+                      {saveInboundStatusFilterMutation.isPending ? (
+                        <span className="text-[10px] text-gray-500">Saving…</span>
+                      ) : null}
+                    </button>
+                    {statusFilterOpen ? (
+                      <div
+                        ref={statusFilterPanelRef}
+                        role="listbox"
+                        aria-label="Status filter"
+                        className="fixed z-[100] w-[min(20rem,calc(100vw-1.5rem))] rounded-md border border-gray-200 bg-white py-2 shadow-lg"
+                        style={{ top: statusFilterPos.top, left: statusFilterPos.left }}
+                        onMouseDown={(e) => e.stopPropagation()}
+                      >
+                        <div className="flex flex-wrap gap-x-3 gap-y-1 border-b border-gray-100 px-3 pb-2">
+                          <button
+                            type="button"
+                            className="text-xs text-blue-600 hover:underline"
+                            onClick={() => setStatusExcluded(new Set())}
+                          >
+                            Select all
+                          </button>
+                          <button
+                            type="button"
+                            className="text-xs text-blue-600 hover:underline"
+                            onClick={() => setStatusExcluded(new Set(uniqueInboundStatuses))}
+                          >
+                            Deselect all
+                          </button>
+                        </div>
+                        <div className="max-h-64 overflow-y-auto px-2 pt-1">
+                          {uniqueInboundStatuses.map((s) => {
+                            const visible = !statusExcluded.has(s)
+                            return (
+                              <label
+                                key={s}
+                                className="flex cursor-pointer items-start gap-2 rounded px-2 py-1 text-sm hover:bg-gray-50"
+                              >
+                                <span
+                                  className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border border-gray-300 bg-white text-xs font-semibold text-emerald-600"
+                                  aria-hidden
+                                >
+                                  {visible ? '✓' : ''}
+                                </span>
+                                <input
+                                  type="checkbox"
+                                  checked={visible}
+                                  onChange={() => {
+                                    setStatusExcluded((prev) => {
+                                      const next = new Set(prev)
+                                      if (next.has(s)) next.delete(s)
+                                      else next.add(s)
+                                      return next
+                                    })
+                                  }}
+                                  className="sr-only"
+                                />
+                                <span
+                                  className={`min-w-0 break-words ${visible ? 'font-medium text-gray-900' : 'text-gray-500'}`}
+                                >
+                                  {s}
+                                </span>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    ) : null}
+                  </th>
+                  <th
+                    className={`px-3 py-2 text-left cursor-pointer select-none rounded-md border text-gray-900 ${
+                      skuCountFilterMin5
+                        ? 'bg-[#DFFFEA] border-gray-200 font-medium hover:bg-[#cef9e0]'
+                        : 'border-transparent hover:bg-gray-100'
+                    }`}
+                    onClick={toggleSkuCountMin5Filter}
+                    title="Click to show only orders with SKU count ≥ 5. Click again to show all."
+                  >
+                    SKU count{skuCountFilterMin5 ? ' ≥5' : ''}
+                  </th>
                   <th className="px-3 py-2 text-left">Put away qty</th>
-                  <th className="px-3 py-2 text-left">Shipping method</th>
+                  <th
+                    className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-800 cursor-pointer select-none hover:bg-gray-100"
+                    onClick={() => handleInboundSort('create_time')}
+                    title="Sort by create time (first line). Putaway line is not used for sorting."
+                  >
+                    CREATE TIME/PUTAWAY TIME{' '}
+                    {inboundSort.key === 'create_time' && (inboundSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className="px-3 py-2 text-left whitespace-nowrap cursor-pointer select-none hover:bg-gray-100"
+                    onClick={() => handleInboundSort('arrived')}
+                  >
+                    Arrived {inboundSort.key === 'arrived' && (inboundSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className="px-3 py-2 text-left max-w-[14rem] cursor-pointer select-none hover:bg-gray-100"
+                    onClick={() => handleInboundSort('sku_list')}
+                  >
+                    SKU list {inboundSort.key === 'sku_list' && (inboundSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className="px-3 py-2 text-left whitespace-nowrap cursor-pointer select-none hover:bg-gray-100"
+                    onClick={() => handleInboundSort('eta')}
+                  >
+                    ETA {inboundSort.key === 'eta' && (inboundSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th className="px-3 py-2 text-left max-w-[9rem]">Courier</th>
+                  <th className="px-3 py-2 text-left max-w-[11rem]">Tracking #</th>
+                  <th className="px-3 py-2 text-left whitespace-nowrap">Order time (days)</th>
                 </tr>
               </thead>
               <tbody>
-                {inboundOrders.map((row, idx) => (
+                {inboundRowsForTable.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={11}
+                      className="px-3 py-6 text-center text-sm text-amber-900 bg-amber-50/80 border-t border-amber-100"
+                    >
+                      {inboundRowsAfterSku.length === 0 && skuCountFilterMin5 ? (
+                        <>
+                          No rows match <strong>SKU count ≥ 5</strong>. Click the <strong>SKU count</strong> header
+                          again to show all orders.
+                        </>
+                      ) : (
+                        <>
+                          No rows match the selected <strong>Status</strong> values. Use the <strong>Status</strong>{' '}
+                          filter above and check at least one value (or <strong>Select all</strong>).
+                        </>
+                      )}
+                    </td>
+                  </tr>
+                ) : null}
+                {inboundRowsForTable.map(({ row, rowKey }) => {
+                  const createDisplay = row.create_time ?? formatInboundCreateTime(row.raw, row.inbound_at)
+                  const putawayDisplay = row.putaway_time ?? formatInboundPutawayTime(row.raw)
+                  const defaultEtaYmd = defaultEtaYmdFromCreateDisplay(createDisplay)
+                  const etaOverride = etaOverrides[rowKey]
+                  const etaInputValue = etaOverride ?? defaultEtaYmd
+                  const etaIsEdited = etaOverride !== undefined
+                  const trackingPairs = getInboundTrackingPairs(row.raw)
+                  const countryIso = inferInboundCountryIso(row.region, row.warehouse_code)
+                  return (
                   <tr
-                    key={`${row.seller_inbound_number}-${row.oc_inbound_number || idx}`}
+                    key={rowKey}
                     className="border-t border-gray-100"
                   >
-                    <td className="px-3 py-2 font-mono">
-                      {row.seller_inbound_number || row.oc_inbound_number || '—'}
-                    </td>
                     <td className="px-3 py-2 font-mono">{row.oc_inbound_number || '—'}</td>
                     <td className="px-3 py-2">{row.status || '—'}</td>
-                    <td className="px-3 py-2">{row.warehouse_code || row.region || '—'}</td>
                     <td className="px-3 py-2">{row.sku_qty}</td>
                     <td className="px-3 py-2">{row.put_away_qty}</td>
-                    <td className="px-3 py-2">{row.shipping_method || '—'}</td>
+                    <td className="px-3 py-2 text-xs text-gray-800 align-top whitespace-nowrap">
+                      <div className="font-mono tabular-nums leading-snug">
+                        <div>
+                          {ocPortalDash(row.create_time ?? formatInboundCreateTime(row.raw, row.inbound_at))}
+                        </div>
+                        <div className="text-gray-700">
+                          {ocPortalDash(row.putaway_time ?? formatInboundPutawayTime(row.raw))}
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 text-xs text-gray-700 whitespace-nowrap font-mono tabular-nums">
+                      {ocPortalDash(row.arrived_time ?? formatInboundArrivedTime(row.raw))}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-gray-800 align-top max-w-[14rem]">
+                      <InboundSkuListCell raw={row.raw} />
+                    </td>
+                    <td className="px-3 py-2 align-top">
+                      <input
+                        type="date"
+                        className={`text-xs font-mono rounded border px-1 py-0.5 max-w-[11rem] ${
+                          etaIsEdited ? 'bg-[#DFFFEA] border-gray-200' : 'border-gray-200 bg-white'
+                        }`}
+                        value={etaInputValue || ''}
+                        onChange={(e) =>
+                          setInboundEtaOverride(rowKey, e.target.value || null, defaultEtaYmd)
+                        }
+                        title="Defaults to create time + 3 months. Edit to override; green = saved override."
+                      />
+                    </td>
+                    <td className="px-3 py-2 text-xs text-gray-800 align-top max-w-[9rem] break-words">
+                      {trackingPairs.length === 0 ? (
+                        '—'
+                      ) : (
+                        <span className="inline-flex flex-wrap gap-x-1 gap-y-0.5 items-center">
+                          {trackingPairs.map((p, i) => (
+                            <span key={p.tracking}>
+                              {i > 0 ? <span className="text-gray-400">, </span> : null}
+                              <a
+                                href={parcelsAppTrackingUrl(p.tracking, countryIso)}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-blue-600 hover:underline"
+                                title={
+                                  countryIso
+                                    ? `Track on ParcelsApp (country hint: ${countryIso})`
+                                    : 'Track on ParcelsApp'
+                                }
+                              >
+                                {p.carrier}
+                              </a>
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-gray-800 align-top max-w-[11rem] break-words">
+                      {formatInboundTrackingNumbers(row.raw)}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap font-mono tabular-nums">
+                      {formatOrderTimeDays(createDisplay, putawayDisplay)}
+                    </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
-          </div>
+              </div>
+            </div>
+          </>
         )}
       </section>
     </div>

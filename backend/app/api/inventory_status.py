@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime, date, timedelta, timezone, time as dt_time
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +36,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 SYNC_META_INBOUND_LAST = "oc_inbound_last_sync_at"
+SYNC_META_INBOUND_STATUS_FILTER = "inventory_inbound_status_filter_excluded"
 
 
 class OCConnectionUpsertRequest(BaseModel):
@@ -152,6 +154,38 @@ class OCInboundRawDebugResponse(BaseModel):
     last_response: dict | None = None
 
 
+class InboundOrderLookupResponse(BaseModel):
+    """Transparent view of one cached inbound row (DB + parsed OC JSON + computed display times)."""
+
+    request_method: str = "GET"
+    request_url: str
+    oc_inbound_number: str
+    seller_inbound_number: Optional[str] = None
+    status: Optional[str] = None
+    warehouse_code: Optional[str] = None
+    region: Optional[str] = None
+    shipping_method: Optional[str] = None
+    sku_qty: int = 0
+    put_away_qty: int = 0
+    inbound_at_db: Optional[str] = Field(None, description="Stored inbound_at from sync (ISO).")
+    synced_at_db: Optional[str] = Field(None, description="Last OC sync time for this row (ISO).")
+    create_time: Optional[str] = None
+    putaway_time: Optional[str] = None
+    arrived_time: Optional[str] = None
+    has_raw_payload: bool = False
+    raw_oc_payload: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Full JSON from oc_inbound_orders.raw_payload after last sync (merged list/detail/label).",
+    )
+    transparency: str = Field(
+        default=(
+            "create_time / putaway_time / arrived_time come from _extract_inbound_ui_times() on raw_oc_payload "
+            "(flattened scalars + batchList.arrivalTime for arrived). create_time falls back to inbound_at_db. "
+            "Official Postman samples only document inbound creation; query/detail response shapes vary by tenant."
+        )
+    )
+
+
 class OCInboundOrderResponse(BaseModel):
     seller_inbound_number: str
     oc_inbound_number: Optional[str] = None
@@ -161,6 +195,18 @@ class OCInboundOrderResponse(BaseModel):
     shipping_method: Optional[str] = None
     sku_qty: int = 0
     put_away_qty: int = 0
+    inbound_at: Optional[datetime] = None
+    synced_at: Optional[datetime] = None
+    create_time: Optional[str] = Field(
+        default=None,
+        description="Display create time from OC raw (YYYY-MM-DD HH:MM:SS UTC), computed server-side.",
+    )
+    putaway_time: Optional[str] = Field(default=None, description="Display putaway time from OC raw, server-side.")
+    arrived_time: Optional[str] = Field(default=None, description="Display arrived time from OC raw, server-side.")
+    raw: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Full OrangeConnex row JSON from the last sync (only when include_raw=true).",
+    )
 
 
 class InboundOrderStatusSlice(BaseModel):
@@ -184,6 +230,16 @@ class InboundSyncResponse(BaseModel):
     full: bool
 
 
+class InboundStatusFilterResponse(BaseModel):
+    """Which inbound status values are hidden in the UI (Excel-style column filter)."""
+
+    excluded: List[str] = Field(default_factory=list)
+
+
+class InboundStatusFilterPut(BaseModel):
+    excluded: List[str] = Field(default_factory=list)
+
+
 # Earliest date for historic inbound status chart (inclusive, UTC).
 INBOUND_STATUS_CHART_FROM = date(2024, 1, 1)
 
@@ -200,21 +256,171 @@ def _inbound_dedup_key(seller: str, oc: Optional[str]) -> str:
     return f"{o}::{s}"
 
 
+def _flatten_oc_scalar_fields(d: Any, depth: int = 0) -> List[tuple[str, Any]]:
+    """Collect (key_lower, scalar_value) from nested OC JSON; dict/list values are recursed."""
+    if depth > 12 or not isinstance(d, dict):
+        return []
+    out: List[tuple[str, Any]] = []
+    for k, v in d.items():
+        kl = str(k).lower()
+        if isinstance(v, dict):
+            out.extend(_flatten_oc_scalar_fields(v, depth + 1))
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    out.extend(_flatten_oc_scalar_fields(item, depth + 1))
+        else:
+            out.append((kl, v))
+    return out
+
+
+def _parse_oc_scalar_to_utc_naive(v: Any) -> Optional[datetime]:
+    """Parse OC timestamp: epoch ms, epoch s, ISO, or 'YYYY-MM-DD HH:MM:SS'."""
+    if v is None or isinstance(v, bool) or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        n = float(v)
+        if n > 1e12:
+            return datetime.utcfromtimestamp(n / 1000.0)
+        if n > 1e9:
+            return datetime.utcfromtimestamp(n)
+        return None
+    if not isinstance(v, str):
+        return None
+    s = str(v).strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    elif s.endswith("+0000"):
+        s = s[:-5] + "+00:00"
+    elif re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}", s):
+        s = re.sub(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})", r"\1T\2", s)
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt.replace(tzinfo=None) if dt.tzinfo else dt
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_inbound_ui_times(
+    raw: Optional[Dict[str, Any]], inbound_at_db: Optional[datetime]
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Stable display times for the inbound table (YYYY-MM-DD HH:MM:SS, UTC from OC numeric / parsed strings).
+    """
+
+    def fmt(dt: Optional[datetime]) -> Optional[str]:
+        if dt is None:
+            return None
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    if not raw:
+        return (fmt(inbound_at_db), None, None)
+
+    flat = _flatten_oc_scalar_fields(raw)
+
+    create_dt: Optional[datetime] = None
+    for kl, v in flat:
+        if kl in (
+            "createtime",
+            "create_time",
+            "createdtime",
+            "gmtcreate",
+            "gmt_create",
+            "inboundcreatetime",
+            "ordercreatetime",
+        ):
+            create_dt = _parse_oc_scalar_to_utc_naive(v)
+            if create_dt:
+                break
+    if create_dt is None:
+        for kl, v in flat:
+            if ("create" in kl or "gmt" in kl) and ("time" in kl or "date" in kl) and "putaway" not in kl:
+                create_dt = _parse_oc_scalar_to_utc_naive(v)
+                if create_dt:
+                    break
+    if create_dt is None and inbound_at_db:
+        create_dt = inbound_at_db
+
+    putaway_dt: Optional[datetime] = None
+    for kl, v in flat:
+        if kl in ("putawaytime", "put_away_time", "completeputawaytime"):
+            putaway_dt = _parse_oc_scalar_to_utc_naive(v)
+            if putaway_dt:
+                break
+    if putaway_dt is None:
+        for kl, v in flat:
+            if "putaway" in kl and "time" in kl and "qty" not in kl and "quantity" not in kl:
+                putaway_dt = _parse_oc_scalar_to_utc_naive(v)
+                if putaway_dt:
+                    break
+
+    arrived_dt: Optional[datetime] = None
+    for kl, v in flat:
+        if kl in ("arrivedtime", "arrivaltime", "actualarrivaltime", "actualarrival"):
+            arrived_dt = _parse_oc_scalar_to_utc_naive(v)
+            if arrived_dt:
+                break
+    if arrived_dt is None:
+        for kl, v in flat:
+            if ("arrival" in kl or "arrived" in kl) and "estimate" not in kl and "eta" not in kl and "time" in kl:
+                arrived_dt = _parse_oc_scalar_to_utc_naive(v)
+                if arrived_dt:
+                    break
+    if arrived_dt is None:
+        batch_list = raw.get("batchList") if isinstance(raw.get("batchList"), list) else raw.get("batchlist")
+        if isinstance(batch_list, list):
+            ms: List[int] = []
+            for item in batch_list:
+                if not isinstance(item, dict):
+                    continue
+                at = item.get("arrivalTime") or item.get("arrivaltime")
+                if isinstance(at, (int, float)) and at > 0:
+                    ms.append(int(at))
+            if ms:
+                arrived_dt = datetime.utcfromtimestamp(min(ms) / 1000.0)
+
+    return (fmt(create_dt), fmt(putaway_dt), fmt(arrived_dt))
+
+
 def _parse_inbound_at(raw: Any) -> Optional[datetime]:
+    """
+    Best-effort time from OC list or merged detail payload (stored as inbound_at for sorting / fallback).
+    Top-level keys only; OC uses createtime, gmtCreate, +0000, Z, epoch ms.
+    """
     if not isinstance(raw, dict):
         return None
     lower = {str(k).lower(): v for k, v in raw.items()}
-    for k in ("createtime", "createdtime", "inboundcreatetime", "createddate", "inboundcreatedtime"):
+    for k in (
+        "createtime",
+        "createdtime",
+        "inboundcreatetime",
+        "createddate",
+        "inboundcreatedtime",
+        "gmtcreate",
+        "gmt_create",
+        "ordercreatetime",
+        "putawaytime",
+        "arrivedtime",
+        "arrivaltime",
+    ):
         v = lower.get(k)
         if v is None:
             continue
         try:
+            if isinstance(v, (int, float)) and v > 1e11:
+                return datetime.utcfromtimestamp(v / 1000.0)
             ts = str(v).strip()
             if ts.endswith("Z"):
                 ts = ts[:-1] + "+00:00"
+            elif ts.endswith("+0000"):
+                ts = ts[:-5] + "+00:00"
+            elif re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}", ts):
+                ts = re.sub(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})", r"\1T\2", ts)
             dt = datetime.fromisoformat(ts)
             return dt.replace(tzinfo=None) if dt.tzinfo else dt
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OSError):
             continue
     return None
 
@@ -733,6 +939,10 @@ async def inbound_orders_status_summary(db: AsyncSession = Depends(get_db)):
 @router.get("/inbound-orders", response_model=List[OCInboundOrderResponse])
 async def list_oc_inbound_orders(
     months_back: int = 6,
+    include_raw: bool = Query(
+        False,
+        description="Include full OC JSON per row (raw_payload). Larger response; use to inspect all API fields.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """List cached inbound orders; approximate window using `months_back` (30-day months)."""
@@ -755,6 +965,15 @@ async def list_oc_inbound_orders(
     rows = result.scalars().all()
     payload: List[OCInboundOrderResponse] = []
     for r in rows:
+        raw_parsed: Optional[Dict[str, Any]] = None
+        if r.raw_payload:
+            try:
+                parsed = json.loads(r.raw_payload)
+                raw_parsed = parsed if isinstance(parsed, dict) else None
+            except (json.JSONDecodeError, TypeError):
+                raw_parsed = None
+        create_s, putaway_s, arrived_s = _extract_inbound_ui_times(raw_parsed, r.inbound_at)
+        raw_obj = raw_parsed if include_raw else None
         payload.append(
             OCInboundOrderResponse(
                 seller_inbound_number=r.seller_inbound_number or "",
@@ -765,9 +984,109 @@ async def list_oc_inbound_orders(
                 shipping_method=r.shipping_method,
                 sku_qty=r.sku_qty,
                 put_away_qty=r.put_away_qty,
+                inbound_at=r.inbound_at,
+                synced_at=r.synced_at,
+                create_time=create_s,
+                putaway_time=putaway_s,
+                arrived_time=arrived_s,
+                raw=raw_obj,
             )
         )
     return payload
+
+
+@router.get("/inbound-orders/status-filter", response_model=InboundStatusFilterResponse)
+async def get_inbound_status_filter(db: AsyncSession = Depends(get_db)):
+    """Persisted Status column filter (hidden status values). Stored in sync_metadata."""
+    raw = await _get_sync_meta_value(db, SYNC_META_INBOUND_STATUS_FILTER)
+    if not raw or not str(raw).strip():
+        return InboundStatusFilterResponse(excluded=[])
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return InboundStatusFilterResponse(excluded=[])
+    if isinstance(data, dict):
+        ex = data.get("excluded")
+        if isinstance(ex, list) and all(isinstance(x, str) for x in ex):
+            return InboundStatusFilterResponse(excluded=ex)
+    return InboundStatusFilterResponse(excluded=[])
+
+
+@router.put("/inbound-orders/status-filter", response_model=InboundStatusFilterResponse)
+async def put_inbound_status_filter(
+    body: InboundStatusFilterPut,
+    db: AsyncSession = Depends(get_db),
+):
+    payload = json.dumps({"excluded": body.excluded}, ensure_ascii=False)
+    await _set_sync_meta_value(db, SYNC_META_INBOUND_STATUS_FILTER, payload)
+    await db.commit()
+    return InboundStatusFilterResponse(excluded=body.excluded)
+
+
+@router.get("/inbound-orders/lookup", response_model=InboundOrderLookupResponse)
+async def lookup_oc_inbound_order(
+    request: Request,
+    oc_inbound_number: str = Query(
+        ...,
+        min_length=5,
+        max_length=200,
+        description="OC inbound number, e.g. OCI5GB08513638",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Transparency endpoint: one cached inbound by OC number (no date window).
+    Use this to inspect raw OC JSON and how create/putaway/arrived were derived.
+    """
+    cid = await _active_oc_connection_id(db)
+    if not cid:
+        raise HTTPException(status_code=400, detail="No active OC connection configured.")
+
+    oc = oc_inbound_number.strip()
+    stmt = (
+        select(OCInboundOrder)
+        .where(
+            OCInboundOrder.connection_id == cid,
+            func.lower(OCInboundOrder.oc_inbound_number) == oc.lower(),
+        )
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    r = result.scalar_one_or_none()
+    if not r:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No cached inbound order with oc_inbound_number={oc!r}. Run POST /inbound-orders/sync or widen data.",
+        )
+
+    raw_parsed: Optional[Dict[str, Any]] = None
+    if r.raw_payload:
+        try:
+            parsed = json.loads(r.raw_payload)
+            raw_parsed = parsed if isinstance(parsed, dict) else None
+        except (json.JSONDecodeError, TypeError):
+            raw_parsed = None
+
+    create_s, putaway_s, arrived_s = _extract_inbound_ui_times(raw_parsed, r.inbound_at)
+
+    return InboundOrderLookupResponse(
+        request_url=str(request.url),
+        oc_inbound_number=r.oc_inbound_number or oc,
+        seller_inbound_number=r.seller_inbound_number or None,
+        status=r.status,
+        warehouse_code=r.warehouse_code,
+        region=r.region,
+        shipping_method=r.shipping_method,
+        sku_qty=r.sku_qty,
+        put_away_qty=r.put_away_qty,
+        inbound_at_db=r.inbound_at.isoformat() if r.inbound_at else None,
+        synced_at_db=r.synced_at.isoformat() if r.synced_at else None,
+        create_time=create_s,
+        putaway_time=putaway_s,
+        arrived_time=arrived_s,
+        has_raw_payload=raw_parsed is not None,
+        raw_oc_payload=raw_parsed,
+    )
 
 
 @router.get("/debug-raw", response_model=OCRawDebugResponse)

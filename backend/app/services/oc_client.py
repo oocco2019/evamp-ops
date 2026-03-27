@@ -18,6 +18,286 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import encryption_service
 from app.models.settings import APICredential, OCConnection
 
+
+def _oc_dict_get_ci(d: Dict[str, Any], *names: str) -> Any:
+    """Case-insensitive getter for OC JSON objects."""
+    if not isinstance(d, dict):
+        return None
+    lower_map = {str(k).lower(): v for k, v in d.items()}
+    for n in names:
+        key = (n or "").lower()
+        if key and key in lower_map:
+            return lower_map[key]
+    return None
+
+
+def _oc_inbound_detail_response_ok(resp: Dict[str, Any]) -> bool:
+    if resp.get("success") is False:
+        return False
+    errs = resp.get("errors")
+    if isinstance(errs, list) and len(errs) > 0:
+        return False
+    code = resp.get("code")
+    if code is not None and code not in (0, "0"):
+        return False
+    return True
+
+
+def _extract_inbound_detail_order_list(resp: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Parse POST /3pp/inbound/v1/detail response body."""
+    if not isinstance(resp, dict) or not _oc_inbound_detail_response_ok(resp):
+        return []
+    data = resp.get("data")
+    if not isinstance(data, dict):
+        return []
+    lst = data.get("inboundOrderList")
+    if isinstance(lst, list):
+        return [x for x in lst if isinstance(x, dict)]
+    return []
+
+
+def _extract_inbound_label_order_list(resp: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Parse POST /3pp/inbound/v1/query/labels response body."""
+    if not isinstance(resp, dict) or not _oc_inbound_detail_response_ok(resp):
+        return []
+    data = resp.get("data")
+    if not isinstance(data, dict):
+        return []
+    lst = data.get("inboundOrderList")
+    if isinstance(lst, list):
+        return [x for x in lst if isinstance(x, dict)]
+    return []
+
+
+def _inbound_row_has_sku_list(raw: Any) -> bool:
+    if not isinstance(raw, dict):
+        return False
+    sl = _oc_dict_get_ci(raw, "skulist", "SKUList", "skuList")
+    return isinstance(sl, list) and len(sl) > 0
+
+
+def _merge_inbound_list_and_detail(list_raw: Dict[str, Any], detail: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Merge detail into the list-query row. Detail wins on conflicts, except: do not overwrite a
+    non-null list value with None from detail (some tenants omit timestamps in detail or send null).
+    """
+    out = dict(list_raw)
+    for k, v in detail.items():
+        if v is None and k in out and out[k] is not None:
+            continue
+        out[k] = v
+    return out
+
+
+async def _merge_inbound_detail_into_rows(
+    db: AsyncSession,
+    conn: OCConnection,
+    start_time: str,
+    end_time: str,
+    rows: List[Dict[str, Any]],
+) -> None:
+    """
+    OrangeConnex list query returns a thin row; detail query adds SKU lists, tracking, batches, files, etc.
+    Merge detail into each row's raw_payload (detail wins; list non-null scalars are not replaced by detail null).
+    See: Inbound Order Detail Query — /openapi/3pp/inbound/v1/detail
+    """
+    if not rows:
+        return
+    endpoint = "/openapi/3pp/inbound/v1/detail"
+    inbound_nums: List[str] = []
+    for row in rows:
+        oc = (row.get("oc_inbound_number") or "").strip()
+        if oc:
+            inbound_nums.append(oc)
+    if not inbound_nums:
+        return
+    seen: set[str] = set()
+    unique: List[str] = []
+    for n in inbound_nums:
+        lk = n.lower()
+        if lk not in seen:
+            seen.add(lk)
+            unique.append(n)
+
+    by_oc_lower: Dict[str, Dict[str, Any]] = {}
+    batch_size = 40
+    for i in range(0, len(unique), batch_size):
+        batch = unique[i : i + batch_size]
+        timestamp_ms = int(time.time() * 1000)
+        message_id = str(uuid4())
+        body_obj = {
+            "messageId": message_id,
+            "timestamp": timestamp_ms,
+            "data": {
+                "startTime": start_time,
+                "endTime": end_time,
+                "inboundNumberList": batch,
+            },
+        }
+        try:
+            resp = await _call_oc(db, conn, "POST", endpoint, body_obj=body_obj)
+        except OCAPIError as e:
+            logger.warning("OC inbound detail batch failed (%s): %s", batch[:3], e)
+            continue
+        for detail in _extract_inbound_detail_order_list(resp):
+            oc_key = _oc_dict_get_ci(detail, "inboundNumber", "inboundOrderNumber", "inboundNo")
+            if oc_key:
+                by_oc_lower[str(oc_key).strip().lower()] = detail
+
+    merged = 0
+    for row in rows:
+        oc = (row.get("oc_inbound_number") or "").strip()
+        if not oc:
+            continue
+        detail = by_oc_lower.get(oc.lower())
+        if not detail:
+            continue
+        raw = row.get("raw_payload")
+        if isinstance(raw, dict):
+            row["raw_payload"] = _merge_inbound_list_and_detail(raw, detail)
+        else:
+            row["raw_payload"] = detail
+        merged += 1
+    if merged:
+        logger.info("OC inbound detail merged into %d row(s) for this chunk (detail API)", merged)
+
+
+async def _merge_inbound_detail_by_seller_numbers(
+    db: AsyncSession,
+    conn: OCConnection,
+    start_time: str,
+    end_time: str,
+    rows: List[Dict[str, Any]],
+) -> None:
+    """
+    Second detail pass using 3PP seller inbound reference numbers.
+    Some tenants return fuller payloads when queried by seller reference instead of OC inbound no.
+    """
+    sellers: List[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        if _inbound_row_has_sku_list(row.get("raw_payload")):
+            continue
+        s = str(row.get("seller_inbound_number") or "").strip()
+        if not s or s.lower() in seen:
+            continue
+        seen.add(s.lower())
+        sellers.append(s)
+
+    if not sellers:
+        return
+
+    endpoint = "/openapi/3pp/inbound/v1/detail"
+    by_seller_lower: Dict[str, Dict[str, Any]] = {}
+    batch_size = 40
+    for i in range(0, len(sellers), batch_size):
+        batch = sellers[i : i + batch_size]
+        timestamp_ms = int(time.time() * 1000)
+        message_id = str(uuid4())
+        body_obj = {
+            "messageId": message_id,
+            "timestamp": timestamp_ms,
+            "data": {
+                "startTime": start_time,
+                "endTime": end_time,
+                "sellerinboundNumberList": batch,
+            },
+        }
+        try:
+            resp = await _call_oc(db, conn, "POST", endpoint, body_obj=body_obj)
+        except OCAPIError as e:
+            logger.warning("OC inbound detail (seller list) batch failed (%s): %s", batch[:3], e)
+            continue
+        for detail in _extract_inbound_detail_order_list(resp):
+            sk = _oc_dict_get_ci(detail, "sellerinboundNumber", "sellerInboundNumber", "referenceNumber")
+            if sk:
+                by_seller_lower[str(sk).strip().lower()] = detail
+
+    merged = 0
+    for row in rows:
+        if _inbound_row_has_sku_list(row.get("raw_payload")):
+            continue
+        seller = str(row.get("seller_inbound_number") or "").strip()
+        if not seller:
+            continue
+        detail = by_seller_lower.get(seller.lower())
+        if not detail:
+            continue
+        raw = row.get("raw_payload")
+        if isinstance(raw, dict):
+            row["raw_payload"] = _merge_inbound_list_and_detail(raw, detail)
+        else:
+            row["raw_payload"] = detail
+        merged += 1
+    if merged:
+        logger.info("OC inbound detail (seller ref) merged into %d row(s) for this chunk", merged)
+
+
+async def _merge_inbound_label_query_into_rows(
+    db: AsyncSession,
+    conn: OCConnection,
+    rows: List[Dict[str, Any]],
+) -> None:
+    """
+    Inbound label query — packing list URL + per-carton label PDF URLs (read-only).
+    POST /openapi/3pp/inbound/v1/query/labels
+    """
+    if not rows:
+        return
+    endpoint = "/openapi/3pp/inbound/v1/query/labels"
+    unique: List[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        oc = (row.get("oc_inbound_number") or "").strip()
+        if oc and oc.lower() not in seen:
+            seen.add(oc.lower())
+            unique.append(oc)
+
+    if not unique:
+        return
+
+    by_oc_lower: Dict[str, Dict[str, Any]] = {}
+    batch_size = 30
+    for i in range(0, len(unique), batch_size):
+        batch = unique[i : i + batch_size]
+        inbound_order_list = [{"inboundOrder": x} for x in batch]
+        timestamp_ms = int(time.time() * 1000)
+        message_id = str(uuid4())
+        body_obj = {
+            "messageId": message_id,
+            "timestamp": timestamp_ms,
+            "data": {"inboundOrderList": inbound_order_list},
+        }
+        try:
+            resp = await _call_oc(db, conn, "POST", endpoint, body_obj=body_obj)
+        except OCAPIError as e:
+            logger.warning("OC inbound label query batch failed (%s): %s", batch[:3], e)
+            continue
+        for item in _extract_inbound_label_order_list(resp):
+            oc_key = _oc_dict_get_ci(item, "inboundOrder", "inboundOrderNumber")
+            if oc_key:
+                by_oc_lower[str(oc_key).strip().lower()] = item
+
+    merged = 0
+    for row in rows:
+        oc = (row.get("oc_inbound_number") or "").strip()
+        if not oc:
+            continue
+        label = by_oc_lower.get(oc.lower())
+        if not label:
+            continue
+        raw = row.get("raw_payload")
+        if not isinstance(raw, dict):
+            raw = {}
+        else:
+            raw = dict(raw)
+        raw["ocLabelQuery"] = label
+        row["raw_payload"] = raw
+        merged += 1
+    if merged:
+        logger.info("OC inbound label query merged into %d row(s) for this chunk", merged)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -594,20 +874,6 @@ async def oc_fetch_inbound_orders(
             return normalized
         return None
 
-    def _get_ci(d: Dict[str, Any], *names: str) -> Any:
-        """
-        Case-insensitive getter for OC responses.
-        OC sometimes uses mixed casing like SKUQuantity vs putawayQuantity.
-        """
-        if not isinstance(d, dict):
-            return None
-        lower_map = {str(k).lower(): v for k, v in d.items()}
-        for n in names:
-            key = (n or "").lower()
-            if key and key in lower_map:
-                return lower_map[key]
-        return None
-
     def _dt_to_oc_time(dt: datetime) -> str:
         return dt.strftime("%Y-%m-%dT%H:%M:%S+0000")
 
@@ -651,15 +917,15 @@ async def oc_fetch_inbound_orders(
                 if not isinstance(r, dict):
                     continue
                 warehouse_code = (
-                    _get_ci(r, "warehouseCode", "warehouse_code")
-                    or _get_ci(r, "serviceRegion", "service_region")
-                    or _get_ci(r, "region")
+                    _oc_dict_get_ci(r, "warehouseCode", "warehouse_code")
+                    or _oc_dict_get_ci(r, "serviceRegion", "service_region")
+                    or _oc_dict_get_ci(r, "region")
                     or None
                 )
                 out.append(
                     {
                         "seller_inbound_number": str(
-                            _get_ci(
+                            _oc_dict_get_ci(
                                 r,
                                 "referenceNumber",
                                 "sellerInboundNumber",
@@ -670,25 +936,29 @@ async def oc_fetch_inbound_orders(
                             or ""
                         ).strip(),
                         "oc_inbound_number": str(
-                            _get_ci(r, "inboundOrderNumber", "inboundNumber", "inboundNo") or ""
+                            _oc_dict_get_ci(r, "inboundOrderNumber", "inboundNumber", "inboundNo") or ""
                         ).strip()
                         or None,
-                        "status": str(_get_ci(r, "status", "inboundStatus") or "").strip() or None,
+                        "status": str(_oc_dict_get_ci(r, "status", "inboundStatus") or "").strip() or None,
                         "warehouse_code": str(warehouse_code).strip() if warehouse_code is not None else None,
                         "region": _infer_region_from_warehouse(str(warehouse_code)) or None,
                         "shipping_method": str(
-                            _get_ci(r, "shippingMethod", "shipping_method")
+                            _oc_dict_get_ci(r, "shippingMethod", "shipping_method")
                             or ""
                         ).strip()
                         or None,
-                        "sku_qty": int(_get_ci(r, "skuQty", "sku_qty", "SKUQuantity") or 0),
-                        "put_away_qty": int(_get_ci(r, "putAwayQty", "put_away_qty", "putawayQuantity") or 0),
+                        "sku_qty": int(_oc_dict_get_ci(r, "skuQty", "sku_qty", "SKUQuantity") or 0),
+                        "put_away_qty": int(_oc_dict_get_ci(r, "putAwayQty", "put_away_qty", "putawayQuantity") or 0),
                         "raw_payload": r,
                     }
                 )
 
             chunk_rows = out
             break
+
+        await _merge_inbound_detail_into_rows(db, conn, start_time, end_time, chunk_rows)
+        await _merge_inbound_detail_by_seller_numbers(db, conn, start_time, end_time, chunk_rows)
+        await _merge_inbound_label_query_into_rows(db, conn, chunk_rows)
 
         before_chunk = len(results)
         for row in chunk_rows:

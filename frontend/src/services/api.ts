@@ -105,6 +105,16 @@ export interface OCInboundOrderRow {
   shipping_method: string | null
   sku_qty: number
   put_away_qty: number
+  /** Parsed from OC when available (UTC-ish). */
+  inbound_at: string | null
+  /** When this row was last written from OC sync. */
+  synced_at: string | null
+  /** YYYY-MM-DD HH:MM:SS from OC raw, computed on the server (UTC). */
+  create_time?: string | null
+  putaway_time?: string | null
+  arrived_time?: string | null
+  /** Present when list was requested with include_raw=true: full OC row JSON from sync. */
+  raw?: Record<string, unknown> | null
 }
 
 export interface InboundOrderStatusSlice {
@@ -120,10 +130,37 @@ export interface InboundOrderStatusSummary {
   last_sync_at: string | null
 }
 
+/** GET /api/inventory-status/inbound-orders/lookup — full cached row + raw OC JSON for transparency. */
+export interface InboundOrderLookup {
+  request_method: string
+  request_url: string
+  oc_inbound_number: string
+  seller_inbound_number: string | null
+  status: string | null
+  warehouse_code: string | null
+  region: string | null
+  shipping_method: string | null
+  sku_qty: number
+  put_away_qty: number
+  inbound_at_db: string | null
+  synced_at_db: string | null
+  create_time: string | null
+  putaway_time: string | null
+  arrived_time: string | null
+  has_raw_payload: boolean
+  raw_oc_payload: Record<string, unknown> | null
+  transparency: string
+}
+
 export interface InboundSyncResponse {
   synced: number
   message: string
   full: boolean
+}
+
+/** GET/PUT /api/inventory-status/inbound-orders/status-filter — persisted Status column filter. */
+export interface InboundStatusFilter {
+  excluded: string[]
 }
 
 // Settings API
@@ -766,8 +803,24 @@ export const inventoryStatusAPI = {
       {},
       { params: { full: full ? 'true' : undefined }, timeout: 300_000 }
     ),
-  listInboundOrders: (params?: { months_back?: number }) =>
-    api.get<OCInboundOrderRow[]>('/api/inventory-status/inbound-orders', { params: params ?? {} }),
+  listInboundOrders: (params?: { months_back?: number; include_raw?: boolean }) => {
+    const { months_back, include_raw } = params ?? {}
+    return api.get<OCInboundOrderRow[]>('/api/inventory-status/inbound-orders', {
+      params: {
+        ...(months_back != null ? { months_back } : {}),
+        ...(include_raw ? { include_raw: true } : {}),
+      },
+    })
+  },
+  getInboundStatusFilter: () =>
+    api.get<InboundStatusFilter>('/api/inventory-status/inbound-orders/status-filter'),
+  putInboundStatusFilter: (data: { excluded: string[] }) =>
+    api.put<InboundStatusFilter>('/api/inventory-status/inbound-orders/status-filter', data),
+  /** One cached inbound by OC number; includes full raw_oc_payload and computed times. */
+  lookupInboundOrder: (ocInboundNumber: string) =>
+    api.get<InboundOrderLookup>('/api/inventory-status/inbound-orders/lookup', {
+      params: { oc_inbound_number: ocInboundNumber },
+    }),
 }
 
 // Health check

@@ -1,6 +1,41 @@
 import { useState, useEffect, useCallback } from 'react'
 import { stockAPI, type SKU } from '../services/api'
 
+/** Persist planned units per SKU in this browser (survives refresh; same machine only). */
+const UNITS_STORAGE_KEY = 'evampops.stockPlanning.unitsBySku'
+
+function loadUnitsFromStorage(): Record<string, number> {
+  try {
+    const raw = localStorage.getItem(UNITS_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const out: Record<string, number> = {}
+    for (const [k, v] of Object.entries(parsed)) {
+      const n = typeof v === 'number' ? v : Number(v)
+      if (Number.isFinite(n) && n >= 0) out[k] = Math.floor(n)
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function persistUnitsBySku(rows: { sku_code: string; units: number }[]) {
+  const obj: Record<string, number> = {}
+  for (const r of rows) {
+    if (r.units > 0) obj[r.sku_code] = r.units
+  }
+  try {
+    if (Object.keys(obj).length === 0) {
+      localStorage.removeItem(UNITS_STORAGE_KEY)
+    } else {
+      localStorage.setItem(UNITS_STORAGE_KEY, JSON.stringify(obj))
+    }
+  } catch {
+    // quota / private mode
+  }
+}
+
 const formatLocalDate = (d: Date): string => {
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, '0')
@@ -59,6 +94,7 @@ export default function StockPlanning() {
     try {
       const res = await stockAPI.listSKUs()
       const sorted = [...res.data].sort((a, b) => a.sku_code.localeCompare(b.sku_code))
+      const savedUnits = loadUnitsFromStorage()
       setSkus(sorted)
       setPlanRows(
         sorted.map((s) => ({
@@ -66,7 +102,7 @@ export default function StockPlanning() {
           title: s.title,
           landed_cost: Number(s.landed_cost) || 0,
           profit_per_unit: Number(s.profit_per_unit) || 0,
-          units: 0,
+          units: savedUnits[s.sku_code] ?? 0,
           analytics_profit_per_unit_gbp: null,
         }))
       )
@@ -91,12 +127,13 @@ export default function StockPlanning() {
         if (cancelled) return
         setPlanRows((prev) => {
           if (prev.length === 0) {
+            const savedUnits = loadUnitsFromStorage()
             return skus.map((s) => ({
               sku_code: s.sku_code,
               title: s.title,
               landed_cost: Number(s.landed_cost) || 0,
               profit_per_unit: Number(s.profit_per_unit) || 0,
-              units: 0,
+              units: savedUnits[s.sku_code] ?? 0,
               analytics_profit_per_unit_gbp: profitMap.get(s.sku_code) ?? null,
             }))
           }
@@ -115,9 +152,13 @@ export default function StockPlanning() {
   }, [skus, analyticsLookbackDays])
 
   const updateUnits = (skuCode: string, units: number) => {
-    setPlanRows((prev) =>
-      prev.map((row) => (row.sku_code === skuCode ? { ...row, units: Math.max(0, units) } : row))
-    )
+    setPlanRows((prev) => {
+      const next = prev.map((row) =>
+        row.sku_code === skuCode ? { ...row, units: Math.max(0, units) } : row
+      )
+      persistUnitsBySku(next)
+      return next
+    })
   }
 
   // Landed cost is stored in USD. Line extension in USD = landed_cost × units.
@@ -161,7 +202,11 @@ export default function StockPlanning() {
   }
 
   const handleClearAll = () => {
-    setPlanRows((prev) => prev.map((row) => ({ ...row, units: 0 })))
+    setPlanRows((prev) => {
+      const next = prev.map((row) => ({ ...row, units: 0 }))
+      persistUnitsBySku(next)
+      return next
+    })
   }
 
   const handleGenerateOrderMessage = async () => {
@@ -195,7 +240,7 @@ export default function StockPlanning() {
       <h1 className="text-3xl font-bold text-gray-900 mb-4">Stock Planning</h1>
       <p className="text-gray-600 mb-4">
         Enter units to order for each SKU. Landed cost is in USD; line totals show GBP (÷ {USD_PER_GBP}{' '}
-        USD/GBP) and USD.
+        USD/GBP) and USD. Planned units are saved automatically in this browser when you change them.
       </p>
       <div className="flex flex-wrap items-center gap-3 mb-6 text-sm text-gray-700">
         <label className="flex items-center gap-2">
