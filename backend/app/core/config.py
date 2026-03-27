@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     
     # Background Tasks
     MESSAGE_SYNC_INTERVAL_MINUTES: int = 60
+    # eBay import + OC SKU/inventory + inbound cache. 0 = disabled (browser "Pull latest data" still works).
+    INVENTORY_REFRESH_INTERVAL_MINUTES: int = 15
 
     model_config = SettingsConfigDict(
         env_file=".env",

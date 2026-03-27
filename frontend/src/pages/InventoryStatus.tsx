@@ -1,8 +1,9 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import {
   inventoryStatusAPI,
+  stockAPI,
   type OCInboundOrderRow,
   type OCSkuInventoryRow,
   type OCSkuMapping,
@@ -542,6 +543,40 @@ export default function InventoryStatus() {
     },
   })
 
+  /** Same steps as server-scheduled refresh + Sales Analytics background import: incremental eBay + OC syncs. */
+  const executeInventoryPull = useCallback(async () => {
+    await stockAPI.runImport('incremental')
+    await inventoryStatusAPI.syncSkuMappings()
+    await inventoryStatusAPI.syncInboundOrders(false)
+  }, [])
+
+  const suppressPullNoticeRef = useRef(false)
+
+  const pullLatestDataMutation = useMutation({
+    mutationFn: executeInventoryPull,
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['inventory-status'] })
+      qc.invalidateQueries({ queryKey: ['analytics'] })
+    },
+    onSuccess: () => {
+      if (suppressPullNoticeRef.current) {
+        suppressPullNoticeRef.current = false
+        return
+      }
+      setError(null)
+      setNotice(
+        'Latest data pulled: eBay orders (incremental import), OrangeConnex SKU mappings + inventory snapshot, and inbound cache (incremental).'
+      )
+    },
+    onError: (e: unknown) => {
+      if (suppressPullNoticeRef.current) {
+        suppressPullNoticeRef.current = false
+        return
+      }
+      setError(e instanceof Error ? e.message : 'Pull latest data failed')
+    },
+  })
+
   const syncInboundMutation = useMutation({
     mutationFn: (full: boolean) => inventoryStatusAPI.syncInboundOrders(full),
     onSuccess: (res) => {
@@ -555,20 +590,6 @@ export default function InventoryStatus() {
     },
     onError: (e: unknown) => {
       setError(e instanceof Error ? e.message : 'Inbound sync failed')
-    },
-  })
-
-  const syncMappings = useMutation({
-    mutationFn: inventoryStatusAPI.syncSkuMappings,
-    onSuccess: (res) => {
-      setNotice(`SKU mappings synced: ${res.data.synced} (skipped ${res.data.skipped}), inventory rows: ${res.data.inventory_rows}`)
-      setError(null)
-      qc.invalidateQueries({ queryKey: ['inventory-status'] })
-      qc.invalidateQueries({ queryKey: ['inventory-status', 'inbound-status-summary'] })
-    },
-    onError: (e: unknown) => {
-      const msg = e instanceof Error ? e.message : 'SKU sync failed'
-      setError(msg)
     },
   })
 
@@ -851,6 +872,24 @@ export default function InventoryStatus() {
         </div>
       )}
 
+      <div className="mb-6 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          onClick={() => pullLatestDataMutation.mutate()}
+          className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 text-sm font-medium"
+          disabled={pullLatestDataMutation.isPending}
+          title="Incremental eBay import, OrangeConnex SKU mappings + inventory snapshot, and inbound cache (same as automatic refresh)"
+        >
+          {pullLatestDataMutation.isPending ? 'Pulling latest data…' : 'Pull latest data'}
+        </button>
+        <p className="text-sm text-gray-600 max-w-2xl">
+          Refreshes eBay orders, OC inventory, and inbound cache. The backend runs the same incremental pull on a schedule
+          (default every <span className="font-mono">15</span> minutes; configurable via{' '}
+          <span className="font-mono">INVENTORY_REFRESH_INTERVAL_MINUTES</span>, <span className="font-mono">0</span> to
+          disable). Sold columns use the same date windows as Sales Analytics (30 / 90 inclusive days).
+        </p>
+      </div>
+
       <section className="bg-white rounded-lg border border-gray-200 p-4">
         <div className="flex flex-wrap items-end gap-2 mb-3">
           <h2 className="text-lg font-semibold text-gray-800 mr-4">SKU mappings</h2>
@@ -864,19 +903,11 @@ export default function InventoryStatus() {
             />
           </label>
           <span className="text-sm text-gray-500">Rows: {summary?.mapping_count ?? 0}</span>
-          <button
-            type="button"
-            onClick={() => syncMappings.mutate()}
-            className="ml-auto px-3 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
-            disabled={syncMappings.isPending}
-          >
-            {syncMappings.isPending ? 'Syncing...' : 'Sync SKU mappings'}
-          </button>
         </div>
         {mappingsQuery.isLoading ? (
           <p className="text-sm text-gray-500">Loading mappings...</p>
         ) : mappings.length === 0 ? (
-          <p className="text-sm text-gray-500">No mappings yet. Run “Sync SKU mappings”.</p>
+          <p className="text-sm text-gray-500">No mappings yet. Use <strong>Pull latest data</strong> above.</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm border border-gray-200">
@@ -912,7 +943,7 @@ export default function InventoryStatus() {
         {inventoryQuery.isLoading ? (
           <p className="text-sm text-gray-500">Loading inventory...</p>
         ) : inventoryRows.length === 0 ? (
-          <p className="text-sm text-gray-500">No inventory rows yet. Run “Sync SKU mappings”.</p>
+          <p className="text-sm text-gray-500">No inventory rows yet. Use <strong>Pull latest data</strong> above.</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm border border-gray-200">

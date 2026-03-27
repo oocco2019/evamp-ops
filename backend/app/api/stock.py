@@ -275,18 +275,18 @@ class ImportResponse(BaseModel):
     error: Optional[str] = None
 
 
-@router.post("/import", response_model=ImportResponse)
-async def run_import(
-    body: ImportRequest,
-    db: AsyncSession = Depends(get_db),
-):
+async def execute_order_import(db: AsyncSession, mode: str) -> ImportResponse:
     """
-    Run order import: full (last 90 days; eBay filter limit) or incremental (since last import).
-    Uses Fulfillment API batch data only (no per-order Finances calls). total_due_seller comes from
-    paymentSummary in the batch; for net earnings after ad fees, run the backfill-order-earnings endpoint separately.
+    Core order import (also used by scheduled inventory refresh). mode: 'full' | 'incremental'.
     """
-    if body.mode not in ("full", "incremental"):
-        raise HTTPException(status_code=400, detail="mode must be 'full' or 'incremental'")
+    if mode not in ("full", "incremental"):
+        return ImportResponse(
+            orders_added=0,
+            orders_updated=0,
+            line_items_added=0,
+            line_items_updated=0,
+            error="mode must be 'full' or 'incremental'",
+        )
 
     try:
         access_token = await get_ebay_access_token(db)
@@ -305,7 +305,7 @@ async def run_import(
     last_import = datetime.utcnow()
 
     try:
-        if body.mode == "incremental":
+        if mode == "incremental":
             result = await db.execute(select(func.max(Order.last_modified)))
             max_modified = result.scalar()
             since = (max_modified or datetime(2000, 1, 1)) - timedelta(seconds=1)
@@ -421,6 +421,21 @@ async def run_import(
         line_items_updated=line_items_updated,
         last_import=last_import,
     )
+
+
+@router.post("/import", response_model=ImportResponse)
+async def run_import(
+    body: ImportRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Run order import: full (last 90 days; eBay filter limit) or incremental (since last import).
+    Uses Fulfillment API batch data only (no per-order Finances calls). total_due_seller comes from
+    paymentSummary in the batch; for net earnings after ad fees, run the backfill-order-earnings endpoint separately.
+    """
+    if body.mode not in ("full", "incremental"):
+        raise HTTPException(status_code=400, detail="mode must be 'full' or 'incremental'")
+    return await execute_order_import(db, body.mode)
 
 
 class BackfillOrderEarningsResponse(BaseModel):

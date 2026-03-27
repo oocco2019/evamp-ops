@@ -643,8 +643,8 @@ async def test_oc_connection(db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC test failed: {e}")
 
 
-@router.post("/sync-sku-mappings", response_model=SyncSkuResponse)
-async def sync_oc_sku_mappings(db: AsyncSession = Depends(get_db)):
+async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
+    """OC SKU mapping + inventory snapshot upsert (API and scheduled refresh)."""
     conn_result = await db.execute(
         select(OCConnection).where(OCConnection.is_active == True).limit(1)
     )
@@ -655,9 +655,9 @@ async def sync_oc_sku_mappings(db: AsyncSession = Depends(get_db)):
         rows = await oc_sync_sku_mappings(db)
         inventory_rows_data = await oc_fetch_inventory_rows(db)
     except (OCConfigError, OCAPIError) as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC sync failed: {e}")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC sync failed: {e}") from e
 
     await db.execute(delete(OCSkuMapping).where(OCSkuMapping.connection_id == connection.id))
     await db.execute(delete(OCSkuInventory).where(OCSkuInventory.connection_id == connection.id))
@@ -703,6 +703,11 @@ async def sync_oc_sku_mappings(db: AsyncSession = Depends(get_db)):
     return SyncSkuResponse(synced=synced, skipped=skipped, inventory_rows=inventory_rows)
 
 
+@router.post("/sync-sku-mappings", response_model=SyncSkuResponse)
+async def sync_oc_sku_mappings(db: AsyncSession = Depends(get_db)):
+    return await execute_oc_sku_mappings_sync(db)
+
+
 @router.get("/sku-mappings", response_model=List[SkuMappingResponse])
 async def list_sku_mappings(
     sku: Optional[str] = None,
@@ -733,25 +738,18 @@ async def list_oc_inventory(
     sold_by_sku_3m: dict[str, int] = {}
     sold_by_sku_1m: dict[str, int] = {}
     if seller_skus:
+        # Match Sales Analytics date presets (frontend `lastNDaysFrom(n)`): from = today − (n−1) through today inclusive.
         today = date.today()
-        cutoff_3m = today - timedelta(days=90)
-        cutoff_1m = today - timedelta(days=30)
+        from_3m = today - timedelta(days=89)  # 90-day window (3m preset)
+        from_1m = today - timedelta(days=29)  # 30-day window (1m preset)
         sales_stmt = (
             select(
                 LineItem.sku.label("sku"),
+                func.coalesce(func.sum(LineItem.quantity), 0).label("sold_3m"),
                 func.coalesce(
                     func.sum(
                         case(
-                            (Order.date >= cutoff_3m, LineItem.quantity),
-                            else_=0,
-                        )
-                    ),
-                    0,
-                ).label("sold_3m"),
-                func.coalesce(
-                    func.sum(
-                        case(
-                            (Order.date >= cutoff_1m, LineItem.quantity),
+                            (Order.date >= from_1m, LineItem.quantity),
                             else_=0,
                         )
                     ),
@@ -760,7 +758,12 @@ async def list_oc_inventory(
             )
             .select_from(LineItem)
             .join(Order, Order.order_id == LineItem.order_id)
-            .where(LineItem.sku.in_(seller_skus), Order.cancel_status != "CANCELED")
+            .where(
+                LineItem.sku.in_(seller_skus),
+                Order.cancel_status != "CANCELED",
+                Order.date >= from_3m,
+                Order.date <= today,
+            )
             .group_by(LineItem.sku)
         )
         sales_result = await db.execute(sales_stmt)
@@ -834,15 +837,8 @@ async def list_oc_inventory(
     return payload
 
 
-@router.post("/inbound-orders/sync", response_model=InboundSyncResponse)
-async def sync_oc_inbound_orders_to_db(
-    full: bool = Query(False, description="If true, re-fetch from 2024-01-01 through now. If false, incremental since last sync (min 7-day overlap)."),
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Pull inbound orders from OrangeConnex and upsert into `oc_inbound_orders`.
-    Logs each chunk to the application logger. Use `full=true` for a complete backfill.
-    """
+async def execute_oc_inbound_sync(db: AsyncSession, full: bool) -> InboundSyncResponse:
+    """Pull inbound orders from OrangeConnex into `oc_inbound_orders` (API and scheduled refresh)."""
     cid = await _active_oc_connection_id(db)
     if not cid:
         raise HTTPException(status_code=400, detail="No active OC connection configured.")
@@ -890,6 +886,18 @@ async def sync_oc_inbound_orders_to_db(
         message="Inbound orders cached. Charts and tables read from the database.",
         full=full,
     )
+
+
+@router.post("/inbound-orders/sync", response_model=InboundSyncResponse)
+async def sync_oc_inbound_orders_to_db(
+    full: bool = Query(False, description="If true, re-fetch from 2024-01-01 through now. If false, incremental since last sync (min 7-day overlap)."),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Pull inbound orders from OrangeConnex and upsert into `oc_inbound_orders`.
+    Logs each chunk to the application logger. Use `full=true` for a complete backfill.
+    """
+    return await execute_oc_inbound_sync(db, full)
 
 
 @router.get("/inbound-orders/status-summary", response_model=InboundOrderStatusSummaryResponse)

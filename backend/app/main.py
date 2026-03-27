@@ -9,6 +9,10 @@ import logging
 
 from app.core.config import settings
 from app.core.database import init_db, close_db
+from app.services.inventory_refresh_scheduler import (
+    shutdown_inventory_refresh_scheduler,
+    start_inventory_refresh_scheduler,
+)
 from app.api import settings as settings_api
 from app.api import stock as stock_api
 from app.api import messages as messages_api
@@ -51,11 +55,14 @@ async def lifespan(app: FastAPI):
     if settings.DEBUG:
         logger.warning("Debug mode: Auto-creating database tables")
         await init_db()
-    
+
+    start_inventory_refresh_scheduler()
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down EvampOps application...")
+    shutdown_inventory_refresh_scheduler()
     await close_db()
 
 
