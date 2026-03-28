@@ -446,6 +446,95 @@ type InboundSortKey = 'sku_list' | 'create_time' | 'eta' | 'arrived'
 
 const INBOUND_SORT_STORAGE_KEY = 'evampops.inventoryStatus.inboundSort'
 const INBOUND_SKU5_FILTER_STORAGE_KEY = 'evampops.inventoryStatus.inboundSkuCountMin5'
+const SKU_FILTER_STORAGE_KEY = 'evampops.inventoryStatus.skuFilter'
+const INVENTORY_SORT_STORAGE_KEY = 'evampops.inventoryStatus.inventorySort'
+const STATUS_EXCLUDED_LOCAL_KEY = 'evampops.inventoryStatus.inboundStatusExcluded'
+
+type InventorySortKey =
+  | 'seller_skuid'
+  | 'available'
+  | 'in_transit'
+  | 'reserved_allocated'
+  | 'sold_3m_units'
+  | 'sold_1m_units'
+
+const INVENTORY_SORT_KEYS: readonly InventorySortKey[] = [
+  'seller_skuid',
+  'available',
+  'in_transit',
+  'reserved_allocated',
+  'sold_3m_units',
+  'sold_1m_units',
+]
+
+function loadSkuFilter(): string {
+  try {
+    const v = localStorage.getItem(SKU_FILTER_STORAGE_KEY)
+    return typeof v === 'string' ? v : ''
+  } catch {
+    return ''
+  }
+}
+
+function persistSkuFilter(value: string) {
+  try {
+    if (value.trim() === '') localStorage.removeItem(SKU_FILTER_STORAGE_KEY)
+    else localStorage.setItem(SKU_FILTER_STORAGE_KEY, value)
+  } catch {
+    // ignore
+  }
+}
+
+function loadInventorySort(): { key: InventorySortKey; dir: 'asc' | 'desc' } {
+  try {
+    const raw = localStorage.getItem(INVENTORY_SORT_STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as { key?: string; dir?: string }
+      const key = parsed?.key
+      const dir = parsed?.dir
+      if (
+        typeof key === 'string' &&
+        INVENTORY_SORT_KEYS.includes(key as InventorySortKey) &&
+        (dir === 'asc' || dir === 'desc')
+      ) {
+        return { key: key as InventorySortKey, dir }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { key: 'seller_skuid', dir: 'asc' }
+}
+
+function persistInventorySort(next: { key: InventorySortKey; dir: 'asc' | 'desc' }) {
+  try {
+    localStorage.setItem(INVENTORY_SORT_STORAGE_KEY, JSON.stringify(next))
+  } catch {
+    // ignore
+  }
+}
+
+function loadStatusExcludedLocal(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STATUS_EXCLUDED_LOCAL_KEY)
+    if (!raw) return new Set()
+    const arr = JSON.parse(raw) as unknown
+    if (!Array.isArray(arr)) return new Set()
+    return new Set(arr.filter((x): x is string => typeof x === 'string'))
+  } catch {
+    return new Set()
+  }
+}
+
+function persistStatusExcludedLocal(excluded: Set<string>) {
+  try {
+    const sorted = [...excluded].sort()
+    if (sorted.length === 0) localStorage.removeItem(STATUS_EXCLUDED_LOCAL_KEY)
+    else localStorage.setItem(STATUS_EXCLUDED_LOCAL_KEY, JSON.stringify(sorted))
+  } catch {
+    // ignore
+  }
+}
 
 function loadInboundSort(): { key: InboundSortKey; dir: 'asc' | 'desc' } {
   try {
@@ -490,23 +579,27 @@ const INBOUND_STATUS_CHART_COLORS = [
 
 export default function InventoryStatus() {
   const qc = useQueryClient()
-  const [skuFilter, setSkuFilter] = useState('')
+  const [skuFilter, setSkuFilter] = useState(() => loadSkuFilter())
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [etaOverrides, setEtaOverrides] = useState<Record<string, string>>(() => loadEtaOverrides())
   const [inboundSort, setInboundSort] = useState<{ key: InboundSortKey; dir: 'asc' | 'desc' }>(loadInboundSort)
   const [skuCountFilterMin5, setSkuCountFilterMin5] = useState<boolean>(loadSku5Filter)
-  const [statusExcluded, setStatusExcluded] = useState<Set<string>>(() => new Set())
+  const [statusExcluded, setStatusExcluded] = useState<Set<string>>(() => loadStatusExcludedLocal())
+  const [statusExcludedDraft, setStatusExcludedDraft] = useState<Set<string>>(() => new Set())
+  const statusExcludedRef = useRef(statusExcluded)
+  statusExcludedRef.current = statusExcluded
+  const statusExcludedDraftRef = useRef(statusExcludedDraft)
+  statusExcludedDraftRef.current = statusExcludedDraft
   const statusFilterHydratedRef = useRef(false)
   const lastSavedExcludedRef = useRef<string | null>(null)
   const [statusFilterOpen, setStatusFilterOpen] = useState(false)
   const statusFilterButtonRef = useRef<HTMLButtonElement>(null)
   const statusFilterPanelRef = useRef<HTMLDivElement>(null)
   const [statusFilterPos, setStatusFilterPos] = useState({ top: 0, left: 0 })
-  const [inventorySort, setInventorySort] = useState<{
-    key: 'seller_skuid' | 'available' | 'in_transit' | 'reserved_allocated' | 'sold_3m_units' | 'sold_1m_units'
-    dir: 'asc' | 'desc'
-  }>({ key: 'seller_skuid', dir: 'asc' })
+  const [inventorySort, setInventorySort] = useState<{ key: InventorySortKey; dir: 'asc' | 'desc' }>(
+    loadInventorySort
+  )
   const summaryQuery = useQuery({
     queryKey: ['inventory-status', 'summary'],
     queryFn: async () => (await inventoryStatusAPI.getSummary()).data,
@@ -576,6 +669,16 @@ export default function InventoryStatus() {
       setError(e instanceof Error ? e.message : 'Pull latest data failed')
     },
   })
+
+  const openStatusFilter = useCallback(() => {
+    setStatusExcludedDraft(new Set(statusExcluded))
+    setStatusFilterOpen(true)
+  }, [statusExcluded])
+
+  const closeStatusFilter = useCallback(() => {
+    setStatusExcluded(new Set(statusExcludedDraftRef.current))
+    setStatusFilterOpen(false)
+  }, [])
 
   const syncInboundMutation = useMutation({
     mutationFn: (full: boolean) => inventoryStatusAPI.syncInboundOrders(full),
@@ -660,10 +763,14 @@ export default function InventoryStatus() {
   }, [uniqueInboundStatuses])
 
   useEffect(() => {
+    persistStatusExcludedLocal(statusExcluded)
+  }, [statusExcluded])
+
+  useEffect(() => {
     if (statusFilterHydratedRef.current) return
     if (inboundStatusFilterQuery.isError) {
       statusFilterHydratedRef.current = true
-      lastSavedExcludedRef.current = JSON.stringify([])
+      lastSavedExcludedRef.current = JSON.stringify([...statusExcludedRef.current].sort())
       return
     }
     if (!inboundStatusFilterQuery.isSuccess || inboundStatusFilterQuery.data === undefined) return
@@ -709,11 +816,11 @@ export default function InventoryStatus() {
       const t = e.target as Node
       if (statusFilterButtonRef.current?.contains(t)) return
       if (statusFilterPanelRef.current?.contains(t)) return
-      setStatusFilterOpen(false)
+      closeStatusFilter()
     }
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
-  }, [statusFilterOpen])
+  }, [statusFilterOpen, closeStatusFilter])
 
   const handleInboundSort = (sortKey: InboundSortKey) => {
     setInboundSort((prev) => {
@@ -828,13 +935,16 @@ export default function InventoryStatus() {
     }
     return mult * ((a[inventorySort.key] as number) - (b[inventorySort.key] as number))
   })
-  const handleInventorySort = (
-    key: 'seller_skuid' | 'available' | 'in_transit' | 'reserved_allocated' | 'sold_3m_units' | 'sold_1m_units'
-  ) => {
-    setInventorySort((prev) => ({
-      key,
-      dir: prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : (key === 'seller_skuid' ? 'asc' : 'desc'),
-    }))
+  const handleInventorySort = (key: InventorySortKey) => {
+    setInventorySort((prev) => {
+      const next: { key: InventorySortKey; dir: 'asc' | 'desc' } = {
+        key,
+        dir:
+          prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : key === 'seller_skuid' ? 'asc' : 'desc',
+      }
+      persistInventorySort(next)
+      return next
+    })
   }
 
   const setInboundEtaOverride = (rowKey: string, ymd: string | null, computedDefaultYmd: string) => {
@@ -898,7 +1008,11 @@ export default function InventoryStatus() {
             <input
               className="ml-2 rounded border border-gray-300 px-2 py-1"
               value={skuFilter}
-              onChange={(e) => setSkuFilter(e.target.value)}
+              onChange={(e) => {
+                const v = e.target.value
+                setSkuFilter(v)
+                persistSkuFilter(v)
+              }}
               placeholder="e.g. uke01"
             />
           </label>
@@ -1152,13 +1266,13 @@ export default function InventoryStatus() {
                           ? 'border-gray-200 bg-[#DFFFEA] text-gray-900 hover:bg-[#cef9e0]'
                           : 'border-transparent text-gray-900 hover:bg-gray-100'
                       }`}
-                      onClick={() => setStatusFilterOpen((v) => !v)}
+                      onClick={() => (statusFilterOpen ? closeStatusFilter() : openStatusFilter())}
                       aria-expanded={statusFilterOpen}
                       aria-haspopup="listbox"
                       title={
                         inboundStatusFilterQuery.isLoading && !inboundStatusFilterQuery.isError
                           ? 'Loading saved filter from server…'
-                          : 'Filter rows by status. Selection is saved on the server for all sessions.'
+                          : 'Filter rows by status. Changes apply when you close this menu. Saved on the server when online, and in this browser for next visit.'
                       }
                     >
                       Status
@@ -1182,21 +1296,21 @@ export default function InventoryStatus() {
                           <button
                             type="button"
                             className="text-xs text-blue-600 hover:underline"
-                            onClick={() => setStatusExcluded(new Set())}
+                            onClick={() => setStatusExcludedDraft(new Set())}
                           >
                             Select all
                           </button>
                           <button
                             type="button"
                             className="text-xs text-blue-600 hover:underline"
-                            onClick={() => setStatusExcluded(new Set(uniqueInboundStatuses))}
+                            onClick={() => setStatusExcludedDraft(new Set(uniqueInboundStatuses))}
                           >
                             Deselect all
                           </button>
                         </div>
                         <div className="max-h-64 overflow-y-auto px-2 pt-1">
                           {uniqueInboundStatuses.map((s) => {
-                            const visible = !statusExcluded.has(s)
+                            const visible = !statusExcludedDraft.has(s)
                             return (
                               <label
                                 key={s}
@@ -1212,7 +1326,7 @@ export default function InventoryStatus() {
                                   type="checkbox"
                                   checked={visible}
                                   onChange={() => {
-                                    setStatusExcluded((prev) => {
+                                    setStatusExcludedDraft((prev) => {
                                       const next = new Set(prev)
                                       if (next.has(s)) next.delete(s)
                                       else next.add(s)
