@@ -1576,7 +1576,7 @@ async def generate_order_message(
         lines.append(f"=== {country} ===")
         lines.append("")
         for item in items:
-            lines.append(f"{item.sku_code}\t{item.title}\t{item.quantity}")
+            lines.append(f"{item.sku_code} {item.title} x{item.quantity}")
             total_units += item.quantity
         lines.append("")
         
@@ -1589,10 +1589,6 @@ async def generate_order_message(
             lines.append(f"Ship to: [No warehouse configured for {country}]")
         lines.append("")
         lines.append("")
-    
-    # Summary
-    lines.append("---")
-    lines.append(f"Total: {total_units} units across {len(countries_list)} countries")
     
     return GenerateOrderMessageResponse(
         message="\n".join(lines),
