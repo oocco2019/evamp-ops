@@ -1,8 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
-import { stockAPI, type SKU } from '../services/api'
+import { inventoryStatusAPI, stockAPI, type SKU } from '../services/api'
+import {
+  buildOcSkuImportExports,
+  downloadOcSkuImportZip,
+} from '../utils/ocSkuImportExport'
 
 /** Persist planned units per SKU in this browser (survives refresh; same machine only). */
 const UNITS_STORAGE_KEY = 'evampops.stockPlanning.unitsBySku'
+const ITEMS_PER_CARTON_STORAGE_KEY = 'evampops.stockPlanning.itemsPerCarton'
 
 function loadUnitsFromStorage(): Record<string, number> {
   try {
@@ -33,6 +38,20 @@ function persistUnitsBySku(rows: { sku_code: string; units: number }[]) {
     }
   } catch {
     // quota / private mode
+  }
+}
+
+function loadItemsPerCartonFromStorage(): number {
+  // OC inbound requires exact cartons; we keep this fixed at 4.
+  return 4
+}
+
+function persistItemsPerCarton(value: number) {
+  // Fixed at 4; persist for completeness in case you want to change later.
+  try {
+    localStorage.setItem(ITEMS_PER_CARTON_STORAGE_KEY, '4')
+  } catch {
+    // ignore
   }
 }
 
@@ -86,7 +105,10 @@ export default function StockPlanning() {
   const [showMessageModal, setShowMessageModal] = useState(false)
   const [orderMessage, setOrderMessage] = useState('')
   const [generatingMessage, setGeneratingMessage] = useState(false)
+  const [generatingOcInbound, setGeneratingOcInbound] = useState(false)
+  const [exportNotice, setExportNotice] = useState<string | null>(null)
   const [analyticsLookbackDays, setAnalyticsLookbackDays] = useState(90)
+  const [itemsPerCarton, setItemsPerCarton] = useState<number>(() => loadItemsPerCartonFromStorage())
 
   const loadSkus = useCallback(async () => {
     setLoading(true)
@@ -235,6 +257,51 @@ export default function StockPlanning() {
     setTimeout(() => setCopied(false), 2000)
   }
 
+  const handleGenerateOcInbound = async () => {
+    if (activeRows.length === 0) return
+    setGeneratingOcInbound(true)
+    setError(null)
+    setExportNotice(null)
+    try {
+      const mappingsRes = await inventoryStatusAPI.listSkuMappings()
+      const result = await buildOcSkuImportExports(
+        activeRows.map((r) => ({ sku_code: r.sku_code, units: r.units })),
+        mappingsRes.data,
+        itemsPerCarton
+      )
+      const warnings: string[] = []
+      if (result.unknownPrefix.length > 0) {
+        warnings.push(
+          `Skipped SKUs (expected leading letters then digits in SKU code): ${result.unknownPrefix.join(', ')}.`
+        )
+      }
+      if (result.missingMapping.length > 0) {
+        warnings.push(
+          `No OC MFSKUID in Inventory status for: ${result.missingMapping.join(', ')}. Run Pull latest data there (or sync SKU mappings).`
+        )
+      }
+      if (result.ambiguousMapping.length > 0) {
+        warnings.push(
+          `Some SKUs have multiple OC service_region mappings; export used the first mapping: ${result.ambiguousMapping.join(', ')}.`
+        )
+      }
+      if (result.files.length === 0) {
+        setError(
+          warnings.join(' ') || 'Nothing to export — add units and ensure OC mappings exist for those SKUs.'
+        )
+        return
+      }
+      await downloadOcSkuImportZip(result)
+      if (warnings.length > 0) {
+        setExportNotice(warnings.join('\n'))
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'OC inbound export failed')
+    } finally {
+      setGeneratingOcInbound(false)
+    }
+  }
+
   return (
     <div className="px-4 py-6 sm:px-0">
       <h1 className="text-3xl font-bold text-gray-900 mb-4">Stock Planning</h1>
@@ -265,6 +332,11 @@ export default function StockPlanning() {
       {error && (
         <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
           {error}
+        </div>
+      )}
+      {exportNotice && (
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-sm whitespace-pre-wrap">
+          {exportNotice}
         </div>
       )}
 
@@ -300,6 +372,15 @@ export default function StockPlanning() {
         </button>
         <button
           type="button"
+          onClick={handleGenerateOcInbound}
+          disabled={activeRows.length === 0 || generatingOcInbound}
+          className="px-4 py-2 bg-emerald-700 text-white rounded hover:bg-emerald-800 disabled:opacity-50 text-sm font-medium"
+          title="Excel files per SKU letter-prefix group. Uses OC MFSKUID from Inventory status mappings."
+        >
+          {generatingOcInbound ? 'Building…' : 'Generate OC inbound'}
+        </button>
+        <button
+          type="button"
           onClick={handleCopyPlan}
           disabled={activeRows.length === 0}
           className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 text-sm font-medium"
@@ -315,6 +396,34 @@ export default function StockPlanning() {
           Clear all
         </button>
       </div>
+      <div className="mb-4 text-sm text-gray-700 flex flex-wrap items-center gap-4">
+        <label className="flex items-center gap-2">
+          <span>Items per carton</span>
+          <input
+            type="number"
+            min={4}
+            max={4}
+            step={1}
+            value={itemsPerCarton}
+            onChange={(e) => {
+              const next = parseInt(e.target.value, 10) || 4
+              setItemsPerCarton(next)
+              persistItemsPerCarton(next)
+            }}
+            className="w-24 rounded border border-gray-300 px-2 py-1 text-right"
+          />
+        </label>
+        <span className="text-gray-500">Export splits each SKU quantity into multiple carton rows.</span>
+      </div>
+      <p className="text-xs text-gray-500 mb-6 max-w-3xl">
+        <strong>Generate OC inbound</strong> downloads OrangeConnex SKU import files (template{' '}
+        <code className="text-[11px] bg-gray-100 px-1 rounded">SKUImportTemplateV1_EN.xlsx</code>
+        ): one workbook per SKU letter-prefix group (example: <code className="text-[11px]">bee01</code> &{' '}
+        <code className="text-[11px]">bee02</code> go into the same file; <code className="text-[11px]">dee01</code>{' '}
+        into another). Columns use seller SKU and OC MFSKUID from Inventory status mappings. Groups with no
+        units are skipped. Each SKU quantity is split into carton rows based on the "Items per carton"
+        value above. Multiple groups download as a zip.
+      </p>
 
       {/* Order Message Modal */}
       {showMessageModal && (
