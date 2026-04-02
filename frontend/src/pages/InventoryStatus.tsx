@@ -333,6 +333,7 @@ function ocInboundDetailUrl(ocInboundNumber: string): string | null {
 }
 
 const ETA_OVERRIDE_STORAGE_KEY = 'evampops.inventoryStatus.inboundEtaOverrides'
+const CREATE_TIME_OVERRIDE_STORAGE_KEY = 'evampops.inventoryStatus.inboundCreateOverrides'
 
 function loadEtaOverrides(): Record<string, string> {
   try {
@@ -355,6 +356,33 @@ function persistEtaOverrides(next: Record<string, string>) {
       localStorage.removeItem(ETA_OVERRIDE_STORAGE_KEY)
     } else {
       localStorage.setItem(ETA_OVERRIDE_STORAGE_KEY, JSON.stringify(next))
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function loadCreateTimeOverrides(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(CREATE_TIME_OVERRIDE_STORAGE_KEY)
+    if (!raw) return {}
+    const p = JSON.parse(raw) as Record<string, unknown>
+    const out: Record<string, string> = {}
+    for (const [k, v] of Object.entries(p)) {
+      if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) out[k] = v
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function persistCreateTimeOverrides(next: Record<string, string>) {
+  try {
+    if (Object.keys(next).length === 0) {
+      localStorage.removeItem(CREATE_TIME_OVERRIDE_STORAGE_KEY)
+    } else {
+      localStorage.setItem(CREATE_TIME_OVERRIDE_STORAGE_KEY, JSON.stringify(next))
     }
   } catch {
     // ignore
@@ -412,10 +440,21 @@ function getUniqueInboundStatuses(orders: OCInboundOrderRow[]): string[] {
   return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
 }
 
-function getInboundCreateTimeMs(row: OCInboundOrderRow): number | null {
-  const s = row.create_time ?? formatInboundCreateTime(row.raw, row.inbound_at)
-  const d = parseInboundDisplayToDate(s)
-  return d ? d.getTime() : null
+function defaultCreateYmdFromDisplay(createDisplay: string): string {
+  const d = parseInboundDisplayToDate(createDisplay)
+  return d ? formatYmd(d) : ''
+}
+
+function getInboundCreateSortMs(
+  row: OCInboundOrderRow,
+  rowKey: string,
+  createOverrides: Record<string, string>
+): number | null {
+  const createDisplay = row.create_time ?? formatInboundCreateTime(row.raw, row.inbound_at)
+  const defaultYmd = defaultCreateYmdFromDisplay(createDisplay)
+  const ymd = createOverrides[rowKey] ?? defaultYmd
+  if (!ymd) return null
+  return parseYmdToSortMs(ymd)
 }
 
 function getInboundArrivedTimeMs(row: OCInboundOrderRow): number | null {
@@ -583,6 +622,9 @@ export default function InventoryStatus() {
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [etaOverrides, setEtaOverrides] = useState<Record<string, string>>(() => loadEtaOverrides())
+  const [createTimeOverrides, setCreateTimeOverrides] = useState<Record<string, string>>(
+    () => loadCreateTimeOverrides()
+  )
   const [inboundSort, setInboundSort] = useState<{ key: InboundSortKey; dir: 'asc' | 'desc' }>(loadInboundSort)
   const [skuCountFilterMin5, setSkuCountFilterMin5] = useState<boolean>(loadSku5Filter)
   const [statusExcluded, setStatusExcluded] = useState<Set<string>>(() => loadStatusExcludedLocal())
@@ -676,9 +718,14 @@ export default function InventoryStatus() {
   }, [statusExcluded])
 
   const closeStatusFilter = useCallback(() => {
-    setStatusExcluded(new Set(statusExcludedDraftRef.current))
+    const next = new Set(statusExcludedDraftRef.current)
+    setStatusExcluded(next)
+    const serialized = JSON.stringify([...next].sort())
+    if (statusFilterHydratedRef.current && serialized !== lastSavedExcludedRef.current) {
+      saveInboundStatusFilterMutation.mutate([...next])
+    }
     setStatusFilterOpen(false)
-  }, [])
+  }, [saveInboundStatusFilterMutation])
 
   const syncInboundMutation = useMutation({
     mutationFn: (full: boolean) => inventoryStatusAPI.syncInboundOrders(full),
@@ -734,7 +781,10 @@ export default function InventoryStatus() {
       }
 
       if (key === 'create_time') {
-        return cmpNullableMs(getInboundCreateTimeMs(ra), getInboundCreateTimeMs(rb))
+        return cmpNullableMs(
+          getInboundCreateSortMs(ra, ka, createTimeOverrides),
+          getInboundCreateSortMs(rb, kb, createTimeOverrides)
+        )
       }
       if (key === 'arrived') {
         return cmpNullableMs(getInboundArrivedTimeMs(ra), getInboundArrivedTimeMs(rb))
@@ -749,9 +799,13 @@ export default function InventoryStatus() {
     })
 
     return sorted
-  }, [inboundRowsAfterSku, statusExcluded, inboundSort, etaOverrides])
+  }, [inboundRowsAfterSku, statusExcluded, inboundSort, etaOverrides, createTimeOverrides])
 
   useEffect(() => {
+    // Don't prune saved status selections before inbound rows are loaded.
+    // Otherwise a refresh can clear the filter while data is still empty/loading.
+    if (!inboundOrdersQuery.isSuccess) return
+    if (inboundOrders.length === 0) return
     const unique = new Set(uniqueInboundStatuses)
     setStatusExcluded((prev) => {
       const next = new Set(prev)
@@ -760,7 +814,7 @@ export default function InventoryStatus() {
       }
       return next
     })
-  }, [uniqueInboundStatuses])
+  }, [uniqueInboundStatuses, inboundOrdersQuery.isSuccess, inboundOrders.length])
 
   useEffect(() => {
     persistStatusExcludedLocal(statusExcluded)
@@ -775,23 +829,23 @@ export default function InventoryStatus() {
     }
     if (!inboundStatusFilterQuery.isSuccess || inboundStatusFilterQuery.data === undefined) return
     statusFilterHydratedRef.current = true
-    setStatusExcluded(new Set(inboundStatusFilterQuery.data.excluded))
-    lastSavedExcludedRef.current = JSON.stringify([...inboundStatusFilterQuery.data.excluded].sort())
+    const serverExcluded = new Set(inboundStatusFilterQuery.data.excluded)
+    const localExcluded = new Set(statusExcludedRef.current)
+    // If server is empty but we have a local saved filter, keep local and push it back.
+    if (serverExcluded.size === 0 && localExcluded.size > 0) {
+      setStatusExcluded(localExcluded)
+      lastSavedExcludedRef.current = JSON.stringify([])
+      saveInboundStatusFilterMutation.mutate([...localExcluded])
+      return
+    }
+    setStatusExcluded(serverExcluded)
+    lastSavedExcludedRef.current = JSON.stringify([...serverExcluded].sort())
   }, [
     inboundStatusFilterQuery.isSuccess,
     inboundStatusFilterQuery.isError,
     inboundStatusFilterQuery.data,
+    saveInboundStatusFilterMutation,
   ])
-
-  useEffect(() => {
-    if (!statusFilterHydratedRef.current) return
-    const serialized = JSON.stringify([...statusExcluded].sort())
-    if (serialized === lastSavedExcludedRef.current) return
-    const t = window.setTimeout(() => {
-      saveInboundStatusFilterMutation.mutate([...statusExcluded])
-    }, 400)
-    return () => window.clearTimeout(t)
-  }, [statusExcluded, saveInboundStatusFilterMutation])
 
   useLayoutEffect(() => {
     if (!statusFilterOpen) return
@@ -958,6 +1012,21 @@ export default function InventoryStatus() {
         next[rowKey] = ymd
       }
       persistEtaOverrides(next)
+      return next
+    })
+  }
+
+  const setInboundCreateTimeOverride = (rowKey: string, ymd: string | null, computedDefaultYmd: string) => {
+    setCreateTimeOverrides((prev) => {
+      const next = { ...prev }
+      if (ymd === null || ymd === '') {
+        delete next[rowKey]
+      } else if (ymd === computedDefaultYmd) {
+        delete next[rowKey]
+      } else {
+        next[rowKey] = ymd
+      }
+      persistCreateTimeOverrides(next)
       return next
     })
   }
@@ -1213,18 +1282,22 @@ export default function InventoryStatus() {
         <p className="text-sm text-gray-600 mb-3">
           Evamp-ops workflows always involve these OC marketplaces together: `UK`, `DE`, `US`, `AU`. Rows come from the
           same cache as above (last ~6 months by date). Create / putaway / arrived are parsed from that cache on the
-          server. The <span className="font-mono text-xs">CREATE TIME/PUTAWAY TIME</span> column matches OC: create on
-          the first line, putaway on the second (<code className="text-xs bg-gray-100 px-1 rounded">--</code> when
-          unknown). <strong>Tracking #</strong> comes from OC <span className="font-mono text-xs">trackingList</span>.
+          server. The <span className="font-mono text-xs">CREATE TIME</span> column is the first-seen sync timestamp
+          in EvampOps; you can edit it (same date input style as ETA), and edited values stay local (not overwritten
+          by later syncs). <strong>Tracking #</strong> comes from OC <span className="font-mono text-xs">trackingList</span>.
           <strong> ETA</strong> (after SKU list) defaults to create date + 3 months (local); edit to override—overrides
           are saved in this browser and shown with a green background. <strong>Courier</strong> links open{' '}
           <span className="font-mono text-xs">parcelsapp.com</span> with the tracking number (country hint from region /
           warehouse when available). <strong>Order time (days)</strong> is whole days from create to putaway. Run{' '}
           <strong>Sync from OC</strong> to refresh data; if times stay empty, the API may not include those fields for
-          your tenant. Click column headers to sort (▲/▼); <strong>CREATE TIME/PUTAWAY</strong> sorts by{' '}
-          <em>create</em> time only. Click <strong>SKU count</strong> to keep only orders with SKU count ≥ 5 (header
+          your tenant. Click column headers to sort (▲/▼). Click <strong>SKU count</strong> to keep only orders with SKU count ≥ 5 (header
           uses the same mint highlight as an edited ETA).
         </p>
+        {skuCountFilterMin5 ? (
+          <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-2 inline-block">
+            SKU count ≥5 filter is active. Rows with SKU count below 5 are hidden, even if their Status is selected.
+          </p>
+        ) : null}
         {inboundOrdersQuery.isLoading ? (
           <p className="text-sm text-gray-500">Loading inbound orders...</p>
         ) : inboundOrders.length === 0 ? (
@@ -1362,9 +1435,9 @@ export default function InventoryStatus() {
                   <th
                     className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-gray-800 cursor-pointer select-none hover:bg-gray-100"
                     onClick={() => handleInboundSort('create_time')}
-                    title="Sort by create time (first line). Putaway line is not used for sorting."
+                    title="Sort by create time."
                   >
-                    CREATE TIME/PUTAWAY TIME{' '}
+                    CREATE TIME{' '}
                     {inboundSort.key === 'create_time' && (inboundSort.dir === 'asc' ? '▲' : '▼')}
                   </th>
                   <th
@@ -1414,6 +1487,10 @@ export default function InventoryStatus() {
                 {inboundRowsForTable.map(({ row, rowKey }) => {
                   const createDisplay = row.create_time ?? formatInboundCreateTime(row.raw, row.inbound_at)
                   const putawayDisplay = row.putaway_time ?? formatInboundPutawayTime(row.raw)
+                  const defaultCreateYmd = defaultCreateYmdFromDisplay(createDisplay)
+                  const createTimeOverride = createTimeOverrides[rowKey]
+                  const createTimeInputValue = createTimeOverride ?? defaultCreateYmd
+                  const createTimeIsEdited = createTimeOverride !== undefined
                   const defaultEtaYmd = defaultEtaYmdFromCreateDisplay(createDisplay)
                   const etaOverride = etaOverrides[rowKey]
                   const etaInputValue = etaOverride ?? defaultEtaYmd
@@ -1445,15 +1522,18 @@ export default function InventoryStatus() {
                     <td className="px-3 py-2">{row.status || '—'}</td>
                     <td className="px-3 py-2">{row.sku_qty}</td>
                     <td className="px-3 py-2">{row.put_away_qty}</td>
-                    <td className="px-3 py-2 text-xs text-gray-800 align-top whitespace-nowrap">
-                      <div className="font-mono tabular-nums leading-snug">
-                        <div>
-                          {ocPortalDash(row.create_time ?? formatInboundCreateTime(row.raw, row.inbound_at))}
-                        </div>
-                        <div className="text-gray-700">
-                          {ocPortalDash(row.putaway_time ?? formatInboundPutawayTime(row.raw))}
-                        </div>
-                      </div>
+                    <td className="px-3 py-2 align-top">
+                      <input
+                        type="date"
+                        className={`text-xs font-mono rounded border px-1 py-0.5 max-w-[11rem] ${
+                          createTimeIsEdited ? 'bg-[#DFFFEA] border-gray-200' : 'border-gray-200 bg-white'
+                        }`}
+                        value={createTimeInputValue || ''}
+                        onChange={(e) =>
+                          setInboundCreateTimeOverride(rowKey, e.target.value || null, defaultCreateYmd)
+                        }
+                        title="Defaults to first-seen sync date. Edit to override; green = saved override."
+                      />
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-700 whitespace-nowrap font-mono tabular-nums">
                       {ocPortalDash(row.arrived_time ?? formatInboundArrivedTime(row.raw))}

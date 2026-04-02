@@ -878,7 +878,6 @@ async def oc_fetch_inbound_orders(
         return dt.strftime("%Y-%m-%dT%H:%M:%S+0000")
 
     dedup: Dict[str, Dict[str, Any]] = {}
-    results: List[Dict[str, Any]] = []
 
     chunk_start = start_dt
     chunk_index = 0
@@ -960,14 +959,13 @@ async def oc_fetch_inbound_orders(
         await _merge_inbound_detail_by_seller_numbers(db, conn, start_time, end_time, chunk_rows)
         await _merge_inbound_label_query_into_rows(db, conn, chunk_rows)
 
-        before_chunk = len(results)
+        before_chunk = len(dedup)
         for row in chunk_rows:
             k = f"{(row.get('oc_inbound_number') or '').strip().lower()}::{(row.get('seller_inbound_number') or '').strip().lower()}"
-            if k and k in dedup:
-                continue
-            dedup[k] = row
-            results.append(row)
-        added = len(results) - before_chunk
+            # Keep latest row for the same order key. Later chunks are newer in time window traversal.
+            if k:
+                dedup[k] = row
+        added = len(dedup) - before_chunk
         logger.info(
             "OC inbound chunk %d: %s → %s, rows_in_chunk=%d, new_unique=%d, total_unique=%d",
             chunk_index,
@@ -975,12 +973,13 @@ async def oc_fetch_inbound_orders(
             end_time,
             len(chunk_rows),
             added,
-            len(results),
+            len(dedup),
         )
 
         # Advance to the next chunk.
         chunk_start = chunk_end + timedelta(seconds=1)
 
+    results = list(dedup.values())
     logger.info("OC inbound fetch done: total_unique_orders=%d", len(results))
     return results
 

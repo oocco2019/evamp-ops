@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select, func, case
+from sqlalchemy import delete, select, func, case, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -179,8 +179,10 @@ class InboundOrderLookupResponse(BaseModel):
     )
     transparency: str = Field(
         default=(
-            "create_time / putaway_time / arrived_time come from _extract_inbound_ui_times() on raw_oc_payload "
-            "(flattened scalars + batchList.arrivalTime for arrived). create_time falls back to inbound_at_db. "
+            "create_time / putaway_time / arrived_time come from _extract_inbound_ui_times(). "
+            "create_time is EvampOps first-seen sync timestamp (inbound_at_db). "
+            "putaway/arrived come from raw_oc_payload parsing (flattened scalars + batchList.arrivalTime), "
+            "with status-based arrived fallbacks when OC omits explicit timestamps. "
             "Official Postman samples only document inbound creation; query/detail response shapes vary by tenant."
         )
     )
@@ -242,6 +244,8 @@ class InboundStatusFilterPut(BaseModel):
 
 # Earliest date for historic inbound status chart (inclusive, UTC).
 INBOUND_STATUS_CHART_FROM = date(2024, 1, 1)
+# Incremental inbound sync overlap window (days) to catch late status transitions.
+INBOUND_INCREMENTAL_OVERLAP_DAYS = 14
 
 
 async def _active_oc_connection_id(db: AsyncSession) -> Optional[int]:
@@ -320,28 +324,8 @@ def _extract_inbound_ui_times(
 
     flat = _flatten_oc_scalar_fields(raw)
 
-    create_dt: Optional[datetime] = None
-    for kl, v in flat:
-        if kl in (
-            "createtime",
-            "create_time",
-            "createdtime",
-            "gmtcreate",
-            "gmt_create",
-            "inboundcreatetime",
-            "ordercreatetime",
-        ):
-            create_dt = _parse_oc_scalar_to_utc_naive(v)
-            if create_dt:
-                break
-    if create_dt is None:
-        for kl, v in flat:
-            if ("create" in kl or "gmt" in kl) and ("time" in kl or "date" in kl) and "putaway" not in kl:
-                create_dt = _parse_oc_scalar_to_utc_naive(v)
-                if create_dt:
-                    break
-    if create_dt is None and inbound_at_db:
-        create_dt = inbound_at_db
+    # Business rule: UI "create time" is the first-seen sync timestamp in EvampOps.
+    create_dt: Optional[datetime] = inbound_at_db
 
     putaway_dt: Optional[datetime] = None
     for kl, v in flat:
@@ -380,6 +364,22 @@ def _extract_inbound_ui_times(
                     ms.append(int(at))
             if ms:
                 arrived_dt = datetime.utcfromtimestamp(min(ms) / 1000.0)
+
+    if arrived_dt is None:
+        status_val = ""
+        for kl, v in flat:
+            if kl in ("status", "inboundstatus"):
+                status_val = str(v or "").strip().lower()
+                if status_val:
+                    break
+        # Fallback hierarchy when OC omits explicit arrival timestamps:
+        # 1) putaway timestamp (best proxy for "arrived before/at putaway")
+        # 2) create timestamp (last resort, still better than blank for completed states)
+        if status_val:
+            if ("put away" in status_val) or ("putaway" in status_val) or ("partial" in status_val):
+                arrived_dt = putaway_dt or create_dt
+            elif "arrived" in status_val:
+                arrived_dt = create_dt
 
     return (fmt(create_dt), fmt(putaway_dt), fmt(arrived_dt))
 
@@ -451,8 +451,11 @@ async def _upsert_inbound_rows(db: AsyncSession, connection_id: int, rows: List[
         if dk in ("", "::"):
             continue
         raw = r.get("raw_payload")
-        inbound_at = _parse_inbound_at(raw) if isinstance(raw, dict) else None
+        # "Create time" in UI should be the first time we saw this inbound in sync.
+        # Keep inbound_at stable after first insert.
+        inbound_at = now
         raw_s = json.dumps(raw, ensure_ascii=False) if raw is not None else None
+        existing = None
         existing_r = await db.execute(
             select(OCInboundOrder).where(
                 OCInboundOrder.connection_id == connection_id,
@@ -460,7 +463,28 @@ async def _upsert_inbound_rows(db: AsyncSession, connection_id: int, rows: List[
             )
         )
         existing = existing_r.scalar_one_or_none()
+
+        # Fallback matching: inbound identifiers can arrive incomplete in earlier syncs
+        # (e.g. no OC number yet), then become populated later. In that case dedup_key changes;
+        # match by stable identifiers so we update the same row instead of creating duplicates.
+        if existing is None and (oc or seller):
+            filters = []
+            if oc:
+                filters.append(func.lower(OCInboundOrder.oc_inbound_number) == str(oc).strip().lower())
+            if seller:
+                filters.append(
+                    func.lower(OCInboundOrder.seller_inbound_number) == str(seller).strip().lower()
+                )
+            if filters:
+                existing_r = await db.execute(
+                    select(OCInboundOrder).where(
+                        OCInboundOrder.connection_id == connection_id,
+                        or_(*filters),
+                    )
+                )
+                existing = existing_r.scalar_one_or_none()
         if existing:
+            existing.dedup_key = dk
             existing.seller_inbound_number = seller
             existing.oc_inbound_number = oc
             existing.status = r.get("status")
@@ -469,7 +493,7 @@ async def _upsert_inbound_rows(db: AsyncSession, connection_id: int, rows: List[
             existing.shipping_method = r.get("shipping_method")
             existing.sku_qty = int(r.get("sku_qty") or 0)
             existing.put_away_qty = int(r.get("put_away_qty") or 0)
-            if inbound_at:
+            if existing.inbound_at is None and inbound_at:
                 existing.inbound_at = inbound_at
             if raw_s:
                 existing.raw_payload = raw_s
@@ -851,7 +875,7 @@ async def execute_oc_inbound_sync(db: AsyncSession, full: bool) -> InboundSyncRe
         if raw_last:
             try:
                 last = datetime.fromisoformat(raw_last.replace("Z", "+00:00")).replace(tzinfo=None)
-                overlap_start = last - timedelta(days=7)
+                overlap_start = last - timedelta(days=INBOUND_INCREMENTAL_OVERLAP_DAYS)
                 floor = datetime.combine(INBOUND_STATUS_CHART_FROM, dt_time.min)
                 date_from = max(floor, overlap_start).date()
             except (ValueError, TypeError):
@@ -980,7 +1004,8 @@ async def list_oc_inbound_orders(
                 raw_parsed = parsed if isinstance(parsed, dict) else None
             except (json.JSONDecodeError, TypeError):
                 raw_parsed = None
-        create_s, putaway_s, arrived_s = _extract_inbound_ui_times(raw_parsed, r.inbound_at)
+        # Older rows may have inbound_at unset; fall back to synced_at so CREATE TIME is always populated.
+        create_s, putaway_s, arrived_s = _extract_inbound_ui_times(raw_parsed, r.inbound_at or r.synced_at)
         raw_obj = raw_parsed if include_raw else None
         payload.append(
             OCInboundOrderResponse(
@@ -1075,7 +1100,8 @@ async def lookup_oc_inbound_order(
         except (json.JSONDecodeError, TypeError):
             raw_parsed = None
 
-    create_s, putaway_s, arrived_s = _extract_inbound_ui_times(raw_parsed, r.inbound_at)
+    # Older rows may have inbound_at unset; fall back to synced_at so CREATE TIME is always populated.
+    create_s, putaway_s, arrived_s = _extract_inbound_ui_times(raw_parsed, r.inbound_at or r.synced_at)
 
     return InboundOrderLookupResponse(
         request_url=str(request.url),
