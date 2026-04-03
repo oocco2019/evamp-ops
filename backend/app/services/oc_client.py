@@ -48,11 +48,31 @@ def _extract_inbound_detail_order_list(resp: Dict[str, Any]) -> List[Dict[str, A
     if not isinstance(resp, dict) or not _oc_inbound_detail_response_ok(resp):
         return []
     data = resp.get("data")
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
     if not isinstance(data, dict):
         return []
-    lst = data.get("inboundOrderList")
-    if isinstance(lst, list):
-        return [x for x in lst if isinstance(x, dict)]
+
+    # OC tenants return slightly different nesting/keys depending on version.
+    for key in (
+        "inboundOrderList",
+        "inboundOrders",
+        "inboundOrderResult",
+        "inboundList",
+        "orderList",
+        "orders",
+        "rows",
+        "records",
+        "list",
+        "items",
+    ):
+        val = data.get(key)
+        if isinstance(val, list):
+            return [x for x in val if isinstance(x, dict)]
+
+    # If it's a single order object, return it as a 1-item list.
+    if any(k in data for k in ("inboundOrderNumber", "inboundOrderNo", "inboundNo", "warehouseCode", "status")):
+        return [data]
     return []
 
 
@@ -176,7 +196,17 @@ async def _merge_inbound_detail_by_seller_numbers(
     sellers: List[str] = []
     seen: set[str] = set()
     for row in rows:
-        if _inbound_row_has_sku_list(row.get("raw_payload")):
+        raw_payload = row.get("raw_payload")
+        # Some tenants' "list query" already contains SKUList + quantities, but still omits
+        # batch tracking/timestamps (arrival/putaway times). Only skip when we also have
+        # batchList present, since that's where the arrival timestamps commonly live.
+        has_sku_list = _inbound_row_has_sku_list(raw_payload)
+        batch_list = None
+        if isinstance(raw_payload, dict):
+            batch_list = raw_payload.get("batchList") or raw_payload.get("batchlist")
+        has_batch_list = isinstance(batch_list, list) and len(batch_list) > 0
+
+        if has_sku_list and has_batch_list:
             continue
         s = str(row.get("seller_inbound_number") or "").strip()
         if not s or s.lower() in seen:

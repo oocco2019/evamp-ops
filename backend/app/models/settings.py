@@ -214,6 +214,10 @@ class OCInboundOrder(Base):
     sku_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     put_away_qty: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     inbound_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Rough persisted estimates of when the warehouse reached certain stages,
+    # based on the first OC sync where the order status indicates those stages.
+    putaway_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    arrived_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     raw_payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 

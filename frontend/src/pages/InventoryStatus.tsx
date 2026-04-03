@@ -403,21 +403,33 @@ function parseInboundDisplayToDate(s: string): Date | null {
   return Number.isNaN(d.getTime()) ? null : d
 }
 
-/** ETA date (calendar day) = create + 3 months. */
-function defaultEtaYmdFromCreateDisplay(createDisplay: string): string {
-  const d = parseInboundDisplayToDate(createDisplay)
-  if (!d) return ''
+/** ETA date (calendar day) = effective create (YMD) + 3 months. */
+function defaultEtaYmdFromEffectiveCreateYmd(effectiveCreateYmd: string): string {
+  if (!effectiveCreateYmd || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveCreateYmd)) return ''
+  const d = new Date(`${effectiveCreateYmd}T12:00:00`)
+  if (Number.isNaN(d.getTime())) return ''
   const eta = new Date(d)
   eta.setMonth(eta.getMonth() + 3)
   return formatYmd(eta)
 }
 
-/** Whole days from create to putaway (lead time). */
-function formatOrderTimeDays(createDisplay: string, putawayDisplay: string): string {
-  const c = parseInboundDisplayToDate(createDisplay)
-  const p = parseInboundDisplayToDate(putawayDisplay)
-  if (!c || !p) return '—'
-  const days = Math.round((p.getTime() - c.getTime()) / 86400000)
+/** Whole days from effective create (calendar day) to arrived — only when OC gives an arrival time. */
+function formatOrderTimeDaysEffective(effectiveCreateYmd: string, arrivedDisplay: string): string {
+  if (!effectiveCreateYmd) return '—'
+  const c = new Date(`${effectiveCreateYmd}T12:00:00`)
+  const a = parseInboundDisplayToDate(arrivedDisplay)
+  if (Number.isNaN(c.getTime()) || !a) return '—'
+  const days = Math.round((a.getTime() - c.getTime()) / 86400000)
+  return String(days)
+}
+
+/** Whole days: arrived − ETA (positive = arrived after ETA, negative = before). Needs both dates. */
+function formatEtaArrivedDeltaDays(etaYmd: string, arrivedDisplay: string): string {
+  if (!etaYmd || !/^\d{4}-\d{2}-\d{2}$/.test(etaYmd)) return '—'
+  const eta = new Date(`${etaYmd}T12:00:00`)
+  const a = parseInboundDisplayToDate(arrivedDisplay)
+  if (Number.isNaN(eta.getTime()) || !a) return '—'
+  const days = Math.round((a.getTime() - eta.getTime()) / 86400000)
   return String(days)
 }
 
@@ -432,6 +444,11 @@ function inboundRowStableKey(row: OCInboundOrderRow, idx: number): string {
 function normalizeInboundStatus(row: OCInboundOrderRow): string {
   const s = row.status?.trim()
   return s || '—'
+}
+
+/** OC may use Canceled / Cancelled; exclude from inbound table and charts. */
+function isInboundCanceled(row: OCInboundOrderRow): boolean {
+  return (row.status ?? '').trim().toLowerCase().includes('cancel')
 }
 
 function getUniqueInboundStatuses(orders: OCInboundOrderRow[]): string[] {
@@ -472,10 +489,13 @@ function parseYmdToSortMs(ymd: string): number | null {
 function getInboundEtaSortMs(
   row: OCInboundOrderRow,
   rowKey: string,
-  etaOverrides: Record<string, string>
+  etaOverrides: Record<string, string>,
+  createTimeOverrides: Record<string, string>
 ): number | null {
   const createDisplay = row.create_time ?? formatInboundCreateTime(row.raw, row.inbound_at)
-  const defaultYmd = defaultEtaYmdFromCreateDisplay(createDisplay)
+  const defaultCreateYmd = defaultCreateYmdFromDisplay(createDisplay)
+  const effectiveCreateYmd = createTimeOverrides[rowKey] ?? defaultCreateYmd
+  const defaultYmd = defaultEtaYmdFromEffectiveCreateYmd(effectiveCreateYmd)
   const ymd = etaOverrides[rowKey] ?? defaultYmd
   if (!ymd) return null
   return parseYmdToSortMs(ymd)
@@ -747,15 +767,22 @@ export default function InventoryStatus() {
   const mappings: OCSkuMapping[] = mappingsQuery.data ?? []
   const inventoryRows: OCSkuInventoryRow[] = inventoryQuery.data ?? []
   const inboundOrders: OCInboundOrderRow[] = inboundOrdersQuery.data ?? []
-  const uniqueInboundStatuses = useMemo(() => getUniqueInboundStatuses(inboundOrders), [inboundOrders])
+  const inboundOrdersActive = useMemo(
+    () => inboundOrders.filter((row) => !isInboundCanceled(row)),
+    [inboundOrders]
+  )
+  const uniqueInboundStatuses = useMemo(
+    () => getUniqueInboundStatuses(inboundOrdersActive),
+    [inboundOrdersActive]
+  )
 
   const inboundRowsAfterSku = useMemo(() => {
-    const base = inboundOrders.map((row, idx) => ({
+    const base = inboundOrdersActive.map((row, idx) => ({
       row,
       rowKey: inboundRowStableKey(row, idx),
     }))
     return skuCountFilterMin5 ? base.filter(({ row }) => row.sku_qty >= 5) : base
-  }, [inboundOrders, skuCountFilterMin5])
+  }, [inboundOrdersActive, skuCountFilterMin5])
 
   const inboundRowsForTable = useMemo(() => {
     const filtered = inboundRowsAfterSku.filter(({ row }) => !statusExcluded.has(normalizeInboundStatus(row)))
@@ -791,8 +818,8 @@ export default function InventoryStatus() {
       }
       if (key === 'eta') {
         return cmpNullableMs(
-          getInboundEtaSortMs(ra, ka, etaOverrides),
-          getInboundEtaSortMs(rb, kb, etaOverrides)
+          getInboundEtaSortMs(ra, ka, etaOverrides, createTimeOverrides),
+          getInboundEtaSortMs(rb, kb, etaOverrides, createTimeOverrides)
         )
       }
       return 0
@@ -805,7 +832,7 @@ export default function InventoryStatus() {
     // Don't prune saved status selections before inbound rows are loaded.
     // Otherwise a refresh can clear the filter while data is still empty/loading.
     if (!inboundOrdersQuery.isSuccess) return
-    if (inboundOrders.length === 0) return
+    if (inboundOrdersActive.length === 0) return
     const unique = new Set(uniqueInboundStatuses)
     setStatusExcluded((prev) => {
       const next = new Set(prev)
@@ -814,7 +841,7 @@ export default function InventoryStatus() {
       }
       return next
     })
-  }, [uniqueInboundStatuses, inboundOrdersQuery.isSuccess, inboundOrders.length])
+  }, [uniqueInboundStatuses, inboundOrdersQuery.isSuccess, inboundOrdersActive.length])
 
   useEffect(() => {
     persistStatusExcludedLocal(statusExcluded)
@@ -1285,10 +1312,14 @@ export default function InventoryStatus() {
           server. The <span className="font-mono text-xs">CREATE TIME</span> column is the first-seen sync timestamp
           in EvampOps; you can edit it (same date input style as ETA), and edited values stay local (not overwritten
           by later syncs). <strong>Tracking #</strong> comes from OC <span className="font-mono text-xs">trackingList</span>.
-          <strong> ETA</strong> (after SKU list) defaults to create date + 3 months (local); edit to override—overrides
-          are saved in this browser and shown with a green background. <strong>Courier</strong> links open{' '}
-          <span className="font-mono text-xs">parcelsapp.com</span> with the tracking number (country hint from region /
-          warehouse when available). <strong>Order time (days)</strong> is whole days from create to putaway. Run{' '}
+          <strong> ETA</strong> (after SKU list) defaults to <strong>effective</strong> create date (first-seen or your
+          edited CREATE TIME, when shown) + 3 months; edit ETA to override—overrides are saved in this browser (green
+          background). When you have not overridden ETA, it recalculates if create or server dates change.{' '}
+          <strong>Courier</strong> links open <span className="font-mono text-xs">parcelsapp.com</span> with the tracking
+          number (country hint from region / warehouse when available). <strong>Order time (d)</strong> is whole days
+          from effective create to <strong>arrived</strong> when the API includes an arrival time; otherwise &mdash;.{' '}
+          <strong>ETA Δ (d)</strong> is whole days from effective ETA to arrived (arrived &minus; ETA: negative if
+          arrived sooner, positive if later). Run{' '}
           <strong>Sync from OC</strong> to refresh data; if times stay empty, the API may not include those fields for
           your tenant. Click column headers to sort (▲/▼). Click <strong>SKU count</strong> to keep only orders with SKU count ≥ 5 (header
           uses the same mint highlight as an edited ETA).
@@ -1300,7 +1331,7 @@ export default function InventoryStatus() {
         ) : null}
         {inboundOrdersQuery.isLoading ? (
           <p className="text-sm text-gray-500">Loading inbound orders...</p>
-        ) : inboundOrders.length === 0 ? (
+        ) : inboundOrdersActive.length === 0 ? (
           <p className="text-sm text-gray-500">No inbound orders found for UK/DE/US/AU in the last 6 months.</p>
         ) : (
           <>
@@ -1460,14 +1491,20 @@ export default function InventoryStatus() {
                   </th>
                   <th className="px-3 py-2 text-left max-w-[9rem]">Courier</th>
                   <th className="px-3 py-2 text-left max-w-[11rem]">Tracking #</th>
-                  <th className="px-3 py-2 text-left whitespace-nowrap">Order time (days)</th>
+                  <th className="px-3 py-2 text-left whitespace-nowrap">Order time (d)</th>
+                  <th
+                    className="px-3 py-2 text-left whitespace-nowrap"
+                    title="Whole days: arrived minus ETA (negative = arrived before ETA, positive = after)."
+                  >
+                    ETA Δ (d)
+                  </th>
                 </tr>
               </thead>
               <tbody>
                 {inboundRowsForTable.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={11}
+                      colSpan={12}
                       className="px-3 py-6 text-center text-sm text-amber-900 bg-amber-50/80 border-t border-amber-100"
                     >
                       {inboundRowsAfterSku.length === 0 && skuCountFilterMin5 ? (
@@ -1487,12 +1524,14 @@ export default function InventoryStatus() {
                 {inboundRowsForTable.map(({ row, rowKey }) => {
                   const createDisplay = row.create_time ?? formatInboundCreateTime(row.raw, row.inbound_at)
                   const putawayDisplay = row.putaway_time ?? formatInboundPutawayTime(row.raw)
+                  const arrivedDisplay = row.arrived_time ?? formatInboundArrivedTime(row.raw)
                   const defaultCreateYmd = defaultCreateYmdFromDisplay(createDisplay)
                   const createTimeOverride = createTimeOverrides[rowKey]
-                  const createTimeInputValue = createTimeOverride ?? defaultCreateYmd
+                  const effectiveCreateYmd = createTimeOverride ?? defaultCreateYmd
+                  const createTimeInputValue = effectiveCreateYmd
                   const createTimeIsEdited = createTimeOverride !== undefined
                   const showCreateTime = row.sku_qty >= 5
-                  const defaultEtaYmd = defaultEtaYmdFromCreateDisplay(createDisplay)
+                  const defaultEtaYmd = defaultEtaYmdFromEffectiveCreateYmd(effectiveCreateYmd)
                   const etaOverride = etaOverrides[rowKey]
                   const etaInputValue = etaOverride ?? defaultEtaYmd
                   const etaIsEdited = etaOverride !== undefined
@@ -1548,7 +1587,7 @@ export default function InventoryStatus() {
                       />
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-700 whitespace-nowrap font-mono tabular-nums">
-                      {ocPortalDash(row.arrived_time ?? formatInboundArrivedTime(row.raw))}
+                      {ocPortalDash(arrivedDisplay)}
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-800 align-top max-w-[14rem]">
                       <InboundSkuListCell raw={row.raw} />
@@ -1603,7 +1642,10 @@ export default function InventoryStatus() {
                       {formatInboundTrackingNumbers(row.raw)}
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap font-mono tabular-nums">
-                      {formatOrderTimeDays(createDisplay, putawayDisplay)}
+                      {formatOrderTimeDaysEffective(effectiveCreateYmd, arrivedDisplay)}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap font-mono tabular-nums">
+                      {formatEtaArrivedDeltaDays(etaInputValue, arrivedDisplay)}
                     </td>
                   </tr>
                   )

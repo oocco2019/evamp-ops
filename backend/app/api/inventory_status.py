@@ -39,6 +39,16 @@ SYNC_META_INBOUND_LAST = "oc_inbound_last_sync_at"
 SYNC_META_INBOUND_STATUS_FILTER = "inventory_inbound_status_filter_excluded"
 
 
+def _inbound_status_is_canceled(status: Optional[str]) -> bool:
+    """True if OC status indicates the inbound was canceled (Canceled, Cancelled, etc.)."""
+    return "cancel" in (status or "").strip().lower()
+
+
+def _inbound_not_canceled_sql():
+    """SQL predicate: exclude rows whose status contains 'cancel' (case-insensitive)."""
+    return ~func.lower(func.coalesce(OCInboundOrder.status, "")).like("%cancel%")
+
+
 class OCConnectionUpsertRequest(BaseModel):
     name: str = "OC"
     region: str = "UK"
@@ -169,6 +179,8 @@ class InboundOrderLookupResponse(BaseModel):
     put_away_qty: int = 0
     inbound_at_db: Optional[str] = Field(None, description="Stored inbound_at from sync (ISO).")
     synced_at_db: Optional[str] = Field(None, description="Last OC sync time for this row (ISO).")
+    putaway_at_db: Optional[str] = Field(None, description="Stored putaway_at estimate from sync (ISO).")
+    arrived_at_db: Optional[str] = Field(None, description="Stored arrived_at estimate from sync (ISO).")
     create_time: Optional[str] = None
     putaway_time: Optional[str] = None
     arrived_time: Optional[str] = None
@@ -181,8 +193,8 @@ class InboundOrderLookupResponse(BaseModel):
         default=(
             "create_time / putaway_time / arrived_time come from _extract_inbound_ui_times(). "
             "create_time is EvampOps first-seen sync timestamp (inbound_at_db). "
-            "putaway/arrived come from raw_oc_payload parsing (flattened scalars + batchList.arrivalTime), "
-            "with status-based arrived fallbacks when OC omits explicit timestamps. "
+            "putaway/arrived come from raw_oc_payload parsing (flattened scalars + batchList.arrivalTime). "
+            "Arrived does not fall back to first-seen sync time; if OC omits arrival timestamps, Arrived may be blank. "
             "Official Postman samples only document inbound creation; query/detail response shapes vary by tenant."
         )
     )
@@ -201,10 +213,13 @@ class OCInboundOrderResponse(BaseModel):
     synced_at: Optional[datetime] = None
     create_time: Optional[str] = Field(
         default=None,
-        description="Display create time from OC raw (YYYY-MM-DD HH:MM:SS UTC), computed server-side.",
+        description="EvampOps first-seen sync timestamp (YYYY-MM-DD HH:MM:SS), computed server-side from inbound_at/synced_at.",
     )
     putaway_time: Optional[str] = Field(default=None, description="Display putaway time from OC raw, server-side.")
-    arrived_time: Optional[str] = Field(default=None, description="Display arrived time from OC raw, server-side.")
+    arrived_time: Optional[str] = Field(
+        default=None,
+        description="Display arrived time from OC raw (server-side). Blank if OC omits arrival timestamps.",
+    )
     raw: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Full OrangeConnex row JSON from the last sync (only when include_raw=true).",
@@ -246,6 +261,76 @@ class InboundStatusFilterPut(BaseModel):
 INBOUND_STATUS_CHART_FROM = date(2024, 1, 1)
 # Incremental inbound sync overlap window (days) to catch late status transitions.
 INBOUND_INCREMENTAL_OVERLAP_DAYS = 14
+
+
+def _status_indicates_putaway(status_lower: str) -> bool:
+    """Heuristic for OC status strings that indicate putaway/processed-at-warehouse."""
+    if not status_lower:
+        return False
+    if "put away" in status_lower or "putaway" in status_lower:
+        return True
+    # Some tenants use "Partially Put away"
+    if "partial" in status_lower and "put" in status_lower and "away" in status_lower:
+        return True
+    return False
+
+
+def _status_indicates_arrived(status_lower: str) -> bool:
+    """Heuristic for OC status strings that indicate arrived-at-destination."""
+    if not status_lower:
+        return False
+    if "arrived" not in status_lower:
+        return False
+    # Avoid treating "not arrived" as arrived.
+    if "not arrived" in status_lower:
+        return False
+    return True
+
+
+def _putaway_qty_transitioned(prev_put_away_qty: int, new_put_away_qty: int) -> bool:
+    """True when putaway quantity first becomes > 0."""
+    return prev_put_away_qty <= 0 and new_put_away_qty > 0
+
+
+def _should_set_putaway_at(
+    existing_putaway_at: Optional[datetime],
+    prev_put_away_qty: int,
+    new_put_away_qty: int,
+    prev_status_lower: str,
+    status_lower: str,
+) -> bool:
+    if existing_putaway_at is not None:
+        return False
+    if _putaway_qty_transitioned(prev_put_away_qty, new_put_away_qty):
+        return True
+    return (not _status_indicates_putaway(prev_status_lower)) and _status_indicates_putaway(status_lower)
+
+
+def _should_set_arrived_at(
+    existing_arrived_at: Optional[datetime],
+    prev_put_away_qty: int,
+    new_put_away_qty: int,
+    prev_status_lower: str,
+    status_lower: str,
+) -> bool:
+    if existing_arrived_at is not None:
+        return False
+    if _putaway_qty_transitioned(prev_put_away_qty, new_put_away_qty):
+        # If OC doesn't provide an explicit arrived timestamp, treat the moment we first see
+        # putaway quantity > 0 as a rough warehouse-received proxy.
+        return True
+    return (not _status_indicates_arrived(prev_status_lower)) and _status_indicates_arrived(status_lower)
+
+
+def _eligible_for_inbound_stage_estimates(now_utc_naive: datetime, first_seen: Optional[datetime]) -> bool:
+    """
+    Apply putaway_at / arrived_at sync-time estimates only for orders first seen on or after
+    the start of the current UTC calendar day. Older rows rely on OC raw timestamps only.
+    """
+    if first_seen is None:
+        return False
+    cutoff = datetime.combine(now_utc_naive.date(), dt_time.min)
+    return first_seen >= cutoff
 
 
 async def _active_oc_connection_id(db: AsyncSession) -> Optional[int]:
@@ -294,12 +379,29 @@ def _parse_oc_scalar_to_utc_naive(v: Any) -> Optional[datetime]:
     s = str(v).strip()
     if not s:
         return None
+    # OC sometimes returns epoch timestamps as numeric strings.
+    if re.match(r"^-?\d+(\.\d+)?$", s):
+        try:
+            n = float(s)
+            if n > 1e12:
+                return datetime.utcfromtimestamp(n / 1000.0)
+            if n > 1e9:
+                return datetime.utcfromtimestamp(n)
+            return None
+        except (ValueError, TypeError):
+            return None
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
     elif s.endswith("+0000"):
         s = s[:-5] + "+00:00"
     elif re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}", s):
         s = re.sub(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})", r"\1T\2", s)
+    elif re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        # OC sometimes sends date-only strings; interpret as midnight UTC.
+        try:
+            return datetime.strptime(s, "%Y-%m-%d")
+        except ValueError:
+            return None
     try:
         dt = datetime.fromisoformat(s)
         return dt.replace(tzinfo=None) if dt.tzinfo else dt
@@ -308,7 +410,10 @@ def _parse_oc_scalar_to_utc_naive(v: Any) -> Optional[datetime]:
 
 
 def _extract_inbound_ui_times(
-    raw: Optional[Dict[str, Any]], inbound_at_db: Optional[datetime]
+    raw: Optional[Dict[str, Any]],
+    inbound_at_db: Optional[datetime],
+    putaway_at_db: Optional[datetime] = None,
+    arrived_at_db: Optional[datetime] = None,
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Stable display times for the inbound table (YYYY-MM-DD HH:MM:SS, UTC from OC numeric / parsed strings).
@@ -328,58 +433,78 @@ def _extract_inbound_ui_times(
     create_dt: Optional[datetime] = inbound_at_db
 
     putaway_dt: Optional[datetime] = None
+    putaway_from_raw = False
     for kl, v in flat:
         if kl in ("putawaytime", "put_away_time", "completeputawaytime"):
             putaway_dt = _parse_oc_scalar_to_utc_naive(v)
             if putaway_dt:
+                putaway_from_raw = True
                 break
     if putaway_dt is None:
         for kl, v in flat:
             if "putaway" in kl and "time" in kl and "qty" not in kl and "quantity" not in kl:
                 putaway_dt = _parse_oc_scalar_to_utc_naive(v)
                 if putaway_dt:
+                    putaway_from_raw = True
                     break
 
+    # If OC does not provide an explicit putaway timestamp, fall back to our persisted
+    # estimate (first sync where OC status indicates "put away"/"partially put away").
+    if putaway_dt is None and putaway_at_db is not None:
+        putaway_dt = putaway_at_db
+
     arrived_dt: Optional[datetime] = None
+    arrived_candidates: List[datetime] = []
+
     for kl, v in flat:
         if kl in ("arrivedtime", "arrivaltime", "actualarrivaltime", "actualarrival"):
-            arrived_dt = _parse_oc_scalar_to_utc_naive(v)
-            if arrived_dt:
-                break
+            dt = _parse_oc_scalar_to_utc_naive(v)
+            if dt:
+                arrived_candidates.append(dt)
+    if arrived_candidates:
+        arrived_dt = min(arrived_candidates)
+
     if arrived_dt is None:
         for kl, v in flat:
-            if ("arrival" in kl or "arrived" in kl) and "estimate" not in kl and "eta" not in kl and "time" in kl:
-                arrived_dt = _parse_oc_scalar_to_utc_naive(v)
-                if arrived_dt:
-                    break
+            if ("arrival" in kl or "arrived" in kl) and "estimate" not in kl and "eta" not in kl:
+                # Support either "...time..." or "...date..." keys.
+                if ("time" in kl) or ("date" in kl):
+                    dt = _parse_oc_scalar_to_utc_naive(v)
+                    if dt:
+                        arrived_candidates.append(dt)
+        if arrived_candidates:
+            arrived_dt = min(arrived_candidates)
+
     if arrived_dt is None:
         batch_list = raw.get("batchList") if isinstance(raw.get("batchList"), list) else raw.get("batchlist")
         if isinstance(batch_list, list):
-            ms: List[int] = []
+            dt_candidates: List[datetime] = []
             for item in batch_list:
                 if not isinstance(item, dict):
                     continue
                 at = item.get("arrivalTime") or item.get("arrivaltime")
-                if isinstance(at, (int, float)) and at > 0:
-                    ms.append(int(at))
-            if ms:
-                arrived_dt = datetime.utcfromtimestamp(min(ms) / 1000.0)
+                dt = _parse_oc_scalar_to_utc_naive(at)
+                if dt:
+                    dt_candidates.append(dt)
+            if dt_candidates:
+                arrived_dt = min(dt_candidates)
 
-    if arrived_dt is None:
+    # If Arrived is missing but OC gave us an explicit putaway timestamp, use that as
+    # arrival proxy for putaway/partially-putaway statuses (user-requested fallback).
+    if arrived_dt is None and putaway_dt is not None and putaway_from_raw:
         status_val = ""
         for kl, v in flat:
             if kl in ("status", "inboundstatus"):
                 status_val = str(v or "").strip().lower()
                 if status_val:
                     break
-        # Fallback hierarchy when OC omits explicit arrival timestamps:
-        # 1) putaway timestamp (best proxy for "arrived before/at putaway")
-        # 2) create timestamp (last resort, still better than blank for completed states)
-        if status_val:
-            if ("put away" in status_val) or ("putaway" in status_val) or ("partial" in status_val):
-                arrived_dt = putaway_dt or create_dt
-            elif "arrived" in status_val:
-                arrived_dt = create_dt
+        if status_val and (("put away" in status_val) or ("putaway" in status_val) or ("partial" in status_val)):
+            arrived_dt = putaway_dt
+
+    # If OC omits both arrived and putaway timestamps, use persisted arrived estimate
+    # (first sync where OC status indicates "arrived").
+    if arrived_dt is None and arrived_at_db is not None:
+        arrived_dt = arrived_at_db
 
     return (fmt(create_dt), fmt(putaway_dt), fmt(arrived_dt))
 
@@ -450,11 +575,16 @@ async def _upsert_inbound_rows(db: AsyncSession, connection_id: int, rows: List[
         dk = _inbound_dedup_key(seller, oc)
         if dk in ("", "::"):
             continue
+        status_val = str(r.get("status") or "").strip()
+        status_lower = status_val.lower()
+        indicates_putaway = _status_indicates_putaway(status_lower)
+        indicates_arrived = _status_indicates_arrived(status_lower)
         raw = r.get("raw_payload")
         # "Create time" in UI should be the first time we saw this inbound in sync.
         # Keep inbound_at stable after first insert.
         inbound_at = now
         raw_s = json.dumps(raw, ensure_ascii=False) if raw is not None else None
+        new_putaway_qty = int(r.get("put_away_qty") or 0)
         existing = None
         existing_r = await db.execute(
             select(OCInboundOrder).where(
@@ -484,6 +614,11 @@ async def _upsert_inbound_rows(db: AsyncSession, connection_id: int, rows: List[
                 )
                 existing = existing_r.scalar_one_or_none()
         if existing:
+            prev_putaway_qty = int(existing.put_away_qty or 0)
+            prev_status_lower = str(existing.status or "").lower()
+            # Eligibility uses first-seen before mutating inbound_at (backfill would look "new").
+            first_seen_for_est = existing.inbound_at or existing.synced_at
+            eligible_est = _eligible_for_inbound_stage_estimates(now, first_seen_for_est)
             existing.dedup_key = dk
             existing.seller_inbound_number = seller
             existing.oc_inbound_number = oc
@@ -492,13 +627,30 @@ async def _upsert_inbound_rows(db: AsyncSession, connection_id: int, rows: List[
             existing.region = r.get("region")
             existing.shipping_method = r.get("shipping_method")
             existing.sku_qty = int(r.get("sku_qty") or 0)
-            existing.put_away_qty = int(r.get("put_away_qty") or 0)
+            existing.put_away_qty = new_putaway_qty
             if existing.inbound_at is None and inbound_at:
                 existing.inbound_at = inbound_at
+            if eligible_est and _should_set_putaway_at(
+                existing.putaway_at,
+                prev_putaway_qty,
+                new_putaway_qty,
+                prev_status_lower,
+                status_lower,
+            ):
+                existing.putaway_at = now
+            if eligible_est and _should_set_arrived_at(
+                existing.arrived_at,
+                prev_putaway_qty,
+                new_putaway_qty,
+                prev_status_lower,
+                status_lower,
+            ):
+                existing.arrived_at = now
             if raw_s:
                 existing.raw_payload = raw_s
             existing.synced_at = now
         else:
+            eligible_new = _eligible_for_inbound_stage_estimates(now, inbound_at)
             db.add(
                 OCInboundOrder(
                     connection_id=connection_id,
@@ -510,8 +662,20 @@ async def _upsert_inbound_rows(db: AsyncSession, connection_id: int, rows: List[
                     region=r.get("region"),
                     shipping_method=r.get("shipping_method"),
                     sku_qty=int(r.get("sku_qty") or 0),
-                    put_away_qty=int(r.get("put_away_qty") or 0),
+                    put_away_qty=new_putaway_qty,
                     inbound_at=inbound_at,
+                    putaway_at=(
+                        now
+                        if eligible_new
+                        and (_status_indicates_putaway(status_lower) or new_putaway_qty > 0)
+                        else None
+                    ),
+                    arrived_at=(
+                        now
+                        if eligible_new
+                        and (_status_indicates_arrived(status_lower) or new_putaway_qty > 0)
+                        else None
+                    ),
                     raw_payload=raw_s,
                     synced_at=now,
                 )
@@ -943,7 +1107,7 @@ async def inbound_orders_status_summary(db: AsyncSession = Depends(get_db)):
     status_expr = func.coalesce(OCInboundOrder.status, "(no status)")
     stmt = (
         select(status_expr, func.count())
-        .where(OCInboundOrder.connection_id == cid)
+        .where(OCInboundOrder.connection_id == cid, _inbound_not_canceled_sql())
         .group_by(status_expr)
     )
     result = await db.execute(stmt)
@@ -990,6 +1154,7 @@ async def list_oc_inbound_orders(
         .where(
             OCInboundOrder.connection_id == cid,
             coalesced >= cutoff_dt,
+            _inbound_not_canceled_sql(),
         )
         .order_by(coalesced.desc())
     )
@@ -1005,7 +1170,12 @@ async def list_oc_inbound_orders(
             except (json.JSONDecodeError, TypeError):
                 raw_parsed = None
         # Older rows may have inbound_at unset; fall back to synced_at so CREATE TIME is always populated.
-        create_s, putaway_s, arrived_s = _extract_inbound_ui_times(raw_parsed, r.inbound_at or r.synced_at)
+        create_s, putaway_s, arrived_s = _extract_inbound_ui_times(
+            raw_parsed,
+            r.inbound_at or r.synced_at,
+            putaway_at_db=r.putaway_at,
+            arrived_at_db=r.arrived_at,
+        )
         raw_obj = raw_parsed if include_raw else None
         payload.append(
             OCInboundOrderResponse(
@@ -1101,7 +1271,12 @@ async def lookup_oc_inbound_order(
             raw_parsed = None
 
     # Older rows may have inbound_at unset; fall back to synced_at so CREATE TIME is always populated.
-    create_s, putaway_s, arrived_s = _extract_inbound_ui_times(raw_parsed, r.inbound_at or r.synced_at)
+    create_s, putaway_s, arrived_s = _extract_inbound_ui_times(
+        raw_parsed,
+        r.inbound_at or r.synced_at,
+        putaway_at_db=r.putaway_at,
+        arrived_at_db=r.arrived_at,
+    )
 
     return InboundOrderLookupResponse(
         request_url=str(request.url),
@@ -1115,6 +1290,8 @@ async def lookup_oc_inbound_order(
         put_away_qty=r.put_away_qty,
         inbound_at_db=r.inbound_at.isoformat() if r.inbound_at else None,
         synced_at_db=r.synced_at.isoformat() if r.synced_at else None,
+        putaway_at_db=r.putaway_at.isoformat() if r.putaway_at else None,
+        arrived_at_db=r.arrived_at.isoformat() if r.arrived_at else None,
         create_time=create_s,
         putaway_time=putaway_s,
         arrived_time=arrived_s,
