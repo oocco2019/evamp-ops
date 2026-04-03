@@ -1491,6 +1491,7 @@ export default function InventoryStatus() {
                   const createTimeOverride = createTimeOverrides[rowKey]
                   const createTimeInputValue = createTimeOverride ?? defaultCreateYmd
                   const createTimeIsEdited = createTimeOverride !== undefined
+                  const showCreateTime = row.sku_qty >= 5
                   const defaultEtaYmd = defaultEtaYmdFromCreateDisplay(createDisplay)
                   const etaOverride = etaOverrides[rowKey]
                   const etaInputValue = etaOverride ?? defaultEtaYmd
@@ -1526,11 +1527,22 @@ export default function InventoryStatus() {
                       <input
                         type="date"
                         className={`text-xs font-mono rounded border px-1 py-0.5 max-w-[11rem] ${
-                          createTimeIsEdited ? 'bg-[#DFFFEA] border-gray-200' : 'border-gray-200 bg-white'
+                          !showCreateTime
+                            ? 'bg-gray-50 border-gray-200 text-gray-400 cursor-not-allowed'
+                            : createTimeIsEdited
+                              ? 'bg-[#DFFFEA] border-gray-200'
+                              : 'border-gray-200 bg-white'
                         }`}
-                        value={createTimeInputValue || ''}
+                        value={showCreateTime ? createTimeInputValue || '' : ''}
+                        disabled={!showCreateTime}
                         onChange={(e) =>
-                          setInboundCreateTimeOverride(rowKey, e.target.value || null, defaultCreateYmd)
+                          showCreateTime
+                            ? setInboundCreateTimeOverride(
+                                rowKey,
+                                e.target.value || null,
+                                defaultCreateYmd
+                              )
+                            : undefined
                         }
                         title="Defaults to first-seen sync date. Edit to override; green = saved override."
                       />
