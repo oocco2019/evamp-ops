@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     
     # Application
     DEBUG: bool = False
+    # When true: GET /api/inventory-status/debug/inbound-detail-raw returns verbatim OC detail JSON (diagnostics).
+    ALLOW_OC_INBOUND_DETAIL_DEBUG: bool = False
     APP_NAME: str = "EvampOps"
     VERSION: str = "0.1.0"
     

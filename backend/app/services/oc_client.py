@@ -4,6 +4,7 @@ OrangeConnex (OC) API client for read-only inventory status integration.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone, date, time as dt_time_min
@@ -12,11 +13,11 @@ from urllib.parse import urlencode, urljoin, urlparse
 from uuid import uuid4
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import encryption_service
-from app.models.settings import APICredential, OCConnection
+from app.models.settings import APICredential, OCConnection, OCInboundOrder
 
 
 def _oc_dict_get_ci(d: Dict[str, Any], *names: str) -> Any:
@@ -182,6 +183,122 @@ async def _merge_inbound_detail_into_rows(
         logger.info("OC inbound detail merged into %d row(s) for this chunk (detail API)", merged)
 
 
+def _oc_inbound_dt_iso_utc(dt: datetime) -> str:
+    """Format datetime as OC inbound time string (UTC +0000)."""
+    return dt.strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+
+def _anchor_datetime_from_inbound_raw_payload(raw_s: Optional[str]) -> Optional[datetime]:
+    """Best-effort create time from cached JSON (prefer portal date over first-seen sync)."""
+    if not raw_s:
+        return None
+    try:
+        d = json.loads(raw_s)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    lower = {str(k).lower(): v for k, v in d.items()}
+    for key in ("createtime", "gmtcreate", "gmt_create", "createdtime", "inboundcreatetime"):
+        v = lower.get(key)
+        if v is None:
+            continue
+        if isinstance(v, (int, float)) and v > 1e11:
+            return datetime.utcfromtimestamp(v / 1000.0)
+        if isinstance(v, (int, float)) and v > 1e9:
+            return datetime.utcfromtimestamp(v)
+    return None
+
+
+async def oc_debug_inbound_detail_raw(
+    db: AsyncSession,
+    oc_inbound_number: str,
+    window_start: Optional[date] = None,
+    window_end: Optional[date] = None,
+) -> Dict[str, Any]:
+    """
+    Single POST to OC inbound detail API — no list merge, no flatten.
+    Used to compare verbatim OC JSON to `oc_inbound_orders.raw_payload` after sync.
+
+    OC rejects detail windows longer than 7 days; we chunk to a 7-day range.
+    """
+    conn = await _get_active_connection(db)
+    oc = oc_inbound_number.strip()
+    if not oc:
+        raise OCConfigError("oc_inbound_number is empty.")
+
+    anchor: Optional[datetime] = None
+    anchor_source = "fallback_utc_now"
+    row_raw: Optional[str] = None
+
+    r = await db.execute(
+        select(OCInboundOrder).where(
+            OCInboundOrder.connection_id == conn.id,
+            func.lower(OCInboundOrder.oc_inbound_number) == oc.lower(),
+        ).limit(1)
+    )
+    row = r.scalar_one_or_none()
+    if row:
+        row_raw = row.raw_payload
+        anchor = _anchor_datetime_from_inbound_raw_payload(row_raw)
+        if anchor is not None:
+            anchor_source = "raw_payload.createTime"
+        else:
+            anchor = row.inbound_at or row.synced_at
+            anchor_source = "inbound_at" if row.inbound_at else "synced_at"
+
+    if window_start is not None and window_end is not None:
+        if window_end < window_start:
+            raise OCConfigError("window_end must be >= window_start.")
+        if (window_end - window_start).days > 6:
+            raise OCConfigError("OC detail allows at most 7 days inclusive; narrow window_start/window_end.")
+        start_dt = datetime.combine(window_start, dt_time_min.min)
+        end_dt = datetime.combine(window_end, dt_time_min(23, 59, 59))
+        anchor_source = "query_window_override"
+    else:
+        if anchor is None:
+            anchor = datetime.utcnow()
+            anchor_source = "fallback_utc_now"
+        else:
+            if anchor.tzinfo is not None:
+                anchor = anchor.replace(tzinfo=None)
+        start_d = anchor.date() - timedelta(days=3)
+        end_d = start_d + timedelta(days=6)
+        start_dt = datetime.combine(start_d, dt_time_min.min)
+        end_dt = datetime.combine(end_d, dt_time_min(23, 59, 59))
+
+    start_time = _oc_inbound_dt_iso_utc(start_dt)
+    end_time = _oc_inbound_dt_iso_utc(end_dt)
+
+    endpoint = "/openapi/3pp/inbound/v1/detail"
+    timestamp_ms = int(time.time() * 1000)
+    message_id = str(uuid4())
+    body_obj = {
+        "messageId": message_id,
+        "timestamp": timestamp_ms,
+        "data": {
+            "startTime": start_time,
+            "endTime": end_time,
+            "inboundNumberList": [oc],
+        },
+    }
+
+    raw_response = await _call_oc(db, conn, "POST", endpoint, body_obj=body_obj)
+
+    return {
+        "oc_inbound_number": oc,
+        "anchor_iso_utc": anchor.isoformat() if anchor else None,
+        "anchor_source": anchor_source,
+        "time_window_inclusive": {
+            "startTime": start_time,
+            "endTime": end_time,
+        },
+        "endpoint": endpoint,
+        "request_body": body_obj,
+        "raw_response": raw_response,
+    }
+
+
 async def _merge_inbound_detail_by_seller_numbers(
     db: AsyncSession,
     conn: OCConnection,
@@ -245,7 +362,16 @@ async def _merge_inbound_detail_by_seller_numbers(
 
     merged = 0
     for row in rows:
-        if _inbound_row_has_sku_list(row.get("raw_payload")):
+        raw_payload = row.get("raw_payload")
+        # Must match the filter in the loop above: only skip when we already have both
+        # SKU list and batchList (where arrival timestamps often live). Rows with SKU list
+        # but no batchList still need this detail pass.
+        has_sku_list = _inbound_row_has_sku_list(raw_payload)
+        batch_list = None
+        if isinstance(raw_payload, dict):
+            batch_list = raw_payload.get("batchList") or raw_payload.get("batchlist")
+        has_batch_list = isinstance(batch_list, list) and len(batch_list) > 0
+        if has_sku_list and has_batch_list:
             continue
         seller = str(row.get("seller_inbound_number") or "").strip()
         if not seller:

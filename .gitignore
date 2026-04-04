@@ -71,6 +71,9 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Local OC/API debug JSON dumps (optional)
+tmp/*.json
+
 # OS
 .DS_Store
 Thumbs.db
