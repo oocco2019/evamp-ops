@@ -1,0 +1,21 @@
+---
+description: How to communicate with this user — terse, paste-ready commands, self-updating rule
+alwaysApply: true
+---
+
+# Communication preferences
+
+- **Default to short answers.** Skip long preambles, hedging, and engagement-style sign-offs unless the topic needs depth.
+- **Commands:** When the user needs to run something, give **one copy-paste block** (full paths, no `...`). Prefer a **single combined command** over “run A or B” unless they explicitly want options.
+- **Problems:** Assume they will **come back with errors** if something fails. Do not preemptively write troubleshooting essays.
+- **Planning vs doing:** Still align on big or risky changes when the repo’s process calls for it; keep routine execution minimal.
+
+## Maintain this rule (agent initiative)
+
+- **Periodically** (e.g. when starting substantive work in this repo, or after a stretch of chat where preferences surfaced), **re-read this file** and `.cursor/rules/` peers.
+- If the user states a new preference, or repeated friction shows the rule is wrong or incomplete, **update this file** without waiting to be asked. Keep it concise; one concern per section is fine, but avoid duplicate rules across files.
+
+## Docker frontend deps (evamp-ops)
+
+- `docker-compose.yml` uses a **named volume** `frontend_node_modules` so Linux deps match the container (host `node_modules` is macOS and breaks Vite/Rollup).
+- **Whenever `frontend/package.json` dependencies change** (add/remove/upgrade), remind the user or run: `cd /Users/marius/evamp-ops && docker compose run --rm frontend npm install && docker compose up -d` — do not assume `npm install` on the host alone fixes Docker.
