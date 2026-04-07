@@ -108,7 +108,8 @@ export default function MessageDashboard() {
   const [replyTranslation, setReplyTranslation] = useState<{ translated: string; backTranslated: string } | null>(null)
   const [translatingReply, setTranslatingReply] = useState(false)
   const [detectedLang, setDetectedLang] = useState<string>('en')
-  const syncingRef = useRef(false)
+  /** Count of in-flight client sync requests; full backfill can start while quick sync runs (backend preempt). */
+  const syncInflightRef = useRef(0)
   /** Increments on each thread click so stale eBay refresh results are ignored if user switched threads. */
   const selectThreadSeqRef = useRef(0)
   const [replyHeight, setReplyHeight] = useState(() => getStoredHeight(REPLY_HEIGHT_STORAGE_KEY))
@@ -326,8 +327,8 @@ export default function MessageDashboard() {
   )
 
   const handleSync = useCallback(async (full = false) => {
-    if (syncingRef.current) return
-    syncingRef.current = true
+    if (!full && syncInflightRef.current > 0) return
+    syncInflightRef.current += 1
     setSyncing(true)
     setError(null)
     setSyncStatus('syncing')
@@ -340,7 +341,7 @@ export default function MessageDashboard() {
       const res = await messagesAPI.sync(90000, full)
       setSyncStatus('success')
       setSyncMessage(res.data.message ?? `Synced: ${res.data.synced ?? 0} messages.`)
-      loadThreads()
+      loadThreads({ silent: true })
       loadFlaggedCount()
     } catch (e: unknown) {
       setSyncStatus('error')
@@ -364,8 +365,8 @@ export default function MessageDashboard() {
       )
       setError(isTimeout ? 'Request timed out. Check backend.' : isConflict ? 'Sync conflict. Try again.' : isAlreadySyncing ? 'Sync in progress.' : errMsg)
     } finally {
-      syncingRef.current = false
-      setSyncing(false)
+      syncInflightRef.current -= 1
+      setSyncing(syncInflightRef.current > 0)
     }
   }, [loadThreads, loadFlaggedCount])
 
@@ -539,7 +540,7 @@ export default function MessageDashboard() {
             setSyncStatus('syncing')
             setSyncMessage('Sync already in progress.')
           }
-        } else if (!res.data.is_syncing && syncStatus === 'syncing' && !syncingRef.current) {
+        } else if (!res.data.is_syncing && syncStatus === 'syncing' && syncInflightRef.current === 0) {
           // Backend finished but we didn't get the response (e.g. timeout), reset to idle
           setSyncStatus('idle')
           setSyncMessage('')
@@ -767,9 +768,8 @@ export default function MessageDashboard() {
         <button
           type="button"
           onClick={() => handleSync(true)}
-          disabled={syncing}
-          className="px-3 py-2 border border-gray-300 text-gray-800 rounded hover:bg-gray-50 disabled:opacity-50 text-sm"
-          title="Full backfill: all member threads (slower; may take several minutes)"
+          className="px-3 py-2 border border-gray-300 text-gray-800 rounded hover:bg-gray-50 text-sm"
+          title="Full backfill: all member threads. Click while Quick sync runs to preempt it (server stops at a safe point)."
         >
           Full backfill
         </button>

@@ -564,7 +564,14 @@ export const messagesAPI = {
     api.post<void>(`/api/messages/threads/${threadId}/refresh`, {}, { timeout: timeoutMs }),
   /** Incremental: default 90s. Full backfill: 5 min (align reverse-proxy timeouts in production). */
   sync: (timeoutMs = 90000, full = false) =>
-    api.post<{ message: string; synced: number }>(
+    api.post<{
+      message: string
+      synced: number
+      threads_synced?: number
+      ebay_threads_synced?: number
+      ebay_messages_synced?: number
+      interrupted?: boolean
+    }>(
       '/api/messages/sync',
       {},
       { timeout: full ? 300000 : timeoutMs, params: { full: full ? 'true' : undefined } }

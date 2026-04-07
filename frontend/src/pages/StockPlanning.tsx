@@ -4,6 +4,7 @@ import {
   buildOcSkuImportExports,
   downloadOcSkuImportZip,
 } from '../utils/ocSkuImportExport'
+import { stockUnitsFromOcInventory } from '../utils/stockPlanningInventory'
 
 /** Persist planned units per SKU in this browser (survives refresh; same machine only). */
 const UNITS_STORAGE_KEY = 'evampops.stockPlanning.unitsBySku'
@@ -106,6 +107,7 @@ export default function StockPlanning() {
   const [orderMessage, setOrderMessage] = useState('')
   const [generatingMessage, setGeneratingMessage] = useState(false)
   const [generatingOcInbound, setGeneratingOcInbound] = useState(false)
+  const [fillingFromOc, setFillingFromOc] = useState(false)
   const [exportNotice, setExportNotice] = useState<string | null>(null)
   const [analyticsLookbackDays, setAnalyticsLookbackDays] = useState(90)
   const [itemsPerCarton, setItemsPerCarton] = useState<number>(() => loadItemsPerCartonFromStorage())
@@ -257,6 +259,30 @@ export default function StockPlanning() {
     setTimeout(() => setCopied(false), 2000)
   }
 
+  const handleFillUnitsFromOcStock = async () => {
+    setFillingFromOc(true)
+    setError(null)
+    try {
+      const [invRes, mapRes] = await Promise.all([
+        inventoryStatusAPI.listInventory(),
+        inventoryStatusAPI.listSkuMappings(),
+      ])
+      const totals = stockUnitsFromOcInventory(mapRes.data, invRes.data)
+      setPlanRows((prev) => {
+        const next = prev.map((row) => {
+          const k = row.sku_code.trim().toLowerCase()
+          return totals[k] !== undefined ? { ...row, units: totals[k]! } : row
+        })
+        persistUnitsBySku(next)
+        return next
+      })
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to load OC inventory')
+    } finally {
+      setFillingFromOc(false)
+    }
+  }
+
   const handleGenerateOcInbound = async () => {
     if (activeRows.length === 0) return
     setGeneratingOcInbound(true)
@@ -361,7 +387,16 @@ export default function StockPlanning() {
       </div>
 
       {/* Action Buttons */}
-      <div className="flex gap-2 mb-4">
+      <div className="flex flex-wrap gap-2 mb-4">
+        <button
+          type="button"
+          onClick={handleFillUnitsFromOcStock}
+          disabled={loading || planRows.length === 0 || fillingFromOc}
+          className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 text-sm font-medium"
+          title="Sets Units to OrangeConnex available + in transit per SKU (Inventory status). Pull latest data there first if counts look stale. SKUs with no OC mapping or row are left unchanged."
+        >
+          {fillingFromOc ? 'Loading…' : 'Fill units from OC stock'}
+        </button>
         <button
           type="button"
           onClick={handleGenerateOrderMessage}

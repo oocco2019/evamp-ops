@@ -4,12 +4,25 @@ Messages API (Phase 4-6): threads, draft, send.
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
 _sync_lock = asyncio.Lock()
 _sync_in_progress = False
+# Set when POST /sync?full=true arrives while another sync holds the lock; the running sync
+# checks this after each committed page / phase and exits early so the full backfill can run.
+_sync_interrupt_event = asyncio.Event()
+
+
+async def _wait_until_lock_free(timeout: float = 300.0) -> None:
+    """Wait until no task holds `_sync_lock` (poll; lock is not directly awaitable)."""
+    deadline = time.monotonic() + timeout
+    while _sync_lock.locked():
+        if time.monotonic() > deadline:
+            raise asyncio.TimeoutError
+        await asyncio.sleep(0.05)
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1277,20 +1290,37 @@ async def sync_messages(
     Sync messages from eBay Message API (commerce/message). All synced messages are stored
     in the DB and retained indefinitely (no purge) for warranty and history. Incremental:
     only fetches conversations with activity since last sync unless full=1. Only one sync
-    runs at a time; concurrent calls receive 503.
+    runs at a time; concurrent calls receive 503. A **full** sync (full=1) signals any
+    running sync to stop after the current safe checkpoint (committed page), then runs.
     """
     global _sync_in_progress
     if _sync_lock.locked():
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Sync already in progress.",
-        )
+        if full:
+            _sync_interrupt_event.set()
+            logger.info("Messages sync: full backfill requested; signaling running sync to stop at next checkpoint")
+            try:
+                await _wait_until_lock_free(timeout=300.0)
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail="Current sync did not stop within 5 minutes; try again.",
+                )
+            _sync_interrupt_event.clear()
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Sync already in progress.",
+            )
+    elif full:
+        _sync_interrupt_event.clear()
+
     async with _sync_lock:
         _sync_in_progress = True
         try:
             return await _do_sync_messages(db, full_sync=full)
         finally:
             _sync_in_progress = False
+            _sync_interrupt_event.clear()
 
 
 async def _sync_from_members_full(
@@ -1298,10 +1328,13 @@ async def _sync_from_members_full(
     access_token: str,
     limit: int,
     seller_username: str,
+    *,
+    interruptible: bool = True,
 ) -> tuple[int, int]:
     """Run FROM_MEMBERS full sync (no start_time): paginate all conversations, fetch messages, upsert.
 
     Commits after each page so partial progress survives timeouts; media blobs stored per page like FROM_EBAY.
+    If interruptible is True, stops between pages when a full backfill is waiting to preempt an incremental run.
     """
     threads_added = 0
     messages_added = 0
@@ -1449,6 +1482,9 @@ async def _sync_from_members_full(
         await db.commit()
         for mid, mlist in page_messages_with_media:
             await _store_message_media_blobs(db, mid, mlist)
+        if interruptible and _sync_interrupt_event.is_set():
+            logger.info("Messages sync: FROM_MEMBERS full interrupted after safe page commit (offset=%s)", offset)
+            break
         total = conv_page.get("total") or 0
         offset += limit
         if offset >= total or not conv_page.get("next"):
@@ -1513,7 +1549,9 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
 
         if full_sync:
             logger.info("Messages sync: full_sync=True, FROM_MEMBERS only (no start_time)")
-            t, m = await _sync_from_members_full(db, access_token, limit, seller_username)
+            t, m = await _sync_from_members_full(
+                db, access_token, limit, seller_username, interruptible=False
+            )
             threads_synced += t
             messages_synced += m
         else:
@@ -1687,12 +1725,14 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                 for mid, mlist in incr_messages_with_media:
                     await _store_message_media_blobs(db, mid, mlist)
 
-            if need_periodic_full:
+            if need_periodic_full and not _sync_interrupt_event.is_set():
                 logger.info("Messages sync: running periodic full (FROM_MEMBERS, no start_time)")
                 t, m = await _sync_from_members_full(db, access_token, limit, seller_username)
                 threads_synced += t
                 messages_synced += m
                 ran_full_sync = True
+            elif need_periodic_full and _sync_interrupt_event.is_set():
+                logger.info("Messages sync: skipping periodic full (full backfill waiting)")
 
         # Sync FROM_EBAY (eBay system messages: returns, cases, promotions)
         # HTML content is stripped to plain text to reduce size
@@ -1700,162 +1740,169 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
         # Tracks offset to enable progressive historical sync across multiple runs
         ebay_threads_synced = 0
         ebay_messages_synced = 0
-        
-        # Load saved offset for progressive historical sync
-        ebay_offset_result = await db.execute(
-            select(SyncMetadata).where(SyncMetadata.key == "ebay_messages_offset")
-        )
-        ebay_offset_meta = ebay_offset_result.scalar_one_or_none()
-        offset = int(ebay_offset_meta.value) if ebay_offset_meta else 0
-        # Normal sync: 1 page per run so sync finishes quickly; full_sync: more pages to backfill
-        max_pages = 5 if full_sync else 1
-        pages_fetched = 0
-        reached_end = False
-        try:
-            while pages_fetched < max_pages:
-                conv_page = await fetch_message_conversations_page(
-                    access_token,
-                    conversation_type="FROM_EBAY",
-                    limit=limit,
-                    offset=offset,
-                )
-                pages_fetched += 1
-                conversations = conv_page.get("conversations") or []
-                if not conversations:
-                    break
-                ebay_sem = asyncio.Semaphore(10)
 
-                async def fetch_ebay_messages(cid: str):
-                    async with ebay_sem:
-                        return await fetch_all_conversation_messages(
-                            access_token, cid, conversation_type="FROM_EBAY"
-                        )
+        if not _sync_interrupt_event.is_set():
+            # Load saved offset for progressive historical sync
+            ebay_offset_result = await db.execute(
+                select(SyncMetadata).where(SyncMetadata.key == "ebay_messages_offset")
+            )
+            ebay_offset_meta = ebay_offset_result.scalar_one_or_none()
+            offset = int(ebay_offset_meta.value) if ebay_offset_meta else 0
+            # Normal sync: 1 page per run so sync finishes quickly; full_sync: more pages to backfill
+            max_pages = 5 if full_sync else 1
+            pages_fetched = 0
+            reached_end = False
+            try:
+                while pages_fetched < max_pages:
+                    conv_page = await fetch_message_conversations_page(
+                        access_token,
+                        conversation_type="FROM_EBAY",
+                        limit=limit,
+                        offset=offset,
+                    )
+                    pages_fetched += 1
+                    conversations = conv_page.get("conversations") or []
+                    if not conversations:
+                        break
+                    ebay_sem = asyncio.Semaphore(10)
 
-                conv_ids = [c.get("conversationId") for c in conversations if c.get("conversationId")]
-                ebay_msg_results = await asyncio.gather(
-                    *[fetch_ebay_messages(cid) for cid in conv_ids],
-                    return_exceptions=True,
-                )
-                id_to_ebay_msgs = dict(zip(conv_ids, ebay_msg_results))
+                    async def fetch_ebay_messages(cid: str):
+                        async with ebay_sem:
+                            return await fetch_all_conversation_messages(
+                                access_token, cid, conversation_type="FROM_EBAY"
+                            )
 
-                # Batch-load existing message IDs for this page
-                page_msg_ids = []
-                for cid in conv_ids:
-                    msgs_result = id_to_ebay_msgs.get(cid)
-                    if isinstance(msgs_result, BaseException):
-                        continue
-                    for m in msgs_result or []:
-                        mid = m.get("messageId")
-                        if mid:
-                            page_msg_ids.append(mid)
-                existing_ebay_by_id = {}
-                if page_msg_ids:
-                    existing_ebay_result = await db.execute(select(Message).where(Message.message_id.in_(page_msg_ids)))
-                    for msg_row in existing_ebay_result.scalars().all():
-                        existing_ebay_by_id[msg_row.message_id] = msg_row
+                    conv_ids = [c.get("conversationId") for c in conversations if c.get("conversationId")]
+                    ebay_msg_results = await asyncio.gather(
+                        *[fetch_ebay_messages(cid) for cid in conv_ids],
+                        return_exceptions=True,
+                    )
+                    id_to_ebay_msgs = dict(zip(conv_ids, ebay_msg_results))
 
-                page_threads = 0
-                page_messages = 0
-                ebay_page_messages_with_media: List[tuple] = []
-                for conv in conversations:
-                    conversation_id = conv.get("conversationId")
-                    if not conversation_id:
-                        continue
-                    msgs_result = id_to_ebay_msgs.get(conversation_id)
-                    if isinstance(msgs_result, BaseException):
-                        logger.warning("FROM_EBAY messages fetch failed for %s: %s", conversation_id, msgs_result)
-                        continue
-                    msgs = msgs_result
-                    thread = await db.get(MessageThread, conversation_id)
-                    if not thread:
-                        ref_id = conv.get("referenceId")
-                        ref_type = conv.get("referenceType")
-                        created_date = _parse_iso_to_naive_utc(conv.get("createdDate"))
-                        thread = MessageThread(
-                            thread_id=conversation_id,
-                            buyer_username="eBay",
-                            ebay_item_id=ref_id if ref_type == "LISTING" else None,
-                            ebay_order_id=ref_id if ref_type == "ORDER" else None,
-                            sku=None,
-                            created_at=created_date or datetime.utcnow(),
-                        )
-                        db.add(thread)
-                        await db.flush()
-                        page_threads += 1
-                    for m in msgs:
-                        msg_id = m.get("messageId")
-                        if not msg_id:
+                    # Batch-load existing message IDs for this page
+                    page_msg_ids = []
+                    for cid in conv_ids:
+                        msgs_result = id_to_ebay_msgs.get(cid)
+                        if isinstance(msgs_result, BaseException):
                             continue
-                        existing = existing_ebay_by_id.get(msg_id)
-                        if existing:
-                            existing.is_read = bool(m.get("readStatus", False))
-                            media_list = _normalize_message_media(m.get("messageMedia") or [])
-                            existing.media = media_list if media_list else None
+                        for m in msgs_result or []:
+                            mid = m.get("messageId")
+                            if mid:
+                                page_msg_ids.append(mid)
+                    existing_ebay_by_id = {}
+                    if page_msg_ids:
+                        existing_ebay_result = await db.execute(select(Message).where(Message.message_id.in_(page_msg_ids)))
+                        for msg_row in existing_ebay_result.scalars().all():
+                            existing_ebay_by_id[msg_row.message_id] = msg_row
+
+                    page_threads = 0
+                    page_messages = 0
+                    ebay_page_messages_with_media: List[tuple] = []
+                    for conv in conversations:
+                        conversation_id = conv.get("conversationId")
+                        if not conversation_id:
+                            continue
+                        msgs_result = id_to_ebay_msgs.get(conversation_id)
+                        if isinstance(msgs_result, BaseException):
+                            logger.warning("FROM_EBAY messages fetch failed for %s: %s", conversation_id, msgs_result)
+                            continue
+                        msgs = msgs_result
+                        thread = await db.get(MessageThread, conversation_id)
+                        if not thread:
+                            ref_id = conv.get("referenceId")
+                            ref_type = conv.get("referenceType")
+                            created_date = _parse_iso_to_naive_utc(conv.get("createdDate"))
+                            thread = MessageThread(
+                                thread_id=conversation_id,
+                                buyer_username="eBay",
+                                ebay_item_id=ref_id if ref_type == "LISTING" else None,
+                                ebay_order_id=ref_id if ref_type == "ORDER" else None,
+                                sku=None,
+                                created_at=created_date or datetime.utcnow(),
+                            )
+                            db.add(thread)
+                            await db.flush()
+                            page_threads += 1
+                        for m in msgs:
+                            msg_id = m.get("messageId")
+                            if not msg_id:
+                                continue
+                            existing = existing_ebay_by_id.get(msg_id)
+                            if existing:
+                                existing.is_read = bool(m.get("readStatus", False))
+                                media_list = _normalize_message_media(m.get("messageMedia") or [])
+                                existing.media = media_list if media_list else None
+                                if media_list:
+                                    ebay_page_messages_with_media.append((msg_id, media_list))
+                                continue
+                            raw_body = m.get("messageBody") or ""
+                            body = _strip_html_to_text(raw_body) if "<" in raw_body else raw_body
+                            media = m.get("messageMedia") or []
+                            media_list = _normalize_message_media(media)
+                            sender = (m.get("senderUsername") or "eBay").strip()
+                            subject = (m.get("subject") or "").strip() or None
+                            ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
+                            new_msg = Message(
+                                message_id=msg_id,
+                                thread_id=conversation_id,
+                                sender_type="ebay",
+                                sender_username=sender,
+                                subject=subject,
+                                content=body,
+                                media=media_list if media_list else None,
+                                is_read=bool(m.get("readStatus", False)),
+                                ebay_created_at=ebay_created,
+                            )
+                            db.add(new_msg)
+                            page_messages += 1
                             if media_list:
                                 ebay_page_messages_with_media.append((msg_id, media_list))
-                            continue
-                        raw_body = m.get("messageBody") or ""
-                        body = _strip_html_to_text(raw_body) if "<" in raw_body else raw_body
-                        media = m.get("messageMedia") or []
-                        media_list = _normalize_message_media(media)
-                        sender = (m.get("senderUsername") or "eBay").strip()
-                        subject = (m.get("subject") or "").strip() or None
-                        ebay_created = _parse_iso_to_naive_utc(m.get("createdDate")) or datetime.utcnow()
-                        new_msg = Message(
-                            message_id=msg_id,
-                            thread_id=conversation_id,
-                            sender_type="ebay",
-                            sender_username=sender,
-                            subject=subject,
-                            content=body,
-                            media=media_list if media_list else None,
-                            is_read=bool(m.get("readStatus", False)),
-                            ebay_created_at=ebay_created,
-                        )
-                        db.add(new_msg)
-                        page_messages += 1
-                        if media_list:
-                            ebay_page_messages_with_media.append((msg_id, media_list))
-                    if msgs:
-                        last_m = max(msgs, key=lambda x: x.get("createdDate") or "")
-                        thread.last_message_at = _parse_iso_to_naive_utc(last_m.get("createdDate"))
-                        body_preview = (last_m.get("messageBody") or "").strip()
-                        thread.last_message_preview = (_strip_html_to_text(body_preview)[:497] + "…") if len(body_preview) > 500 else (_strip_html_to_text(body_preview) if "<" in body_preview else body_preview or None)
-                        thread.message_count = len(msgs)
-                        thread.unread_count = sum(1 for x in msgs if not x.get("readStatus", False))
-                # Commit after each page so progress is saved
-                ebay_threads_synced += page_threads
-                ebay_messages_synced += page_messages
-                logger.info("FROM_EBAY page %d (offset %d): +%d threads, +%d messages", pages_fetched, offset, page_threads, page_messages)
-                total = conv_page.get("total") or 0
-                offset += limit
-                
-                # Save offset after each page so progress survives timeout
-                if ebay_offset_meta:
-                    ebay_offset_meta.value = str(offset)
-                else:
-                    ebay_offset_meta = SyncMetadata(key="ebay_messages_offset", value=str(offset))
-                    db.add(ebay_offset_meta)
-                await db.commit()
-                for mid, mlist in ebay_page_messages_with_media:
-                    await _store_message_media_blobs(db, mid, mlist)
-                
-                if offset >= total or not conv_page.get("next"):
-                    reached_end = True
-                    break
-            threads_synced += ebay_threads_synced
-            messages_synced += ebay_messages_synced
-            
-            # Reset offset to 0 if we reached the end (for future incremental syncs)
-            if reached_end:
-                if ebay_offset_meta:
-                    ebay_offset_meta.value = "0"
+                        if msgs:
+                            last_m = max(msgs, key=lambda x: x.get("createdDate") or "")
+                            thread.last_message_at = _parse_iso_to_naive_utc(last_m.get("createdDate"))
+                            body_preview = (last_m.get("messageBody") or "").strip()
+                            thread.last_message_preview = (_strip_html_to_text(body_preview)[:497] + "…") if len(body_preview) > 500 else (_strip_html_to_text(body_preview) if "<" in body_preview else body_preview or None)
+                            thread.message_count = len(msgs)
+                            thread.unread_count = sum(1 for x in msgs if not x.get("readStatus", False))
+                    # Commit after each page so progress is saved
+                    ebay_threads_synced += page_threads
+                    ebay_messages_synced += page_messages
+                    logger.info("FROM_EBAY page %d (offset %d): +%d threads, +%d messages", pages_fetched, offset, page_threads, page_messages)
+                    total = conv_page.get("total") or 0
+                    offset += limit
+
+                    # Save offset after each page so progress survives timeout
+                    if ebay_offset_meta:
+                        ebay_offset_meta.value = str(offset)
+                    else:
+                        ebay_offset_meta = SyncMetadata(key="ebay_messages_offset", value=str(offset))
+                        db.add(ebay_offset_meta)
                     await db.commit()
-                logger.info("FROM_EBAY: reached end of historical data, offset reset to 0")
-        except httpx.HTTPStatusError as e:
-            logger.warning("FROM_EBAY HTTP error %s, partial progress saved", e.response.status_code)
-        except Exception as e:
-            logger.warning("FROM_EBAY sync error: %s, partial progress saved", e)
+                    for mid, mlist in ebay_page_messages_with_media:
+                        await _store_message_media_blobs(db, mid, mlist)
+
+                    if not full_sync and _sync_interrupt_event.is_set():
+                        logger.info("Messages sync: FROM_EBAY interrupted after safe page commit (offset=%s)", offset)
+                        break
+
+                    if offset >= total or not conv_page.get("next"):
+                        reached_end = True
+                        break
+                threads_synced += ebay_threads_synced
+                messages_synced += ebay_messages_synced
+
+                # Reset offset to 0 if we reached the end (for future incremental syncs)
+                if reached_end:
+                    if ebay_offset_meta:
+                        ebay_offset_meta.value = "0"
+                        await db.commit()
+                    logger.info("FROM_EBAY: reached end of historical data, offset reset to 0")
+            except httpx.HTTPStatusError as e:
+                logger.warning("FROM_EBAY HTTP error %s, partial progress saved", e.response.status_code)
+            except Exception as e:
+                logger.warning("FROM_EBAY sync error: %s, partial progress saved", e)
+        else:
+            logger.info("Messages sync: skipping FROM_EBAY (full backfill waiting)")
 
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         meta_updates: list[tuple[str, str]] = [
@@ -1890,10 +1937,12 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
             detail=f"Sync failed: {e!s}",
         )
 
+    interrupted = _sync_interrupt_event.is_set()
     sync_summary["threads_synced"] = threads_synced
     sync_summary["messages_synced"] = messages_synced
     sync_summary["ebay_threads_synced"] = ebay_threads_synced
     sync_summary["ebay_messages_synced"] = ebay_messages_synced
+    sync_summary["interrupted"] = interrupted
     if ran_full_sync and not full_sync:
         sync_summary["periodic_full_run"] = True
     sync_summary["at"] = datetime.now(timezone.utc).isoformat()
@@ -1914,7 +1963,9 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
         ebay_threads_synced,
         ebay_messages_synced,
     )
-    if threads_synced or messages_synced:
+    if interrupted:
+        msg = f"Stopped after safe checkpoint: {threads_synced} thread(s), {messages_synced} message(s) (full backfill starting)."
+    elif threads_synced or messages_synced:
         msg = f"Synced {threads_synced} thread(s), {messages_synced} message(s)."
     else:
         msg = "No new conversations or messages to sync."
@@ -1924,6 +1975,7 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
         "threads_synced": threads_synced,
         "ebay_threads_synced": ebay_threads_synced,
         "ebay_messages_synced": ebay_messages_synced,
+        "interrupted": interrupted,
     }
 
 
