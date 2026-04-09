@@ -1,0 +1,1025 @@
+{
+	"info": {
+		"_postman_id": "c1f0fafc-0695-49a9-8296-2f4ef3d1ad0b",
+		"name": "OC openAPI-Stage",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "34466110"
+	},
+	"item": [
+		{
+			"name": "OAuth",
+			"item": [
+				{
+					"name": "Oauth",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									"//The steps to start OC Integration",
+									"//1. Contact OC IT team and Local Custom Service Team and provide your Company information(3PP Name, 3PP Type, 3PP Country/Region,etc)",
+									"//2. Register an OC test account on OC Stage environment(Sandbox) and get the OCID(https://fulfillment-stage.orangeconnex.com/seller/register),contact local team to verify your OC account.",
+									"//3. OC IT team will generate a unique keyset(client_id & Secret) for each 3PP.",
+									"//4. With the keyset(client_id & Secret) , you could start to call OC openAPI. ",
+									"//5. When the development is done, contact OC IT team to generate a ClientKey & SecretKey on PROD environment. Then you could start the production validation."
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "https://openapi-stage-hk.orangeconnex.com/oauth/authorize?response_type=code&client_id=fc0509cc-fff5-4b27-a889-4d6849193cde&redirect_uri=https://www.google.com&state=all",
+							"protocol": "https",
+							"host": [
+								"openapi-stage-hk",
+								"orangeconnex",
+								"com"
+							],
+							"path": [
+								"oauth",
+								"authorize"
+							],
+							"query": [
+								{
+									"key": "response_type",
+									"value": "code",
+									"description": "fixed value"
+								},
+								{
+									"key": "client_id",
+									"value": "fc0509cc-fff5-4b27-a889-4d6849193cde",
+									"description": "contact oc team offline"
+								},
+								{
+									"key": "redirect_uri",
+									"value": "https://www.google.com",
+									"description": "any url"
+								},
+								{
+									"key": "state",
+									"value": "all",
+									"description": "all or state=10057014(register an OC account in Stage environment.)"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "accessToken&refreshToken",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer YmQxZDE5NzEtZDBkYi0xMWVhLWI0YTEtMDA1MDU2OTRjMjdiOjdkMWVkZTc0LTQwYWEtNDkxMy1hODlhLTE1ZDI0NTBhOWE1Ng==",
+								"disabled": true
+							}
+						],
+						"url": {
+							"raw": "https://openapi-stage-hk.orangeconnex.com/oauth/token?grant_type=authorization_code&client_id=fc0509cc-fff5-4b27-a889-4d6849193cde&redirect_uri=https://www.baidu.com&code=YQfS28ZN3dVKoUPsOfIXt%252Fn30vzIVSysaDXOmVOkAJXZl%252F14EpM%252BqKbC%252F8RJHnbVVwSCq0Sf%252FSDhfTI1%252BeX5BPZoghm42100y%252BUOu3Fiw4QagT2MIPQ%252BJppkEkbfOdxIwT54ARgJ4g6NS%252F8bymYuReZGljuxNPOAjXt2IxYnz8WhFX2dQYPjsRXT4pbbhtBYdWnayAme7FGJrPiZxnKBPnbj%252BbDTrSQY2wDYgDSvdofAJqViGAZG1SZlmxUBsylYYbfm8f6ILw%252BO313tEcb%252BiemCsJoEHyPgZ6w32%252FHOadrT9W8SSucvS%252BLW6FnR911LYSF8aRk8orQbpWhQQf2O1W6fO0fV8Rzl%252BHmsbrYlNA9yt074lOlAy8DUGUnQZEHxEVnN%252FPyu%252FDTGBk%252BfQXb00PzSkYWC31JNZl0SJaX91sUBb%252FdC4RAPTbpalSwCe2TqR9c0OCycobZTyNywJMKmI%252FzxK8RwR0ULnO8X4Kx%252BhWhtQiWFmyDOxkQv998%252F2RrOxeEAKtXzjW%252B%252BqMcfqSO7U%252FEmCS1fftCLl4lnzFiQTeKu7Iq5IcBk3gXpRznUH8wlxix0WJBmb8cuol6L295aZX0nNzG5Yis8bxk0Ms7sKz39ctL%252BeI5nTNnqVXhv2aPSESM9g3o20gMcn0u%252BeinXUIg162aUPacVRC8d%252BX9esW4%253D",
+							"protocol": "https",
+							"host": [
+								"openapi-stage-hk",
+								"orangeconnex",
+								"com"
+							],
+							"path": [
+								"oauth",
+								"token"
+							],
+							"query": [
+								{
+									"key": "grant_type",
+									"value": "authorization_code",
+									"description": "fixed value"
+								},
+								{
+									"key": "client_id",
+									"value": "fc0509cc-fff5-4b27-a889-4d6849193cde",
+									"description": "provide by oc offline"
+								},
+								{
+									"key": "redirect_uri",
+									"value": "https://www.baidu.com",
+									"description": "any url but need to be the same as oauth"
+								},
+								{
+									"key": "code",
+									"value": "YQfS28ZN3dVKoUPsOfIXt%252Fn30vzIVSysaDXOmVOkAJXZl%252F14EpM%252BqKbC%252F8RJHnbVVwSCq0Sf%252FSDhfTI1%252BeX5BPZoghm42100y%252BUOu3Fiw4QagT2MIPQ%252BJppkEkbfOdxIwT54ARgJ4g6NS%252F8bymYuReZGljuxNPOAjXt2IxYnz8WhFX2dQYPjsRXT4pbbhtBYdWnayAme7FGJrPiZxnKBPnbj%252BbDTrSQY2wDYgDSvdofAJqViGAZG1SZlmxUBsylYYbfm8f6ILw%252BO313tEcb%252BiemCsJoEHyPgZ6w32%252FHOadrT9W8SSucvS%252BLW6FnR911LYSF8aRk8orQbpWhQQf2O1W6fO0fV8Rzl%252BHmsbrYlNA9yt074lOlAy8DUGUnQZEHxEVnN%252FPyu%252FDTGBk%252BfQXb00PzSkYWC31JNZl0SJaX91sUBb%252FdC4RAPTbpalSwCe2TqR9c0OCycobZTyNywJMKmI%252FzxK8RwR0ULnO8X4Kx%252BhWhtQiWFmyDOxkQv998%252F2RrOxeEAKtXzjW%252B%252BqMcfqSO7U%252FEmCS1fftCLl4lnzFiQTeKu7Iq5IcBk3gXpRznUH8wlxix0WJBmb8cuol6L295aZX0nNzG5Yis8bxk0Ms7sKz39ctL%252BeI5nTNnqVXhv2aPSESM9g3o20gMcn0u%252BeinXUIg162aUPacVRC8d%252BX9esW4%253D",
+									"description": "oauth response code"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "refresh accessToken",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Authorization",
+								"value": "Bearer YmQxZDE5NzEtZDBkYi0xMWVhLWI0YTEtMDA1MDU2OTRjMjdiOjdkMWVkZTc0LTQwYWEtNDkxMy1hODlhLTE1ZDI0NTBhOWE1Ng=="
+							}
+						],
+						"url": {
+							"raw": "https://openapi-stage-hk.orangeconnex.com/oauth/token?grant_type=refresh_token&refresh_token={{RefreshToken}}&client_id=fc0509cc-fff5-4b27-a889-4d6849193cde",
+							"protocol": "https",
+							"host": [
+								"openapi-stage-hk",
+								"orangeconnex",
+								"com"
+							],
+							"path": [
+								"oauth",
+								"token"
+							],
+							"query": [
+								{
+									"key": "grant_type",
+									"value": "refresh_token"
+								},
+								{
+									"key": "refresh_token",
+									"value": "{{RefreshToken}}",
+									"description": "refresh token Expired within one year"
+								},
+								{
+									"key": "client_id",
+									"value": "fc0509cc-fff5-4b27-a889-4d6849193cde",
+									"description": "clientid"
+								}
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "SKU",
+			"item": [
+				{
+					"name": "SKU Creation v3",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									"//设置全局时间戳 Set global timestamp",
+									"postman.setGlobalVariable(\"time\",Math.round(new Date().getTime()));",
+									"time = postman.getGlobalVariable('time');",
+									"",
+									"//设置KEY_WORD为全局变量 (clientKey) Set KEY-WORD as a global variable",
+									"postman.setGlobalVariable(\"key\",\"fc0509cc-fff5-4b27-a889-4d6849193cde\");",
+									"clientKey = postman.getGlobalVariable(\"key\");",
+									"",
+									"//字符串进行md5加密//md5 encrypted",
+									"var reqUrl = \"/\"+pm.request.url.path.join(\"/\");",
+									"var secretKey = \"2c5fb5b3-cee9-465c-809c-d62a323e3014\";",
+									"var reqBody = request.data;",
+									"",
+									"var str = reqUrl + \"|\" + \"\" + \"|\" + clientKey + \"|\" + secretKey;",
+									"var strmd5= CryptoJS.MD5(str);",
+									"postman.setGlobalVariable(\"sign\",strmd5);"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Access-Token",
+								"value": "Bearer {{AccessToken}}"
+							},
+							{
+								"key": "TimeStamp",
+								"value": "{{time}}",
+								"description": "set time = Math.round(new Date().getTime())"
+							},
+							{
+								"key": "clientKey",
+								"value": "fc0509cc-fff5-4b27-a889-4d6849193cde",
+								"description": "set key = clientkey"
+							},
+							{
+								"key": "vAuthorization",
+								"value": "{{sign}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"data\":[\n       {\n            \"referenceSKUID\":\"3PPwrtest099\",\n            \"SKUNameList\":[\n                {\n                    \"SKUName\":\"wr3PP接口测试test099\",\n                    \"languageCode\":\"en-US\"\n                }\n            ],\n            \"SKUPictureURLList\":[\n                {\n                    \"SKUPictureURL\":\"https://ss1.bdstatic.com/70cFvXSh_Q1YnxGkpoWK1HF6hhy/it/u=877002574,2183807283&fm=26&gp=0.jpg\"\n                }\n            ],\n            \"withBattery\":false,\n            \"salesURL\":\"https://www.baidu.com\",\n            \"serviceRegionList\":[\n                {\n                    \"serviceRegion\":\"DE\",\n                    \"withBrand\":\"WOB\"\n                }\n\n            ]\n       }\n    ]\n}"
+						},
+						"url": {
+							"raw": "https://openapi-stage-hk.orangeconnex.com/openapi/3pp/sku/v3/creation",
+							"protocol": "https",
+							"host": [
+								"openapi-stage-hk",
+								"orangeconnex",
+								"com"
+							],
+							"path": [
+								"openapi",
+								"3pp",
+								"sku",
+								"v3",
+								"creation"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "SKUQuery v3",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									"//设置全局时间戳 Set global timestamp",
+									"postman.setGlobalVariable(\"time\",Math.round(new Date().getTime()));",
+									"time = postman.getGlobalVariable('time');",
+									"",
+									"//设置KEY_WORD为全局变量 (clientKey) Set KEY-WORD as a global variable",
+									"postman.setGlobalVariable(\"key\",\"fc0509cc-fff5-4b27-a889-4d6849193cde\");",
+									"clientKey = postman.getGlobalVariable(\"key\");",
+									"",
+									"//字符串进行md5加密//md5 encrypted",
+									"var reqUrl = \"/\"+pm.request.url.path.join(\"/\");",
+									"var secretKey = \"2c5fb5b3-cee9-465c-809c-d62a323e3014\";",
+									"var reqBody = request.data;",
+									"",
+									"var str = reqUrl + \"|\" + \"\" + \"|\" + clientKey + \"|\" + secretKey;",
+									"var strmd5= CryptoJS.MD5(str);",
+									"postman.setGlobalVariable(\"sign\",strmd5);"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Access-Token",
+								"value": "Bearer {{AccessToken}}"
+							},
+							{
+								"key": "clientKey",
+								"value": "fc0509cc-fff5-4b27-a889-4d6849193cde"
+							},
+							{
+								"key": "vAuthorization",
+								"value": "{{sign}}"
+							},
+							{
+								"key": "TimeStamp",
+								"value": "{{time}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"data\":{\n        \"startTime\":\"2022-10-31+0800\",\n        \"endTime\":\"2022-10-31+0800\",\n        \"referenceSKUIDList\":[\n            {\n                \"referenceSKUID\":\"3PPwrtest003\"\n            }\n        ],\n        \"mfskulist\":[\n            {\n                \"mfskuid\":\"OC0000250260096\"\n            }\n        ],\n        \"sellerSKUIDList\":[\n            {\n                \"sellerSKUID\":\"3PPwrtest003\"\n            }\n        ]\n    }\n}"
+						},
+						"url": {
+							"raw": "https://openapi-stage-hk.orangeconnex.com/openapi/3pp/sku/v3/query",
+							"protocol": "https",
+							"host": [
+								"openapi-stage-hk",
+								"orangeconnex",
+								"com"
+							],
+							"path": [
+								"openapi",
+								"3pp",
+								"sku",
+								"v3",
+								"query"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Inbound",
+			"item": [
+				{
+					"name": "StockSnapshot v2",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									"//设置全局时间戳 Set global timestamp",
+									"postman.setGlobalVariable(\"time\",Math.round(new Date().getTime()));",
+									"time = postman.getGlobalVariable('time');",
+									"",
+									"//设置KEY_WORD为全局变量 (clientKey) Set KEY-WORD as a global variable",
+									"postman.setGlobalVariable(\"key\",\"fc0509cc-fff5-4b27-a889-4d6849193cde\");",
+									"clientKey = postman.getGlobalVariable(\"key\");",
+									"",
+									"//字符串进行md5加密//md5 encrypted",
+									"var reqUrl = \"/\"+pm.request.url.path.join(\"/\");",
+									"var secretKey = \"2c5fb5b3-cee9-465c-809c-d62a323e3014\";",
+									"var reqBody = request.data;",
+									"",
+									"var str = reqUrl + \"|\" + \"\" + \"|\" + clientKey + \"|\" + secretKey;",
+									"var strmd5= CryptoJS.MD5(str);",
+									"postman.setGlobalVariable(\"sign\",strmd5);"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Access-Token",
+								"value": "Bearer {{AccessToken}}"
+							},
+							{
+								"key": "clientKey",
+								"value": "fc0509cc-fff5-4b27-a889-4d6849193cde"
+							},
+							{
+								"key": "vAuthorization",
+								"value": "{{sign}}"
+							},
+							{
+								"key": "TimeStamp",
+								"value": "{{time}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n\n  \"data\": {\n    \"pageNumber\": 1,\n    \"pageSize\": 200,\n    \"serviceRegionList\": [\n      {\n        \"serviceRegion\": \"UK\"\n      }\n    ],\n    \"skuList\": [\n      {\n        \"mfSkuId\": \"OC0000250260096\"\n      }\n    ]\n  },\n\n  \"timestamp\": 0\n}"
+						},
+						"url": {
+							"raw": "https://openapi-stage-hk.orangeconnex.com/openapi/3pp/inventory/v2/snapshot",
+							"protocol": "https",
+							"host": [
+								"openapi-stage-hk",
+								"orangeconnex",
+								"com"
+							],
+							"path": [
+								"openapi",
+								"3pp",
+								"inventory",
+								"v2",
+								"snapshot"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "PlaceInboundOrder",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									""
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						},
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									"//设置全局时间戳 Set global timestamp",
+									"postman.setGlobalVariable(\"time\",Math.round(new Date().getTime()));",
+									"time = postman.getGlobalVariable('time');",
+									"",
+									"//设置KEY_WORD为全局变量 (clientKey) Set KEY-WORD as a global variable",
+									"postman.setGlobalVariable(\"key\",\"fc0509cc-fff5-4b27-a889-4d6849193cde\");",
+									"clientKey = postman.getGlobalVariable(\"key\");",
+									"",
+									"//字符串进行md5加密//md5 encrypted",
+									"var reqUrl = \"/\"+pm.request.url.path.join(\"/\");",
+									"var secretKey = \"2c5fb5b3-cee9-465c-809c-d62a323e3014\";",
+									"var reqBody = request.data;",
+									"",
+									"var str = reqUrl + \"|\" + \"\" + \"|\" + clientKey + \"|\" + secretKey;",
+									"var strmd5= CryptoJS.MD5(str);",
+									"postman.setGlobalVariable(\"sign\",strmd5);"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "vendorCode",
+								"value": "4PX",
+								"disabled": true
+							},
+							{
+								"key": "usercode",
+								"value": "11137313",
+								"disabled": true
+							},
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Access-Token",
+								"value": "Bearer {{AccessToken}}"
+							},
+							{
+								"key": "clientKey",
+								"value": "fc0509cc-fff5-4b27-a889-4d6849193cde"
+							},
+							{
+								"key": "vAuthorization",
+								"value": "{{sign}}"
+							},
+							{
+								"key": "TimeStamp",
+								"value": "{{time}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\r\n    \"messageId\": \"11111111111EGWG\",\r\n    \"timeStamp\": 1646377038,\r\n    \"data\": {\r\n        \"sellerInboundNumber\": \"1\",\r\n        \"serviceRegion\": \"UK\",\r\n        \"shippingFrom\": \"GB\",\r\n        \"shippingMethod\": \"EX\", \r\n        \"transportMethod\": \"TK\", \r\n        \"ETA\": \"2022-11-08+0800\",\r\n        \"VAT\": \"22313\",\r\n        \"cartonList\": [\r\n            {\r\n                \"cartonNumber\": \"C01\",\r\n                \"sellerCartonNumber\": \"C01\",\r\n                \"cartonOriginCountry\": \"UK\",\r\n                \"labelSize\": \"2\",\r\n                \"productList\": [\r\n                    {\r\n                        \"MFSKUID\": \"OC0000001279158\",\r\n                        \"quantity\": \"10\"\r\n                    }\r\n                ]\r\n            },\r\n            {\r\n                \"sellerCartonNumber\": \"C02\",\r\n                \"productList\": [\r\n                    {\r\n                        \"MFSKUID\": \"OC0000011500022\",\r\n                        \"quantity\": \"15\"\r\n                    }\r\n                ]\r\n            }\r\n        ]\r\n    }\r\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "https://openapi-stage-hk.orangeconnex.com/openapi/3pp/inbound/v1/creation",
+							"protocol": "https",
+							"host": [
+								"openapi-stage-hk",
+								"orangeconnex",
+								"com"
+							],
+							"path": [
+								"openapi",
+								"3pp",
+								"inbound",
+								"v1",
+								"creation"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "Outbound",
+			"item": [
+				{
+					"name": "Place Outbound Order",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									"//设置全局时间戳 Set global timestamp",
+									"postman.setGlobalVariable(\"time\",Math.round(new Date().getTime()));",
+									"time = postman.getGlobalVariable('time');",
+									"",
+									"//设置KEY_WORD为全局变量 (clientKey) Set KEY-WORD as a global variable",
+									"postman.setGlobalVariable(\"key\",\"fc0509cc-fff5-4b27-a889-4d6849193cde\");",
+									"clientKey = postman.getGlobalVariable(\"key\");",
+									"",
+									"//字符串进行md5加密//md5 encrypted",
+									"var reqUrl = \"/\"+pm.request.url.path.join(\"/\");",
+									"var secretKey = \"2c5fb5b3-cee9-465c-809c-d62a323e3014\";",
+									"var reqBody = request.data;",
+									"",
+									"var str = reqUrl + \"|\" + \"\" + \"|\" + clientKey + \"|\" + secretKey;",
+									"var strmd5= CryptoJS.MD5(str);",
+									"postman.setGlobalVariable(\"sign\",strmd5);"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "Access-Token",
+								"value": "Bearer {{AccessToken}}"
+							},
+							{
+								"key": "clientKey",
+								"value": "fc0509cc-fff5-4b27-a889-4d6849193cde"
+							},
+							{
+								"key": "vAuthorization",
+								"value": "{{sign}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"data\":[\n        {\n            \"companyName\":\"OrangeConnex-Tiaoling Team\",\n            \"consigneeAddress1\":\"133 Elm Tree Ave,\",//required\n            \"consigneeAddress2\":\"\",\n            \"consigneeCity\":\"Coventry\",\n            \"consigneeCountryCode\":\"GB\",//required\n            \"consigneeEmail\":\"rong.wang@itiaoling.com\",\n            \"consigneeName\":\"Jessica Wang\",//required\n            \"consigneePhone\":\"077-4639677\",\n            \"consigneeProvinceOrState\":\"West MidLands\",\n            \"consigneeZipCode\":\"CV4 9ES\",\n            //\"eBayOrderId\":\"\",\n            \"orderPlatform\":\"AliExpress\",\n            \"productList\":[\n                {\n                    //\"currency\":\"GBP\",//Currency of the declared value;\n                    //\"declaredValue\":10,\n                    //\"eBayItemId\":\"12345678912\",\n                    //\"eBayTransactionId\":\"\",\n                    //eBayItemID+eBayTransactionID to avoid duplicated order;\n                    \"mfSkuId\":\"OC0000001279158\",\n                    \"skuQuantity\": 1\n                }\n            ],\n            \"referenceNumber\":\"#1003\",\n            \"remarks\":\"wrtestorder003\",\n            \"serviceRegion\":\"UK\",\n            \"shippingServiceCode\":\"GBDomesticStandard\"//3PP could get this foundational data from \"getServiceList\" API.\n        }\n    ]\n}"
+						},
+						"url": {
+							"raw": "https://openapi-stage-hk.orangeconnex.com/openapi/3pp/outbound/v1/creation",
+							"protocol": "https",
+							"host": [
+								"openapi-stage-hk",
+								"orangeconnex",
+								"com"
+							],
+							"path": [
+								"openapi",
+								"3pp",
+								"outbound",
+								"v1",
+								"creation"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Outbound Order Query v2",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									"//设置全局时间戳 Set global timestamp",
+									"postman.setGlobalVariable(\"time\",Math.round(new Date().getTime()));",
+									"time = postman.getGlobalVariable('time');",
+									"",
+									"//设置KEY_WORD为全局变量 (clientKey) Set KEY-WORD as a global variable",
+									"postman.setGlobalVariable(\"key\",\"fc0509cc-fff5-4b27-a889-4d6849193cde\");",
+									"clientKey = postman.getGlobalVariable(\"key\");",
+									"",
+									"//字符串进行md5加密//md5 encrypted",
+									"var reqUrl = \"/\"+pm.request.url.path.join(\"/\");",
+									"var secretKey = \"2c5fb5b3-cee9-465c-809c-d62a323e3014\";",
+									"var reqBody = request.data;",
+									"",
+									"var str = reqUrl + \"|\" + \"\" + \"|\" + clientKey + \"|\" + secretKey;",
+									"var strmd5= CryptoJS.MD5(str);",
+									"postman.setGlobalVariable(\"sign\",strmd5);"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "clientKey",
+								"value": "fc0509cc-fff5-4b27-a889-4d6849193cde"
+							},
+							{
+								"key": "vAuthorization",
+								"value": "{{sign}}"
+							},
+							{
+								"key": "Access-Token",
+								"value": "Bearer {{AccessToken}}"
+							},
+							{
+								"key": "TimeStamp",
+								"value": "{{time}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"data\":\n        {\n            \"startTime\":\"2022-10-08T00:00:00+0800\",\n            \"endTime\":\"2022-10-12T00:00:00+0800\",\n            \"orderNumberList\":[\n                {\n                    \"orderNumber\":\"OCO2000011360056GB\"\n                }\n            ],\n            \"referenceNumberList\":[\n                {\n                   \n                }\n            ]\n        },\n    \"messageId\": \"20200430040406976\", \n    \"timestamp\": 1588233847001\n}"
+						},
+						"url": {
+							"raw": "https://openapi-stage-hk.orangeconnex.com/openapi/3pp/outbound/v2/query",
+							"protocol": "https",
+							"host": [
+								"openapi-stage-hk",
+								"orangeconnex",
+								"com"
+							],
+							"path": [
+								"openapi",
+								"3pp",
+								"outbound",
+								"v2",
+								"query"
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Outbound Order Cancellation",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"exec": [
+									"//设置全局时间戳 Set global timestamp",
+									"postman.setGlobalVariable(\"time\",Math.round(new Date().getTime()));",
+									"time = postman.getGlobalVariable('time');",
+									"",
+									"//设置KEY_WORD为全局变量 (clientKey) Set KEY-WORD as a global variable",
+									"postman.setGlobalVariable(\"key\",\"fc0509cc-fff5-4b27-a889-4d6849193cde\");",
+									"clientKey = postman.getGlobalVariable(\"key\");",
+									"",
+									"//字符串进行md5加密//md5 encrypted",
+									"var reqUrl = \"/\"+pm.request.url.path.join(\"/\");",
+									"var secretKey = \"2c5fb5b3-cee9-465c-809c-d62a323e3014\";",
+									"var reqBody = request.data;",
+									"",
+									"var str = reqUrl + \"|\" + \"\" + \"|\" + clientKey + \"|\" + secretKey;",
+									"var strmd5= CryptoJS.MD5(str);",
+									"postman.setGlobalVariable(\"sign\",strmd5);"
+								],
+								"type": "text/javascript",
+								"packages": {}
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							},
+							{
+								"key": "clientKey",
+								"value": "fc0509cc-fff5-4b27-a889-4d6849193cde"
+							},
+							{
+								"key": "vAuthorization",
+								"value": "{{sign}}"
+							},
+							{
+								"key": "TimeStamp",
+								"value": "{{time}}"
+							},
+							{
+								"key": "Access-Token",
+								"value": "Bearer {{AccessToken}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"data\":\n        {\n            \"cancelReason\":\"Test Cancellation API function\",\n            \"cancelTime\":\"2022-11-03T13:44:00+0800\",\n            \"orderNumber\":\"OCO2000011384024GB\"\n        }\n}"
+						},
+						"url": {
+							"raw": "https://openapi-stage-hk.orangeconnex.com/openapi/3pp/outbound/v1/cancel",
+							"protocol": "https",
+							"host": [
+								"openapi-stage-hk",
+								"orangeconnex",
+								"com"
+							],
+							"path": [
+								"openapi",
+								"3pp",
+								"outbound",
+								"v1",
+								"cancel"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
+			"name": "getServiceList",
+			"event": [
+				{
+					"listen": "prerequest",
+					"script": {
+						"exec": [
+							"//设置全局时间戳 Set global timestamp",
+							"postman.setGlobalVariable(\"time\",Math.round(new Date().getTime()));",
+							"time = postman.getGlobalVariable('time');",
+							"",
+							"//设置KEY_WORD为全局变量 (clientKey) Set KEY-WORD as a global variable",
+							"postman.setGlobalVariable(\"key\",\"fc0509cc-fff5-4b27-a889-4d6849193cde\");",
+							"clientKey = postman.getGlobalVariable(\"key\");",
+							"",
+							"//字符串进行md5加密//md5 encrypted",
+							"var reqUrl = \"/\"+pm.request.url.path.join(\"/\");",
+							"var secretKey = \"2c5fb5b3-cee9-465c-809c-d62a323e3014\";",
+							"var reqBody = request.data;",
+							"",
+							"var str = reqUrl + \"|\" + \"\" + \"|\" + clientKey + \"|\" + secretKey;",
+							"var strmd5= CryptoJS.MD5(str);",
+							"postman.setGlobalVariable(\"sign\",strmd5);",
+							"",
+							""
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				}
+			],
+			"protocolProfileBehavior": {
+				"disableBodyPruning": true
+			},
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "clientKey",
+						"value": "fc0509cc-fff5-4b27-a889-4d6849193cde"
+					},
+					{
+						"key": "vAuthorization",
+						"value": "{{sign}}"
+					},
+					{
+						"key": "TimeStamp",
+						"value": "{{time}}"
+					},
+					{
+						"key": "Access-Token",
+						"value": "bearer {{AccessToken}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "https://openapi-stage-hk.orangeconnex.com/openapi/3pp/base/v1/service",
+					"protocol": "https",
+					"host": [
+						"openapi-stage-hk",
+						"orangeconnex",
+						"com"
+					],
+					"path": [
+						"openapi",
+						"3pp",
+						"base",
+						"v1",
+						"service"
+					]
+				}
+			},
+			"response": [
+				{
+					"name": "getServiceList",
+					"originalRequest": {
+						"method": "GET",
+						"header": [
+							{
+								"key": "clientKey",
+								"value": "{{key}}"
+							},
+							{
+								"key": "vAuthorization",
+								"value": "{{sign}}"
+							},
+							{
+								"key": "TimeStamp",
+								"value": "{{time}}"
+							},
+							{
+								"key": "Access-Token",
+								"value": "bearer {{AccessToken}}"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "https://openapi-stage-au.orangeconnex.com/openapi/3pp/base/v1/service",
+							"protocol": "https",
+							"host": [
+								"openapi-stage-au",
+								"orangeconnex",
+								"com"
+							],
+							"path": [
+								"openapi",
+								"3pp",
+								"base",
+								"v1",
+								"service"
+							]
+						}
+					},
+					"status": "OK",
+					"code": 200,
+					"_postman_previewlanguage": "json",
+					"header": [
+						{
+							"key": "Server",
+							"value": "nginx"
+						},
+						{
+							"key": "Date",
+							"value": "Thu, 20 Jun 2024 11:56:55 GMT"
+						},
+						{
+							"key": "Content-Type",
+							"value": "application/json;charset=UTF-8"
+						},
+						{
+							"key": "Content-Length",
+							"value": "37003"
+						},
+						{
+							"key": "Connection",
+							"value": "keep-alive"
+						},
+						{
+							"key": "Vary",
+							"value": "Origin"
+						},
+						{
+							"key": "Vary",
+							"value": "Access-Control-Request-Method"
+						},
+						{
+							"key": "Vary",
+							"value": "Access-Control-Request-Headers"
+						},
+						{
+							"key": "Vary",
+							"value": "Origin"
+						},
+						{
+							"key": "Vary",
+							"value": "Access-Control-Request-Method"
+						},
+						{
+							"key": "Vary",
+							"value": "Access-Control-Request-Headers"
+						},
+						{
+							"key": "Set-Cookie",
+							"value": "JSESSIONID=B815C6743D75CCE01917CDB070AAA11D; Path=/; HttpOnly"
+						},
+						{
+							"key": "X-Frame-Options",
+							"value": "SAMEORIGIN"
+						},
+						{
+							"key": "X-Frame-Options",
+							"value": "SAMEORIGIN"
+						}
+					],
+					"cookie": [],
+					"body": "{\n    \"code\": 0,\n    \"data\": [\n        {\n            \"serviceRegion\": \"DE\",\n            \"productList\": [\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"DE Domestic Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"DE Inland Standardversand\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"德国国内标准配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"DE Domestic Standard\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"DEDomesticStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"DE International Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"德国国际标准配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"DE International Standardversand\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"DE International Standard\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"DEInternationalStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"德国国内经济配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"DE Domestic Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"DE Inland Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"DE Domestic Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"德国国内经济配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"DE Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"DE Economy\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"DEDomesticEconomy\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"德国国内大件配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"DE Domestic Freight\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"DE Fracht\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"DE Domestic Freight\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"德国国内大件配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"DE Domestic Freight\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"DE Fracht\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"DE Domestic Freight\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"DEDomesticFreight\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"DE Domestic Standard-GLS as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"DE Domestic Standard-GLS come vettore preferito\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"德国国内标准配送-优先GLS\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"DE Inland Standard-GLS als bevorzugter Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"DEDomStd_GLSPreferred\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"DE Domestic Standard-GLS as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"DE Domestic Standard-GLS come vettore assegnato\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"德国国内标准配送-指定GLS\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"DE Inland Standard-GLS als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"DEDomStd_GLSOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"DE International Standard-GLS as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"DE International Standard-GLS come vettore preferito\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"德国国际标准配送-优先GLS\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"DE International Standard-GLS als bevorzugter Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"DEIntStd_GLSPreferred\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"DE International Standard-GLS as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"DE International Standard-GLS come vettore assegnato\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"德国国际标准配送-指定GLS\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"DE International Standard-GLS als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"DEIntStd_GLSOnly\"\n                }\n            ]\n        },\n        {\n            \"serviceRegion\": \"UK\",\n            \"productList\": [\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内标准配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"GB Domestic Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"GB Inland Standardversand\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"GB Domestic Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"GB Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"GB Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内标准配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"GB Inland Standardversand\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomesticStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内快捷配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"GB Inland Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"GB Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"GB Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内快捷配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"GB Inland Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"GB Domestic Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"GB Domestic Express\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomesticExpress\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内经济信件配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"GB Domestic Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"GB Inland Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"GB Domestic Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内经济信件配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"GB Domestic Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"GB Inland Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"GB Domestic Economy\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomesticEconomy\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内标准信件配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"GB Domestic Standard Letter\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"GB Inland Standardversand Letter\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"GB Domestic Standard Letter\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内标准信件配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"GB Domestic Standard Letter\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"GB Inland Standardversand Letter\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"GB Domestic Standard Letter\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomesticStandardLetter\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国际标准配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"GB International\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"GB International\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"GB International Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"GB International Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"GB International Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国际标准配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"GB International\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBInternationalStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内大件配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"GB Domestic Freight\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"GB Domestic Freight\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"GB Domestic Freight\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomesticFreight\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Standard-Royal Mail as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Standard-Royal Mail as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内标准配送-优先Royal Mail\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Domestic Standard-Royal Mail as Preferred Carrier\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomStd_RMPreferred\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Standard-Royal Mail as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Standard-Royal Mail as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内标准配送-指定Royal Mail\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Domestic Standard-Royal Mail as Assigned Carrier\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomStd_RMOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Standard-EVRi as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Standard-EVRi as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内标准配送-优先EVRi\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Domestic Standard-EVRi as Preferred Carrier\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomStd_HMPreferred\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Standard-EVRi as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Standard-EVRi as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内标准配送-指定EVRi\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Domestic Standard-EVRi as Assigned Carrier\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomStd_HMOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内快捷配送-优先Royal Mail\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Domestic Express-Royal Mail as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Express-Royal Mail as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Express-Royal Mail as Preferred Carrier\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomExp_RMPreferred\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内快捷配送-指定Royal Mail\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Domestic Express-Royal Mail as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Express-Royal Mail as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Express-Royal Mail as Assigned Carrier\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomExp_RMOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Express-EVRi as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Express-EVRi as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内快捷配送-优先EVRi\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Domestic Express-EVRi as Preferred Carrier\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomExp_HMPreferred\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Express-EVRi as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Express-EVRi as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内快捷配送-指定EVRi\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Domestic Express-EVRi as Assigned Carrier\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomExp_HMOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内快捷配送-优先Yodel\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Inland Express-Yodel als bevorzugter Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Express-Yodel as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Express-Yodel as Preferred Carrier\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomExp_YodelPreferred\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内标准配送-指定Yodel\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Inland Standard-Yodel als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Standard-Yodel as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Standard-Yodel as Assigned Carrier\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomStd_YodelOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Express-Yodel as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Express-Yodel as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内快捷配送-指定Yodel\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Inland Express-Yodel als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomExp_YodelOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"UK Domestic Standard-Yodel as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"UK Domestic Standard-Yodel as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"英国国内标准配送-优先Yodel\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"UK Inland Standard-Yodel als bevorzugter Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"GBDomStd_YodelPreferred\"\n                }\n            ]\n        },\n        {\n            \"serviceRegion\": \"AU\",\n            \"productList\": [\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内快捷配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内快捷配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Express\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AUDomesticExpress\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic-Australia Post eParcel as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic-Australia Post eParcel as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内指定Australia Post eParcel\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Inland-Australia Post eParcel als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AU_AUP_eParcel\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic-Australia Post Express as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic-Australia Post Express as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内指定Australia Post Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Inland-Australia Post Express als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AU_AUP_Express\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内标准配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AUDomesticStandard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内标准配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AUDomesticStandard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic Standard\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AUDomesticStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内经济配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Inland Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic Economy\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AUDomesticEconomy\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内大件配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Domestic Freight\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic Freight\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic Freight\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AUDomesticFreight\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic Standard-AU Post as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic Standard-AU Post come vettore preferito\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内标准配送-优先AU Post\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Inland Standard-AU Post als bevorzugter Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AUDomStd_AUPostPreferred\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic Standard-PFL as Preferred Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic Standard-PFL come vettore preferito\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内标准配送-优先PFL\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Inland Standard-PFL als bevorzugter Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AUDomStd_PFLPreferred\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic Standard-AU Post as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic Standard-AU Post come vettore assegnato\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内标准配送-指定AU Post\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Inland Standard-AU Post als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AUDomStd_AUPostOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic Standard-PFL as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic Standard-PFL come vettore assegnato\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内标准配送-指定PFL\"\n                        },\n                        {\n                            \"applyPlatform\": \"0\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Inland Standard-PFL als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AUDomStd_PFLOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳洲国际标准服务\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU International Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU International Standardversand\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AUInternationalStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic-PFL as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic-PFL as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内指定PFL配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Inland-PFL als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AU_PFLOnly\"\n                }\n            ]\n        },\n        {\n            \"serviceRegion\": \"US-West\",\n            \"productList\": [\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Standard-USPS Ground Advantage as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Standard-USPS Ground Advantage als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内标准配送-指定USPS Ground Advantage\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Standard-USPS Ground Advantage als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomesticStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Express-USPS Priority Mail as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Express-USPS Priority Mail als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内快捷配送-指定USPS Priority Mail\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Express-USPS Priority Mail als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomesticExpress\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内经济配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Domestic Briefversand (Sparversand)\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Domestic Briefversand (Sparversand)\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomesticEconomy\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内指定UPS MI配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland-UPS MI als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic-UPS MI as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic-UPS MI come vettore assegnato\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"US_UPSMIOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国际标准服务\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US International Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US International Standardversand\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USInternationalStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内标准配送-指定FedEx Ground\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Standard-FedEx Ground als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Standard-FedEx Ground as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Standard-FedEx Ground als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"US_FedExOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内标准配送-指定UPS Ground\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Standard-UPS Ground als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Standard-UPS Ground as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Standard-UPS Ground als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomestic_UPSGroundOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic-UPS SurePost as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic-UPS SurePost as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内指定UPS SurePost配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland-UPS SurePost als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomestic_UPSSurePostOnly\"\n                }\n            ]\n        },\n        {\n            \"serviceRegion\": \"US-East\",\n            \"productList\": [\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Standard-USPS Ground Advantage as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Standard-USPS Ground Advantage als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内标准配送-指定USPS Ground Advantage\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Standard-USPS Ground Advantage als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomesticStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Express-USPS Priority Mail as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Express-USPS Priority Mail als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内快捷配送-指定USPS Priority Mail\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Express-USPS Priority Mail als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomesticExpress\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内经济配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Domestic Briefversand (Sparversand)\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Domestic Briefversand (Sparversand)\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomesticEconomy\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内指定UPS MI配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland-UPS MI als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic-UPS MI as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic-UPS MI come vettore assegnato\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"US_UPSMIOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国际标准服务\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US International Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US International Standardversand\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USInternationalStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内标准配送-指定FedEx Ground\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Standard-FedEx Ground als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Standard-FedEx Ground as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Standard-FedEx Ground als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"US_FedExOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内标准配送-指定UPS Ground\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Standard-UPS Ground als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Standard-UPS Ground as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Standard-UPS Ground als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomestic_UPSGroundOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic-UPS SurePost as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic-UPS SurePost as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内指定UPS SurePost配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland-UPS SurePost als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomestic_UPSSurePostOnly\"\n                }\n            ]\n        },\n        {\n            \"serviceRegion\": \"US-South\",\n            \"productList\": [\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Standard-USPS Ground Advantage as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Standard-USPS Ground Advantage als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内标准配送-指定USPS Ground Advantage\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Standard-USPS Ground Advantage als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomesticStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Express-USPS Priority Mail as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Express-USPS Priority Mail als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内快捷配送-指定USPS Priority Mail\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Express-USPS Priority Mail als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomesticExpress\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内经济配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Domestic Briefversand (Sparversand)\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Economy\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Domestic Briefversand (Sparversand)\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomesticEconomy\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内指定UPS MI配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland-UPS MI als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic-UPS MI as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic-UPS MI come vettore assegnato\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"US_UPSMIOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国际标准服务\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US International Standard\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US International Standardversand\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USInternationalStandard\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内标准配送-指定FedEx Ground\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Standard-FedEx Ground als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Standard-FedEx Ground as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Standard-FedEx Ground als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"US_FedExOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内标准配送-指定UPS Ground\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland Standard-UPS Ground als zugewiesener Versanddienstleister\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic Standard-UPS Ground as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Inland Standard-UPS Ground als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomestic_UPSGroundOnly\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"US Domestic-UPS SurePost as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"US Domestic-UPS SurePost as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"美国国内指定UPS SurePost配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"US Inland-UPS SurePost als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"USDomestic_UPSSurePostOnly\"\n                }\n            ]\n        },\n        {\n            \"serviceRegion\": \"AU-MEL\",\n            \"productList\": [\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic-Australia Post eParcel as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic-Australia Post eParcel as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内指定Australia Post eParcel\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Inland-Australia Post eParcel als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AU_AUP_eParcel\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic-Australia Post Express as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic-Australia Post Express as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内指定Australia Post Express\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Inland-Australia Post Express als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AU_AUP_Express\"\n                },\n                {\n                    \"shippingServiceNameList\": [\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"en-US\",\n                            \"shippingServiceName\": \"AU Domestic-PFL as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"it-IT\",\n                            \"shippingServiceName\": \"AU Domestic-PFL as Assigned Carrier\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"zh-CN\",\n                            \"shippingServiceName\": \"澳大利亚国内指定PFL配送\"\n                        },\n                        {\n                            \"applyPlatform\": \"0,1\",\n                            \"language\": \"de-DE\",\n                            \"shippingServiceName\": \"AU Inland-PFL als zugewiesener Versanddienstleister\"\n                        }\n                    ],\n                    \"shippingServiceCode\": \"AU_PFLOnly\"\n                }\n            ]\n        }\n    ],\n    \"message\": \"Success\",\n    \"messageId\": \"1718883960167\"\n}"
+				}
+			]
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "BaseUrl",
+			"value": "https://openapi-stage-hk.orangeconnex.com",
+			"type": "string",
+			"disabled": true
+		},
+		{
+			"key": "ClientId",
+			"value": "fc0509cc-fff5-4b27-a889-4d6849193cde",
+			"type": "string",
+			"disabled": true
+		},
+		{
+			"key": "RedirectUrl",
+			"value": "https://www.google.com",
+			"type": "string",
+			"disabled": true
+		},
+		{
+			"key": "JWTToken",
+			"value": "",
+			"type": "string",
+			"disabled": true
+		},
+		{
+			"key": "Code",
+			"value": "",
+			"type": "string",
+			"disabled": true
+		},
+		{
+			"key": "AccessToken",
+			"value": "",
+			"type": "string",
+			"disabled": true
+		},
+		{
+			"key": "RefreshToken",
+			"value": "",
+			"type": "string",
+			"disabled": true
+		},
+		{
+			"key": "ClientSecret",
+			"value": "",
+			"type": "string",
+			"disabled": true
+		},
+		{
+			"key": "vAuthorization",
+			"value": "",
+			"type": "string",
+			"disabled": true
+		},
+		{
+			"key": "sign",
+			"value": "",
+			"type": "string",
+			"disabled": true
+		},
+		{
+			"key": "time",
+			"value": "",
+			"type": "string",
+			"disabled": true
+		},
+		{
+			"key": "key",
+			"value": "",
+			"type": "string",
+			"disabled": true
+		}
+	]
+}

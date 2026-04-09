@@ -195,6 +195,33 @@ class OCSkuInventory(Base):
     )
 
 
+class OCSkuInventoryHistory(Base):
+    """
+    Append-only inventory quantities observed on each OC sync (snapshot history).
+    Used for stock movement / availability over time; OC integration only exposes current snapshot.
+    """
+
+    __tablename__ = "oc_sku_inventory_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    connection_id: Mapped[int] = mapped_column(ForeignKey("oc_connections.id", ondelete="CASCADE"), nullable=False)
+    mfskuid: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    service_region: Mapped[str] = mapped_column(String(20), nullable=False, default="UK")
+    available: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    in_transit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    received: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved_allocated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved_hold: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reserved_vas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    suspend: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unfulfillable: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+    __table_args__ = (
+        # Typical query: time range + optional mfskuid
+    )
+
+
 class OCInboundOrder(Base):
     """
     Cached OrangeConnex inbound orders (synced from OC API; avoids repeated long fetches).

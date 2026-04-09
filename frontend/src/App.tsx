@@ -8,6 +8,7 @@ const SKUManager = lazy(() => import('./pages/SKUManager'))
 const MessageDashboard = lazy(() => import('./pages/MessageDashboard'))
 const VideoManagement = lazy(() => import('./pages/VideoManagement'))
 const InventoryStatus = lazy(() => import('./pages/InventoryStatus'))
+const InventoryMovement = lazy(() => import('./pages/InventoryMovement'))
 const OrderDetails = lazy(() => import('./pages/OrderDetails'))
 
 function App() {
@@ -54,6 +55,12 @@ function App() {
                     Inventory status
                   </Link>
                   <Link
+                    to="/inventory-movement"
+                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+                  >
+                    Stock & movement
+                  </Link>
+                  <Link
                     to="/listing-video"
                     className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                   >
@@ -81,6 +88,7 @@ function App() {
               <Route path="/planning" element={<StockPlanning />} />
               <Route path="/skus" element={<SKUManager />} />
               <Route path="/inventory-status" element={<InventoryStatus />} />
+              <Route path="/inventory-movement" element={<InventoryMovement />} />
               <Route path="/messages" element={<MessageDashboard />} />
               <Route path="/listing-video" element={<VideoManagement />} />
               <Route path="/settings" element={<Settings />} />

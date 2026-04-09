@@ -777,6 +777,191 @@ async def _fetch_snapshot_rows(
     return snapshot_rows
 
 
+# OC GetStockMovement: POST /openapi/3pp/inventory/v1/movement — max ~7 days per call, past year only.
+_MOVEMENT_ENDPOINT = "/openapi/3pp/inventory/v1/movement"
+_MAX_MOVEMENT_SPAN = timedelta(days=7) - timedelta(seconds=1)
+_MOVEMENT_SKU_CHUNK = 50
+
+
+def _oc_vendor_inventory_ok(resp: Dict[str, Any]) -> bool:
+    if resp.get("success") is False:
+        return False
+    errs = resp.get("errors")
+    if isinstance(errs, list) and len(errs) > 0:
+        return False
+    code = resp.get("code")
+    if code is not None and code not in (0, "0"):
+        return False
+    return True
+
+
+def _oc_movement_iso_utc(dt: datetime) -> str:
+    """Format as yyyy-MM-dd'T'HH:mm:ss+0000 (OC movement API)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+
+def _iter_movement_windows(start_utc: datetime, end_utc: datetime) -> List[tuple[datetime, datetime]]:
+    """Split [start, end] into windows each under 7 days (OC limit)."""
+    if start_utc.tzinfo is None:
+        start_utc = start_utc.replace(tzinfo=timezone.utc)
+    else:
+        start_utc = start_utc.astimezone(timezone.utc)
+    if end_utc.tzinfo is None:
+        end_utc = end_utc.replace(tzinfo=timezone.utc)
+    else:
+        end_utc = end_utc.astimezone(timezone.utc)
+    if start_utc > end_utc:
+        return []
+    out: List[tuple[datetime, datetime]] = []
+    cur = start_utc
+    while cur <= end_utc:
+        nxt = min(cur + _MAX_MOVEMENT_SPAN, end_utc)
+        out.append((cur, nxt))
+        if nxt >= end_utc:
+            break
+        cur = nxt + timedelta(seconds=1)
+    return out
+
+
+def flatten_stock_movement_response(resp: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Parse GetStockMovement JSON: data[] with nested serviceRegionList → inventoryList → movementList.
+    """
+    if not isinstance(resp, dict) or not _oc_vendor_inventory_ok(resp):
+        return []
+    data = resp.get("data")
+    if not isinstance(data, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for stock in data:
+        if not isinstance(stock, dict):
+            continue
+        mf = str(_oc_dict_get_ci(stock, "MFSKUID", "mfskuid", "mfSkuId") or "").strip()
+        seller = str(stock.get("sellerSkuId") or stock.get("seller_skuid") or "").strip()
+        regions = stock.get("serviceRegionList") or stock.get("service_region_list") or []
+        if not isinstance(regions, list):
+            continue
+        for reg in regions:
+            if not isinstance(reg, dict):
+                continue
+            svc_reg = str(reg.get("serviceRegion") or "").strip()
+            inv_list = _oc_dict_get_ci(reg, "inventoryList", "inventorylist") or []
+            if not isinstance(inv_list, list):
+                continue
+            for inv in inv_list:
+                if not isinstance(inv, dict):
+                    continue
+                inv_status = str(inv.get("inventoryStatus") or "").strip()
+                mlist = inv.get("movementList") or inv.get("movementlist") or []
+                if not isinstance(mlist, list):
+                    continue
+                for mov in mlist:
+                    if not isinstance(mov, dict):
+                        continue
+                    mid = str(
+                        _oc_dict_get_ci(mov, "movementID", "moventmentID", "movementId", "movement_id") or ""
+                    ).strip()
+                    qty = mov.get("quantity")
+                    try:
+                        qty_i = int(qty) if qty is not None else 0
+                    except (TypeError, ValueError):
+                        qty_i = 0
+                    ac = mov.get("actualCount")
+                    try:
+                        ac_i = int(ac) if ac is not None else None
+                    except (TypeError, ValueError):
+                        ac_i = None
+                    out.append(
+                        {
+                            "mfskuid": mf,
+                            "seller_skuid": seller or None,
+                            "service_region": svc_reg,
+                            "inventory_status": inv_status,
+                            "movement_id": mid,
+                            "quantity": qty_i,
+                            "actual_count": ac_i,
+                            "reason": (str(mov.get("reason") or "").strip() or None),
+                            "order_number": (str(mov.get("orderNumber") or "").strip() or None),
+                            "update_time": (str(mov.get("updateTime") or "").strip() or None),
+                        }
+                    )
+    return out
+
+
+async def oc_fetch_stock_movement_rows(
+    db: AsyncSession,
+    mf_sku_ids: List[str],
+    start_utc: datetime,
+    end_utc: datetime,
+) -> List[Dict[str, Any]]:
+    """
+    Call OC GetStockMovement for the given MFSKUIDs and UTC range. Splits time into ≤7-day windows
+    and batches SKUs (50 per request). Range is clamped to the past year from end_utc (OC rule).
+    """
+    conn = await _get_active_connection(db)
+    ids = sorted({str(x).strip() for x in mf_sku_ids if str(x).strip()})
+    if not ids:
+        return []
+
+    if start_utc.tzinfo is None:
+        start_utc = start_utc.replace(tzinfo=timezone.utc)
+    else:
+        start_utc = start_utc.astimezone(timezone.utc)
+    if end_utc.tzinfo is None:
+        end_utc = end_utc.replace(tzinfo=timezone.utc)
+    else:
+        end_utc = end_utc.astimezone(timezone.utc)
+
+    year_floor = end_utc - timedelta(days=365)
+    if start_utc < year_floor:
+        start_utc = year_floor
+    if start_utc > end_utc:
+        return []
+
+    all_rows: List[Dict[str, Any]] = []
+    windows = _iter_movement_windows(start_utc, end_utc)
+    for win_start, win_end in windows:
+        for i in range(0, len(ids), _MOVEMENT_SKU_CHUNK):
+            chunk = ids[i : i + _MOVEMENT_SKU_CHUNK]
+            body = {
+                "data": {
+                    "startTime": _oc_movement_iso_utc(win_start),
+                    "endTime": _oc_movement_iso_utc(win_end),
+                    "mfSkuList": [{"mfSkuId": x} for x in chunk],
+                },
+                "messageId": str(uuid4()),
+                "timestamp": int(time.time() * 1000),
+            }
+            resp = await _call_oc(db, conn, "POST", _MOVEMENT_ENDPOINT, body_obj=body)
+            if not _oc_vendor_inventory_ok(resp):
+                msg = resp.get("message") or "OC movement request failed"
+                errs = resp.get("errors")
+                if isinstance(errs, list) and errs:
+                    first = errs[0] if isinstance(errs[0], dict) else {}
+                    msg = str(first.get("message") or msg)
+                raise OCAPIError(f"GetStockMovement: {msg}")
+            all_rows.extend(flatten_stock_movement_response(resp))
+
+    # De-dupe when movement_id is present (chunk overlap should not duplicate).
+    seen: set[tuple[str, str, str, str]] = set()
+    deduped: List[Dict[str, Any]] = []
+    for r in all_rows:
+        mid = (r.get("movement_id") or "").strip()
+        if mid:
+            key = (mid, (r.get("mfskuid") or ""), (r.get("service_region") or ""), (r.get("update_time") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+        deduped.append(r)
+
+    deduped.sort(key=lambda x: (x.get("update_time") or "", x.get("mfskuid") or ""))
+    return deduped
+
+
 async def oc_test_connection(db: AsyncSession) -> Dict[str, Any]:
     conn = await _get_active_connection(db)
     resp = await _call_oc(
@@ -1302,4 +1487,66 @@ async def oc_debug_raw_calls(
         "snapshot_response": snapshot_raw,
         "sku_query_request": sku_body,
         "sku_query_response": sku_raw,
+    }
+
+
+async def oc_debug_movement_raw(
+    db: AsyncSession,
+    mfskuid: str,
+    start_utc: Optional[datetime] = None,
+    end_utc: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """
+    Single POST to GetStockMovement with verbatim request/response for inspection.
+    Time window is clamped to OC rules (≤ ~7 days, not older than ~1 year from end).
+    """
+    conn = await _get_active_connection(db)
+    mf = (mfskuid or "").strip()
+    if not mf:
+        raise OCConfigError("mfskuid is required")
+
+    end = end_utc or datetime.now(timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    else:
+        end = end.astimezone(timezone.utc)
+
+    start = start_utc or (end - timedelta(days=6))
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    else:
+        start = start.astimezone(timezone.utc)
+
+    year_floor = end - timedelta(days=365)
+    if start < year_floor:
+        start = year_floor
+    if start > end:
+        start = end - _MAX_MOVEMENT_SPAN
+    if (end - start) > _MAX_MOVEMENT_SPAN:
+        start = end - _MAX_MOVEMENT_SPAN
+
+    body = {
+        "data": {
+            "startTime": _oc_movement_iso_utc(start),
+            "endTime": _oc_movement_iso_utc(end),
+            "mfSkuList": [{"mfSkuId": mf}],
+        },
+        "messageId": str(uuid4()),
+        "timestamp": int(time.time() * 1000),
+    }
+    raw = await _call_oc(db, conn, "POST", _MOVEMENT_ENDPOINT, body_obj=body)
+    flat = flatten_stock_movement_response(raw)
+    return {
+        "connection": {
+            "region": conn.region,
+            "environment": conn.environment,
+            "oauth_base_url": conn.oauth_base_url,
+            "api_base_url": conn.api_base_url,
+            "signature_mode": conn.signature_mode,
+        },
+        "movement_endpoint": _MOVEMENT_ENDPOINT,
+        "movement_request": body,
+        "movement_response": raw,
+        "flattened_row_count": len(flat),
+        "response_ok": _oc_vendor_inventory_ok(raw) if isinstance(raw, dict) else False,
     }

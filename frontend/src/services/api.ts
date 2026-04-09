@@ -96,6 +96,92 @@ export interface OCSkuInventoryRow {
   synced_at: string
 }
 
+/** Append-only snapshot row; deltas vs previous observation for same MFSKUID + region. */
+export interface OCInventoryHistoryRow {
+  recorded_at: string
+  sku_code: string | null
+  seller_skuid: string | null
+  mfskuid: string
+  service_region: string
+  available: number
+  in_transit: number
+  received: number
+  reserved_allocated: number
+  reserved_hold: number
+  reserved_vas: number
+  suspend: number
+  unfulfillable: number
+  delta_available: number | null
+  delta_in_transit: number | null
+  delta_received: number | null
+}
+
+export interface OCInventoryHistoryResponse {
+  rows: OCInventoryHistoryRow[]
+  from_date: string
+  to_date: string
+  row_count: number
+  note: string
+}
+
+/** OC GetStockMovement lines (live API, not EvampOps snapshot history). */
+export interface OCStockMovementRow {
+  update_time: string
+  mfskuid: string
+  sku_code: string | null
+  seller_skuid: string | null
+  service_region: string
+  inventory_status: string
+  movement_id: string
+  quantity: number
+  actual_count: number | null
+  reason: string | null
+  order_number: string | null
+}
+
+export interface OCStockMovementResponse {
+  rows: OCStockMovementRow[]
+  from_date: string
+  to_date: string
+  row_count: number
+  scope: 'filtered' | 'all_mapped_skus'
+  mfskuid_count: number
+  truncated: boolean
+  line_limit: number | null
+  note: string
+}
+
+/** GET /api/inventory-status/debug-raw — StockSnapshot v2 + SKU query verbatim. */
+export interface OCRawDebugResponse {
+  connection: Record<string, unknown>
+  snapshot_request: Record<string, unknown>
+  snapshot_response: Record<string, unknown>
+  sku_query_request: Record<string, unknown>
+  sku_query_response: Record<string, unknown>
+}
+
+/** GET /api/inventory-status/debug/oc-movement-raw — GetStockMovement verbatim. */
+export interface OCDebugMovementRawResponse {
+  connection: Record<string, unknown>
+  movement_endpoint: string
+  movement_request: Record<string, unknown>
+  movement_response: Record<string, unknown>
+  flattened_row_count: number
+  response_ok: boolean
+  note: string
+}
+
+/** GET /api/inventory-status/debug/snapshot-history-db — what is stored from each Pull latest data. */
+export interface SnapshotHistoryDbDebugResponse {
+  connection_id: number
+  total_rows: number
+  earliest_recorded_at: string | null
+  latest_recorded_at: string | null
+  distinct_sync_batches: number
+  recent_sync_times_utc: string[]
+  note: string
+}
+
 export interface OCInboundOrderRow {
   seller_inbound_number: string
   oc_inbound_number: string | null
@@ -800,6 +886,57 @@ export const inventoryStatusAPI = {
       params: sku ? { sku } : {},
     }),
   listInventory: () => api.get<OCSkuInventoryRow[]>('/api/inventory-status/inventory'),
+  listInventoryHistory: (params?: {
+    from?: string
+    to?: string
+    seller_skuid?: string
+    sku_code?: string
+    mfskuid?: string
+    limit?: number
+  }) =>
+    api.get<OCInventoryHistoryResponse>('/api/inventory-status/inventory-history', {
+      params: {
+        ...(params?.from ? { from: params.from } : {}),
+        ...(params?.to ? { to: params.to } : {}),
+        ...(params?.seller_skuid ? { seller_skuid: params.seller_skuid } : {}),
+        ...(params?.sku_code ? { sku_code: params.sku_code } : {}),
+        ...(params?.mfskuid ? { mfskuid: params.mfskuid } : {}),
+        ...(params?.limit != null ? { limit: params.limit } : {}),
+      },
+    }),
+  listOcStockMovement: (params: {
+    from?: string
+    to?: string
+    seller_skuid?: string
+    sku_code?: string
+    mfskuid?: string
+    line_limit?: number
+  }) =>
+    api.get<OCStockMovementResponse>('/api/inventory-status/oc-stock-movement', {
+      params: {
+        ...(params.from ? { from: params.from } : {}),
+        ...(params.to ? { to: params.to } : {}),
+        ...(params.seller_skuid ? { seller_skuid: params.seller_skuid } : {}),
+        ...(params.sku_code ? { sku_code: params.sku_code } : {}),
+        ...(params.mfskuid ? { mfskuid: params.mfskuid } : {}),
+        ...(params.line_limit != null ? { line_limit: params.line_limit } : {}),
+      },
+    }),
+  /** Verbatim OC JSON: snapshot v2 + SKU query (does not include GetStockMovement). */
+  debugRawOc: (params?: { service_region?: string; mfskuid?: string }) =>
+    api.get<OCRawDebugResponse>('/api/inventory-status/debug-raw', { params: params ?? {} }),
+  /** Verbatim GetStockMovement request/response for one MFSKUID (~7d window). */
+  debugOcMovementRaw: (params: { mfskuid: string; from?: string; to?: string }) =>
+    api.get<OCDebugMovementRawResponse>('/api/inventory-status/debug/oc-movement-raw', {
+      params: {
+        mfskuid: params.mfskuid,
+        ...(params.from ? { from: params.from } : {}),
+        ...(params.to ? { to: params.to } : {}),
+      },
+    }),
+  /** DB summary: snapshot history rows (why Recorded mode only shows dates when you actually synced). */
+  debugSnapshotHistoryDb: () =>
+    api.get<SnapshotHistoryDbDebugResponse>('/api/inventory-status/debug/snapshot-history-db'),
   /** Cached counts from DB; run syncInboundOrders to refresh from OC. */
   getInboundOrderStatusSummary: () =>
     api.get<InboundOrderStatusSummary>('/api/inventory-status/inbound-orders/status-summary'),
