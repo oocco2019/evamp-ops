@@ -8,7 +8,7 @@ from app.models.settings import (
     OCConnection,
     OCSkuMapping,
     OCSkuInventory,
-    OCSkuInventoryHistory,
+    OCStockMovementLine,
     OCInboundOrder,
 )
 from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem
@@ -23,7 +23,7 @@ __all__ = [
     "OCConnection",
     "OCSkuMapping",
     "OCSkuInventory",
-    "OCSkuInventoryHistory",
+    "OCStockMovementLine",
     "OCInboundOrder",
     # Stock
     "Order",

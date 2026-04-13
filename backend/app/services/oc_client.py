@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone, date, time as dt_time_min
 from typing import Any, Dict, List, Optional
@@ -506,9 +507,24 @@ def _sign_request(path: str, body: str, client_id: str, client_secret: str, mode
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
-async def _refresh_access_token(
+# Reuse access tokens across many OC inventory calls; refreshing on every request can hit OC limits / bad tokens.
+_oc_access_token_cache: Dict[str, tuple[str, float]] = {}
+_oc_access_token_lock = threading.Lock()
+
+
+def _oc_access_token_cache_key(oauth_base_url: str, client_id: str) -> str:
+    return f"{_ensure_no_trailing_slash(oauth_base_url)}|{client_id.strip()}"
+
+
+def invalidate_oc_access_token_cache(oauth_base_url: str, client_id: str) -> None:
+    with _oc_access_token_lock:
+        _oc_access_token_cache.pop(_oc_access_token_cache_key(oauth_base_url, client_id), None)
+
+
+async def _fetch_fresh_oc_access_token(
     db: AsyncSession, oauth_base_url: str, client_id: str, client_secret: str
-) -> str:
+) -> tuple[str, Optional[int]]:
+    """POST /oauth/token (refresh_token grant). Returns (access_token, expires_in seconds if present)."""
     refresh_token = await _get_credential_value(db, "refresh_token")
     url = f"{_ensure_no_trailing_slash(oauth_base_url)}/oauth/token"
     attempts: List[str] = []
@@ -550,7 +566,87 @@ async def _refresh_access_token(
     access_token = (payload.get("access_token") or "").strip()
     if not access_token:
         raise OCAPIError("OC token refresh failed: no access_token in response.")
-    return access_token
+    expires_in: Optional[int]
+    try:
+        ev = payload.get("expires_in")
+        expires_in = int(ev) if ev is not None else None
+    except (TypeError, ValueError):
+        expires_in = None
+    await _persist_oc_refresh_token_if_rotated(db, payload, oauth_base_url, client_id)
+    return access_token, expires_in
+
+
+async def _get_valid_access_token(
+    db: AsyncSession, oauth_base_url: str, client_id: str, client_secret: str
+) -> str:
+    """Return a non-expired access token, refreshing only when cache miss or near expiry."""
+    key = _oc_access_token_cache_key(oauth_base_url, client_id)
+    now = time.monotonic()
+    with _oc_access_token_lock:
+        hit = _oc_access_token_cache.get(key)
+        if hit is not None:
+            token, exp_mono = hit
+            if now < exp_mono:
+                return token
+    token, expires_in = await _fetch_fresh_oc_access_token(db, oauth_base_url, client_id, client_secret)
+    try:
+        ei = int(expires_in) if expires_in is not None else 300
+    except (TypeError, ValueError):
+        ei = 300
+    ttl = max(45.0, float(min(ei, 7200)) - 90.0)
+    with _oc_access_token_lock:
+        _oc_access_token_cache[key] = (token, time.monotonic() + ttl)
+    return token
+
+
+async def _persist_oc_refresh_token_if_rotated(
+    db: AsyncSession,
+    token_payload: Dict[str, Any],
+    oauth_base_url: str,
+    client_id: str,
+) -> None:
+    new_rt = str(token_payload.get("refresh_token") or "").strip()
+    if not new_rt:
+        return
+    result = await db.execute(
+        select(APICredential).where(
+            APICredential.service_name == "oc",
+            APICredential.key_name == "refresh_token",
+            APICredential.is_active == True,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        return
+    try:
+        current = encryption_service.decrypt(row.encrypted_value).strip()
+    except Exception:  # noqa: BLE001
+        current = ""
+    if new_rt == current:
+        return
+    row.encrypted_value = encryption_service.encrypt(new_rt)
+    await db.flush()
+    invalidate_oc_access_token_cache(oauth_base_url, client_id)
+
+
+def _oc_json_indicates_access_token_rejected(data: Any) -> bool:
+    """OC often returns HTTP 200 with success:false and an auth message; used for one retry after cache bust."""
+    if not isinstance(data, dict) or data.get("success") is not False:
+        return False
+    parts: List[str] = [str(data.get("message") or ""), str(data.get("msg") or "")]
+    errs = data.get("errors")
+    if isinstance(errs, list):
+        for e in errs:
+            if isinstance(e, dict):
+                parts.append(str(e.get("message") or ""))
+    msg = " ".join(parts).lower()
+    if "authentication" in msg and "fail" in msg:
+        return True
+    if "invalid" in msg and "token" in msg:
+        return True
+    if "access token" in msg:
+        return True
+    return False
 
 
 async def oc_build_authorize_url(
@@ -630,7 +726,7 @@ async def _call_oc(
 ) -> Dict[str, Any]:
     client_id = await _get_credential_value(db, "client_id")
     client_secret = await _get_credential_value(db, "client_secret")
-    access_token = await _refresh_access_token(db, connection.oauth_base_url, client_id, client_secret)
+    oauth_base = connection.oauth_base_url
 
     api_base = _ensure_no_trailing_slash(connection.api_base_url)
     full_url = urljoin(f"{api_base}/", endpoint_path.lstrip("/"))
@@ -645,30 +741,45 @@ async def _call_oc(
     body_ts = body_obj.get("timestamp") if isinstance(body_obj, dict) else None
     timestamp_ms = str(body_ts) if body_ts is not None else str(int(time.time() * 1000))
 
-    headers = {
-        "Content-Type": "application/json",
-        "Access-Token": f"Bearer {access_token}",
-        "TimeStamp": timestamp_ms,
-        "clientKey": client_id,
-        "vAuthorization": signature,
-    }
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        # IMPORTANT: send the exact serialized body string used for signature.
-        # Using json=... may re-serialize with different whitespace/order and break vAuthorization.
-        resp = await client.request(
-            method.upper(),
-            full_url,
-            headers=headers,
-            content=body if body_obj is not None else None,
-        )
-    if resp.status_code >= 400:
-        raise OCAPIError(f"OC API call failed: HTTP {resp.status_code} {resp.text[:400]}")
-    if not resp.text:
-        return {}
-    try:
-        return resp.json()
-    except Exception as e:  # noqa: BLE001
-        raise OCAPIError(f"OC API invalid JSON response: {e}") from e
+    last_http_err: Optional[str] = None
+    for attempt in range(2):
+        access_token = await _get_valid_access_token(db, oauth_base, client_id, client_secret)
+        headers = {
+            "Content-Type": "application/json",
+            "Access-Token": f"Bearer {access_token}",
+            "TimeStamp": timestamp_ms,
+            "clientKey": client_id,
+            "vAuthorization": signature,
+        }
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            # IMPORTANT: send the exact serialized body string used for signature.
+            # Using json=... may re-serialize with different whitespace/order and break vAuthorization.
+            resp = await client.request(
+                method.upper(),
+                full_url,
+                headers=headers,
+                content=body if body_obj is not None else None,
+            )
+        if resp.status_code == 401:
+            invalidate_oc_access_token_cache(oauth_base, client_id)
+            last_http_err = f"HTTP {resp.status_code} {resp.text[:400]}"
+            if attempt == 0:
+                continue
+        if resp.status_code >= 400:
+            raise OCAPIError(f"OC API call failed: HTTP {resp.status_code} {resp.text[:400]}")
+        if not resp.text:
+            return {}
+        try:
+            data = resp.json()
+        except Exception as e:  # noqa: BLE001
+            raise OCAPIError(f"OC API invalid JSON response: {e}") from e
+        if attempt == 0 and isinstance(data, dict) and _oc_json_indicates_access_token_rejected(data):
+            invalidate_oc_access_token_cache(oauth_base, client_id)
+            continue
+        return data
+    raise OCAPIError(
+        last_http_err or "OC API call failed after retry (access token / authentication)."
+    )
 
 
 def _extract_list(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -777,10 +888,12 @@ async def _fetch_snapshot_rows(
     return snapshot_rows
 
 
-# OC GetStockMovement: POST /openapi/3pp/inventory/v1/movement — max ~7 days per call, past year only.
+# OC GetStockMovement: POST /openapi/3pp/inventory/v1/movement — max ~7 days per HTTP call (we chunk; long spans are multiple calls).
 _MOVEMENT_ENDPOINT = "/openapi/3pp/inventory/v1/movement"
 _MAX_MOVEMENT_SPAN = timedelta(days=7) - timedelta(seconds=1)
 _MOVEMENT_SKU_CHUNK = 50
+# OC GetStockMovement: Apifox docs — "past year only" (rolling), plus max 7 days per request.
+_OC_MOVEMENT_LOOKBACK_DAYS = 365
 
 
 def _oc_vendor_inventory_ok(resp: Dict[str, Any]) -> bool:
@@ -892,21 +1005,16 @@ def flatten_stock_movement_response(resp: Dict[str, Any]) -> List[Dict[str, Any]
     return out
 
 
-async def oc_fetch_stock_movement_rows(
-    db: AsyncSession,
-    mf_sku_ids: List[str],
+def clamp_oc_movement_query_bounds(
     start_utc: datetime,
     end_utc: datetime,
-) -> List[Dict[str, Any]]:
+    *,
+    reference_time: Optional[datetime] = None,
+) -> tuple[datetime, datetime]:
     """
-    Call OC GetStockMovement for the given MFSKUIDs and UTC range. Splits time into ≤7-day windows
-    and batches SKUs (50 per request). Range is clamped to the past year from end_utc (OC rule).
+    OC GetStockMovement only returns inventory movement for the last ~12 months (rolling window from OC).
+    Clamp start to max(requested start, now - lookback); cap end to now.
     """
-    conn = await _get_active_connection(db)
-    ids = sorted({str(x).strip() for x in mf_sku_ids if str(x).strip()})
-    if not ids:
-        return []
-
     if start_utc.tzinfo is None:
         start_utc = start_utc.replace(tzinfo=timezone.utc)
     else:
@@ -916,14 +1024,40 @@ async def oc_fetch_stock_movement_rows(
     else:
         end_utc = end_utc.astimezone(timezone.utc)
 
-    year_floor = end_utc - timedelta(days=365)
-    if start_utc < year_floor:
-        start_utc = year_floor
-    if start_utc > end_utc:
+    now_utc = reference_time if reference_time is not None else datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    else:
+        now_utc = now_utc.astimezone(timezone.utc)
+
+    earliest_allowed = now_utc - timedelta(days=_OC_MOVEMENT_LOOKBACK_DAYS)
+    start_utc = max(start_utc, earliest_allowed)
+    end_utc = min(end_utc, now_utc)
+    return start_utc, end_utc
+
+
+async def oc_fetch_stock_movement_rows(
+    db: AsyncSession,
+    mf_sku_ids: List[str],
+    start_utc: datetime,
+    end_utc: datetime,
+) -> List[Dict[str, Any]]:
+    """
+    Call OC GetStockMovement for the given MFSKUIDs and UTC range.
+    OC only serves the last ~12 months; range is clamped. Within that span, requests use ≤7-day windows
+    and SKU batches of 50.
+    """
+    conn = await _get_active_connection(db)
+    ids = sorted({str(x).strip() for x in mf_sku_ids if str(x).strip()})
+    if not ids:
         return []
 
-    all_rows: List[Dict[str, Any]] = []
+    start_utc, end_utc = clamp_oc_movement_query_bounds(start_utc, end_utc)
+    if start_utc >= end_utc:
+        return []
+
     windows = _iter_movement_windows(start_utc, end_utc)
+    all_rows: List[Dict[str, Any]] = []
     for win_start, win_end in windows:
         for i in range(0, len(ids), _MOVEMENT_SKU_CHUNK):
             chunk = ids[i : i + _MOVEMENT_SKU_CHUNK]
@@ -943,6 +1077,13 @@ async def oc_fetch_stock_movement_rows(
                 if isinstance(errs, list) and errs:
                     first = errs[0] if isinstance(errs[0], dict) else {}
                     msg = str(first.get("message") or msg)
+                logger.warning(
+                    "GetStockMovement OC error window=%s..%s mf_skus=%d first_msg=%s",
+                    win_start.isoformat(),
+                    win_end.isoformat(),
+                    len(chunk),
+                    msg[:500],
+                )
                 raise OCAPIError(f"GetStockMovement: {msg}")
             all_rows.extend(flatten_stock_movement_response(resp))
 

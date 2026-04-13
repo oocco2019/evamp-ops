@@ -14,7 +14,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import HTTPException
 
-from app.api.inventory_status import execute_oc_inbound_sync, execute_oc_sku_mappings_sync
+from app.api.inventory_status import (
+    execute_oc_inbound_sync,
+    execute_oc_sku_mappings_sync,
+    execute_stock_movement_pull,
+)
 from app.api.stock import execute_order_import
 from app.core.config import settings
 from app.core.database import async_session_maker
@@ -60,6 +64,22 @@ async def run_scheduled_inventory_refresh() -> None:
         logger.warning("Scheduled OC SKU/inventory sync skipped: %s", e.detail)
     except Exception:
         logger.exception("Scheduled OC SKU/inventory sync failed")
+
+    # 2b) OC stock movement -> DB (incremental overlap; idempotent upserts)
+    try:
+        async with async_session_maker() as db:
+            mv = await execute_stock_movement_pull(db, incremental=True)
+        logger.info(
+            "Scheduled OC stock movement sync OK: fetched=%s inserted=%s (%s → %s)",
+            mv.fetched,
+            mv.inserted,
+            mv.from_date,
+            mv.to_date,
+        )
+    except HTTPException as e:
+        logger.warning("Scheduled OC stock movement skipped: %s", e.detail)
+    except Exception:
+        logger.exception("Scheduled OC stock movement failed")
 
     # 3) Inbound orders cache (incremental)
     try:

@@ -1,7 +1,7 @@
 /**
  * API client for backend communication
  */
-import axios from 'axios'
+import axios, { isAxiosError } from 'axios'
 
 /**
  * Empty base URL = same-origin requests to `/api/...` (works with Vite dev proxy).
@@ -15,6 +15,40 @@ const api = axios.create({
     'Content-Type': 'application/json',
   },
 })
+
+/** FastAPI often puts a human-readable message in `detail`; surface it in Error.message for UI. */
+function appendFastApiDetailToAxiosError(error: unknown): void {
+  if (!isAxiosError(error)) return
+  const data = error.response?.data as { detail?: unknown } | undefined
+  const detail = data?.detail
+  if (detail === undefined || detail === null) return
+  let extra: string
+  if (typeof detail === 'string') {
+    extra = detail
+  } else if (Array.isArray(detail)) {
+    extra = detail
+      .map((item) => {
+        if (item && typeof item === 'object' && 'msg' in item) {
+          return String((item as { msg: string }).msg)
+        }
+        return JSON.stringify(item)
+      })
+      .join('; ')
+  } else {
+    extra = JSON.stringify(detail)
+  }
+  if (extra && !error.message.includes(extra)) {
+    error.message = `${error.message}: ${extra}`
+  }
+}
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    appendFastApiDetailToAxiosError(error)
+    return Promise.reject(error)
+  }
+)
 
 // Types
 export interface APICredential {
@@ -96,35 +130,7 @@ export interface OCSkuInventoryRow {
   synced_at: string
 }
 
-/** Append-only snapshot row; deltas vs previous observation for same MFSKUID + region. */
-export interface OCInventoryHistoryRow {
-  recorded_at: string
-  sku_code: string | null
-  seller_skuid: string | null
-  mfskuid: string
-  service_region: string
-  available: number
-  in_transit: number
-  received: number
-  reserved_allocated: number
-  reserved_hold: number
-  reserved_vas: number
-  suspend: number
-  unfulfillable: number
-  delta_available: number | null
-  delta_in_transit: number | null
-  delta_received: number | null
-}
-
-export interface OCInventoryHistoryResponse {
-  rows: OCInventoryHistoryRow[]
-  from_date: string
-  to_date: string
-  row_count: number
-  note: string
-}
-
-/** OC GetStockMovement lines (live API, not EvampOps snapshot history). */
+/** OC GetStockMovement lines persisted in DB (POST /sync-stock-movement). */
 export interface OCStockMovementRow {
   update_time: string
   mfskuid: string
@@ -171,14 +177,12 @@ export interface OCDebugMovementRawResponse {
   note: string
 }
 
-/** GET /api/inventory-status/debug/snapshot-history-db — what is stored from each Pull latest data. */
-export interface SnapshotHistoryDbDebugResponse {
+/** GET /api/inventory-status/debug/stock-movement-db — persisted movement row stats. */
+export interface StoredMovementDbDebugResponse {
   connection_id: number
   total_rows: number
-  earliest_recorded_at: string | null
-  latest_recorded_at: string | null
-  distinct_sync_batches: number
-  recent_sync_times_utc: string[]
+  earliest_update_utc: string | null
+  latest_update_utc: string | null
   note: string
 }
 
@@ -886,25 +890,8 @@ export const inventoryStatusAPI = {
       params: sku ? { sku } : {},
     }),
   listInventory: () => api.get<OCSkuInventoryRow[]>('/api/inventory-status/inventory'),
-  listInventoryHistory: (params?: {
-    from?: string
-    to?: string
-    seller_skuid?: string
-    sku_code?: string
-    mfskuid?: string
-    limit?: number
-  }) =>
-    api.get<OCInventoryHistoryResponse>('/api/inventory-status/inventory-history', {
-      params: {
-        ...(params?.from ? { from: params.from } : {}),
-        ...(params?.to ? { to: params.to } : {}),
-        ...(params?.seller_skuid ? { seller_skuid: params.seller_skuid } : {}),
-        ...(params?.sku_code ? { sku_code: params.sku_code } : {}),
-        ...(params?.mfskuid ? { mfskuid: params.mfskuid } : {}),
-        ...(params?.limit != null ? { limit: params.limit } : {}),
-      },
-    }),
-  listOcStockMovement: (params: {
+  /** Stored movement lines (GET); fill with syncStockMovementFromOc first. */
+  listStockMovement: (params: {
     from?: string
     to?: string
     seller_skuid?: string
@@ -912,7 +899,7 @@ export const inventoryStatusAPI = {
     mfskuid?: string
     line_limit?: number
   }) =>
-    api.get<OCStockMovementResponse>('/api/inventory-status/oc-stock-movement', {
+    api.get<OCStockMovementResponse>('/api/inventory-status/stock-movement', {
       params: {
         ...(params.from ? { from: params.from } : {}),
         ...(params.to ? { to: params.to } : {}),
@@ -921,6 +908,24 @@ export const inventoryStatusAPI = {
         ...(params.mfskuid ? { mfskuid: params.mfskuid } : {}),
         ...(params.line_limit != null ? { line_limit: params.line_limit } : {}),
       },
+    }),
+  /** Pull GetStockMovement from OC into DB (long ranges can take minutes). */
+  syncStockMovementFromOc: (params?: { from?: string; to?: string; incremental?: boolean }) =>
+    api.post<{
+      fetched: number
+      inserted: number
+      from_date: string
+      to_date: string
+      mfskuid_count: number
+      scope: string
+      clamped?: boolean
+    }>('/api/inventory-status/sync-stock-movement', undefined, {
+      params: {
+        ...(params?.from ? { from: params.from } : {}),
+        ...(params?.to ? { to: params.to } : {}),
+        ...(params?.incremental ? { incremental: true } : {}),
+      },
+      timeout: 300_000,
     }),
   /** Verbatim OC JSON: snapshot v2 + SKU query (does not include GetStockMovement). */
   debugRawOc: (params?: { service_region?: string; mfskuid?: string }) =>
@@ -934,9 +939,8 @@ export const inventoryStatusAPI = {
         ...(params.to ? { to: params.to } : {}),
       },
     }),
-  /** DB summary: snapshot history rows (why Recorded mode only shows dates when you actually synced). */
-  debugSnapshotHistoryDb: () =>
-    api.get<SnapshotHistoryDbDebugResponse>('/api/inventory-status/debug/snapshot-history-db'),
+  debugStockMovementDb: () =>
+    api.get<StoredMovementDbDebugResponse>('/api/inventory-status/debug/stock-movement-db'),
   /** Cached counts from DB; run syncInboundOrders to refresh from OC. */
   getInboundOrderStatusSummary: () =>
     api.get<InboundOrderStatusSummary>('/api/inventory-status/inbound-orders/status-summary'),

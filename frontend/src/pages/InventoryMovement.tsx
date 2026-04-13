@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
   LineChart,
@@ -35,8 +35,6 @@ const lastNDaysFrom = (n: number) => offsetDaysFromToday(n - 1)
 
 type PeriodPreset = 'today' | '7d' | '1m' | '3m' | '6m' | '1y' | 'custom'
 
-type MovementSource = 'recorded' | 'oc_api'
-
 function formatDelta(n: number | null): string {
   if (n === null || n === undefined) return '—'
   if (n === 0) return '0'
@@ -65,8 +63,8 @@ function ocDateKey(updateTime: string): string | null {
 
 function DiagnosticsPanel() {
   const dbDbg = useQuery({
-    queryKey: ['debug-snapshot-history-db'],
-    queryFn: async () => (await inventoryStatusAPI.debugSnapshotHistoryDb()).data,
+    queryKey: ['debug-stock-movement-db'],
+    queryFn: async () => (await inventoryStatusAPI.debugStockMovementDb()).data,
     enabled: false,
   })
 
@@ -74,19 +72,19 @@ function DiagnosticsPanel() {
     <div className="mb-4 p-3 bg-slate-50 border border-slate-200 rounded text-sm">
       <div className="font-medium text-slate-800 mb-1">Diagnostics</div>
       <p className="text-slate-600 mb-2">
-        Inspect verbatim OC responses and what we stored. Endpoints (same auth as the app):{' '}
-        <code className="text-xs break-all">GET /api/inventory-status/debug/snapshot-history-db</code> — rows in{' '}
-        <code className="text-xs">oc_sku_inventory_history</code> (one batch time per Pull latest data).{' '}
-        <code className="text-xs break-all">GET /api/inventory-status/debug-raw</code> — StockSnapshot v2 + SKU query.{' '}
-        <code className="text-xs break-all">GET /api/inventory-status/debug/oc-movement-raw?mfskuid=YOUR_MFSKUID</code> —
-        GetStockMovement (optional <code className="text-xs">from</code>/<code className="text-xs">to</code> dates).
+        Verbatim OC JSON and DB stats.{' '}
+        <code className="text-xs break-all">GET /api/inventory-status/debug/stock-movement-db</code> — persisted movement
+        rows. <code className="text-xs break-all">GET /api/inventory-status/debug-raw</code> — StockSnapshot v2 + SKU
+        query.{' '}
+        <code className="text-xs break-all">GET /api/inventory-status/debug/oc-movement-raw?mfskuid=…</code> — single
+        GetStockMovement call.
       </p>
       <button
         type="button"
         onClick={() => void dbDbg.refetch()}
         className="text-sm px-3 py-1 bg-slate-200 rounded hover:bg-slate-300"
       >
-        Load DB snapshot stats (JSON)
+        Load movement DB stats (JSON)
       </button>
       {dbDbg.isFetching && <span className="ml-2 text-slate-500">Loading…</span>}
       {dbDbg.data && (
@@ -100,12 +98,12 @@ function DiagnosticsPanel() {
 }
 
 export default function InventoryMovement() {
+  const queryClient = useQueryClient()
   const [periodPreset, setPeriodPreset] = useState<PeriodPreset>('1m')
   const [from, setFrom] = useState(() => lastNDaysFrom(30))
   const [to, setTo] = useState(() => todayIso())
   const [sellerSku, setSellerSku] = useState('')
   const [skuCode, setSkuCode] = useState('')
-  const [dataSource, setDataSource] = useState<MovementSource>('oc_api')
 
   const combinedSkuScope = !sellerSku.trim() && !skuCode.trim()
 
@@ -147,33 +145,33 @@ export default function InventoryMovement() {
     queryFn: async () => (await inventoryStatusAPI.listInventory()).data,
   })
 
-  const historyQuery = useQuery({
-    queryKey: ['inventory-history', from, to, sellerSku, skuCode],
+  const movementQuery = useQuery({
+    queryKey: ['stock-movement', from, to, sellerSku, skuCode],
     queryFn: async () =>
       (
-        await inventoryStatusAPI.listInventoryHistory({
+        await inventoryStatusAPI.listStockMovement({
           from,
           to,
           ...(sellerSku.trim() ? { seller_skuid: sellerSku.trim() } : {}),
           ...(skuCode.trim() ? { sku_code: skuCode.trim() } : {}),
-          limit: 20_000,
         })
       ).data,
-    enabled: dataSource === 'recorded',
   })
 
-  const ocQuery = useQuery({
-    queryKey: ['oc-stock-movement', from, to, sellerSku, skuCode],
-    queryFn: async () =>
-      (
-        await inventoryStatusAPI.listOcStockMovement({
-          from,
-          to,
-          ...(sellerSku.trim() ? { seller_skuid: sellerSku.trim() } : {}),
-          ...(skuCode.trim() ? { sku_code: skuCode.trim() } : {}),
-        })
-      ).data,
-    enabled: dataSource === 'oc_api',
+  type SyncStockMovementMode = { mode: 'incremental' } | { mode: 'range' }
+
+  const syncFromOcMutation = useMutation({
+    mutationFn: async (opts: SyncStockMovementMode) => {
+      if (opts.mode === 'incremental') {
+        const res = await inventoryStatusAPI.syncStockMovementFromOc({ incremental: true })
+        return res.data
+      }
+      const res = await inventoryStatusAPI.syncStockMovementFromOc({ from, to })
+      return res.data
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['stock-movement'] })
+    },
   })
 
   const invRows = useMemo(() => {
@@ -234,7 +232,7 @@ export default function InventoryMovement() {
   }, [invRows, skuCodeByMfskuid])
 
   const restockInsight = useMemo(() => {
-    const rows = ocQuery.data?.rows ?? []
+    const rows = movementQuery.data?.rows ?? []
     const net = rows.reduce((s, r) => s + r.quantity, 0)
     const days = calendarDaysInclusive(from, to)
     const avgDaily = net / days
@@ -244,31 +242,10 @@ export default function InventoryMovement() {
       coverDays = totalAvail / -avgDaily
     }
     return { net, days, avgDaily, totalAvail, coverDays }
-  }, [ocQuery.data?.rows, from, to, invRows])
-
-  const chartPoints = useMemo(() => {
-    const rows = historyQuery.data?.rows ?? []
-    const agg = new Map<string, number>()
-    for (const r of rows) {
-      const t = r.recorded_at
-      agg.set(t, (agg.get(t) ?? 0) + r.available)
-    }
-    return [...agg.entries()]
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([recorded_at, available]) => ({
-        recorded_at,
-        label: new Date(recorded_at).toLocaleString(undefined, {
-          month: 'short',
-          day: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-        }),
-        available,
-      }))
-  }, [historyQuery.data?.rows])
+  }, [movementQuery.data?.rows, from, to, invRows])
 
   const ocChartPoints = useMemo(() => {
-    const rows = ocQuery.data?.rows ?? []
+    const rows = movementQuery.data?.rows ?? []
     const agg = new Map<string, number>()
     for (const r of rows) {
       const dk = ocDateKey(r.update_time)
@@ -282,7 +259,7 @@ export default function InventoryMovement() {
         label: day,
         net_qty,
       }))
-  }, [ocQuery.data?.rows])
+  }, [movementQuery.data?.rows])
 
   const sellerOptions = useMemo(() => {
     const m = mappingsQuery.data ?? []
@@ -298,16 +275,10 @@ export default function InventoryMovement() {
     return out.sort((a, b) => a.localeCompare(b))
   }, [mappingsQuery.data])
 
-  const loading = dataSource === 'recorded' ? historyQuery.isLoading : ocQuery.isLoading
-  const isError = dataSource === 'recorded' ? historyQuery.isError : ocQuery.isError
+  const loading = movementQuery.isLoading
+  const isError = movementQuery.isError
   const errMsg =
-    dataSource === 'recorded'
-      ? historyQuery.error instanceof Error
-        ? historyQuery.error.message
-        : 'Failed to load history'
-      : ocQuery.error instanceof Error
-        ? ocQuery.error.message
-        : 'Failed to load OC movement'
+    movementQuery.error instanceof Error ? movementQuery.error.message : 'Failed to load movement data'
 
   const sortedInvTable = useMemo(() => {
     return [...invRows].sort((a, b) => a.available - b.available).slice(0, 40)
@@ -323,26 +294,23 @@ export default function InventoryMovement() {
       </div>
 
       <p className="text-gray-600 mb-4 max-w-3xl">
-        Current <strong>levels</strong> come from the last OC inventory sync. <strong>Movement</strong> from the OC API
-        shows real stock changes (so you can separate sell-through from simply having no listing activity). Leave seller
-        SKU and SKU code empty to <strong>combine all SKUs</strong>. Use filters to focus one SKU.{' '}
-        <strong>Recorded</strong> snapshots only exist for past sync times (not full OC history).
+        <strong>Current stock levels</strong> (available, in transit) live on{' '}
+        <Link to="/inventory-status" className="text-blue-600 hover:underline">
+          Inventory status
+        </Link>{' '}
+        → <strong>Pull latest data</strong>. This page is only for <strong>movement history</strong> from OrangeConnex.
       </p>
 
       <DiagnosticsPanel />
 
+      <p className="text-sm text-gray-600 mb-3 max-w-3xl">
+        <strong>Charts and table below</strong> read from EvampOps storage (not live OC). OrangeConnex only exposes
+        movement for roughly the <strong>last 12 months</strong>; anything we have synced earlier stays in the database
+        for reporting. Use <strong>Incremental sync</strong> regularly so new lines are captured before they fall
+        outside OC&apos;s API window.
+      </p>
+
       <div className="flex flex-wrap items-end gap-3 mb-6 p-4 bg-gray-50 border border-gray-200 rounded-lg">
-        <label className="text-sm">
-          <span className="text-gray-600 block mb-1">Source</span>
-          <select
-            value={dataSource}
-            onChange={(e) => setDataSource(e.target.value as MovementSource)}
-            className="rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm min-w-[14rem]"
-          >
-            <option value="oc_api">OC API (GetStockMovement)</option>
-            <option value="recorded">Recorded (sync snapshots)</option>
-          </select>
-        </label>
         <label className="text-sm">
           <span className="text-gray-600 block mb-1">Period</span>
           <select
@@ -413,14 +381,45 @@ export default function InventoryMovement() {
           type="button"
           onClick={() => {
             void inventoryQuery.refetch()
-            if (dataSource === 'recorded') void historyQuery.refetch()
-            else void ocQuery.refetch()
+            void movementQuery.refetch()
           }}
           className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
         >
           Refresh
         </button>
+        <button
+          type="button"
+          disabled={syncFromOcMutation.isPending}
+          onClick={() => syncFromOcMutation.mutate({ mode: 'range' })}
+          className="px-4 py-2 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:opacity-50"
+        >
+          {syncFromOcMutation.isPending ? 'Syncing…' : 'Sync range from OC'}
+        </button>
+        <button
+          type="button"
+          disabled={syncFromOcMutation.isPending}
+          onClick={() => syncFromOcMutation.mutate({ mode: 'incremental' })}
+          className="px-4 py-2 border border-indigo-600 text-indigo-700 text-sm rounded hover:bg-indigo-50 disabled:opacity-50"
+        >
+          Incremental sync
+        </button>
       </div>
+      {syncFromOcMutation.isError && (
+        <p className="text-red-600 text-sm mb-2">
+          {syncFromOcMutation.error instanceof Error ? syncFromOcMutation.error.message : 'Sync failed'}
+        </p>
+      )}
+      {syncFromOcMutation.isSuccess && syncFromOcMutation.data && (
+        <p className="text-green-800 text-sm mb-2">
+          Fetched {syncFromOcMutation.data.fetched}, inserted {syncFromOcMutation.data.inserted} (
+          {syncFromOcMutation.data.from_date} → {syncFromOcMutation.data.to_date}).
+          {syncFromOcMutation.data.clamped ? (
+            <span className="block mt-1 text-amber-800">
+              Range was limited to the last 12 months (OrangeConnex API constraint). Effective window is shown above.
+            </span>
+          ) : null}
+        </p>
+      )}
 
       {inventoryQuery.isLoading && <p className="text-gray-500 text-sm mb-2">Loading stock levels…</p>}
 
@@ -458,9 +457,9 @@ export default function InventoryMovement() {
         </div>
       )}
 
-      {dataSource === 'oc_api' && ocQuery.data && !ocQuery.isLoading && (
+      {movementQuery.data && !movementQuery.isLoading && (
         <div className="mb-6 p-4 bg-emerald-50 border border-emerald-200 rounded-lg text-sm">
-          <h2 className="text-sm font-semibold text-emerald-900 mb-2">Restock-oriented movement (selected period)</h2>
+          <h2 className="text-sm font-semibold text-emerald-900 mb-2">Restock-oriented movement (selected period, from DB)</h2>
           <p className="text-emerald-800 mb-2">
             Net quantity change: <strong>{formatDelta(restockInsight.net)}</strong> over {restockInsight.days} day(s) (
             ~{formatNum(restockInsight.avgDaily)} / day). Current available (same filter as above):{' '}
@@ -476,11 +475,11 @@ export default function InventoryMovement() {
             )}
           </p>
           <p className="text-xs text-emerald-800">
-            Scope: <code className="bg-emerald-100 px-1 rounded">{ocQuery.data.scope}</code> — {ocQuery.data.mfskuid_count}{' '}
-            MFSKUID(s).{' '}
-            {ocQuery.data.truncated ? (
+            Scope: <code className="bg-emerald-100 px-1 rounded">{movementQuery.data.scope}</code> —{' '}
+            {movementQuery.data.mfskuid_count} MFSKUID(s).{' '}
+            {movementQuery.data.truncated ? (
               <span className="text-amber-800">
-                Table truncated to {ocQuery.data.line_limit?.toLocaleString()} most recent lines.
+                Table truncated to {movementQuery.data.line_limit?.toLocaleString()} most recent lines.
               </span>
             ) : null}
           </p>
@@ -497,39 +496,14 @@ export default function InventoryMovement() {
       {loading && <p className="text-gray-500 text-sm">Loading movement…</p>}
       {isError && <p className="text-red-600 text-sm mb-4">{errMsg}</p>}
 
-      {dataSource === 'recorded' && historyQuery.data && (
+      {movementQuery.data && (
         <p className="text-xs text-gray-500 mb-2">
-          {historyQuery.data.note} Showing {historyQuery.data.row_count} row(s) for {historyQuery.data.from_date} →{' '}
-          {historyQuery.data.to_date}.
+          {movementQuery.data.note} {movementQuery.data.row_count.toLocaleString()} line(s), {movementQuery.data.from_date}{' '}
+          → {movementQuery.data.to_date}.
         </p>
       )}
 
-      {dataSource === 'oc_api' && ocQuery.data && (
-        <p className="text-xs text-gray-500 mb-2">
-          {ocQuery.data.note} {ocQuery.data.row_count.toLocaleString()} line(s), {ocQuery.data.from_date} →{' '}
-          {ocQuery.data.to_date}.
-        </p>
-      )}
-
-      {dataSource === 'recorded' && chartPoints.length > 0 && (
-        <div className="mb-8 bg-white border border-gray-200 rounded-lg p-4 h-72">
-          <h2 className="text-sm font-medium text-gray-700 mb-2">
-            Available {combinedSkuScope ? '(all SKUs combined, sum by sync time)' : '(filtered, sum by sync time)'}
-          </h2>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartPoints} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-              <XAxis dataKey="label" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
-              <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-              <Tooltip />
-              <Legend />
-              <Line type="monotone" dataKey="available" name="Available" stroke="#2563eb" dot={false} strokeWidth={2} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      )}
-
-      {dataSource === 'oc_api' && ocChartPoints.length > 0 && (
+      {ocChartPoints.length > 0 && (
         <div className="mb-8 bg-white border border-gray-200 rounded-lg p-4 h-72">
           <h2 className="text-sm font-medium text-gray-700 mb-2">
             Net quantity change by day {combinedSkuScope ? '(all SKUs combined)' : '(filtered)'}
@@ -586,85 +560,13 @@ export default function InventoryMovement() {
         </div>
       </div>
 
-      {dataSource === 'recorded' && (
-        <div className="bg-white shadow rounded-lg overflow-hidden border border-gray-200 mb-8">
+      <div className="bg-white shadow rounded-lg overflow-hidden border border-gray-200">
           <div className="p-3 border-b border-gray-200 flex justify-between items-center">
-            <h2 className="text-lg font-semibold text-gray-800">Recorded observations</h2>
-            {historyQuery.data?.row_count === 0 && !historyQuery.isLoading && (
-              <span className="text-sm text-amber-700">
-                No history yet — run <strong>Pull latest data</strong> on Inventory status periodically.
+            <h2 className="text-lg font-semibold text-gray-800">Stored movement lines</h2>
+            {movementQuery.data?.row_count === 0 && !movementQuery.isLoading && (
+              <span className="text-sm text-gray-600">
+                No rows in this range — run <strong>Sync range from OC</strong> or <strong>Incremental sync</strong>.
               </span>
-            )}
-          </div>
-          <div className="overflow-x-auto max-h-[min(70vh,720px)] overflow-y-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-gray-50 sticky top-0">
-                <tr>
-                  <th className="px-3 py-2 text-left font-medium text-gray-700">Recorded (UTC)</th>
-                  <th className="px-3 py-2 text-left font-medium text-gray-700">SKU</th>
-                  <th className="px-3 py-2 text-left font-medium text-gray-700">Seller SKU</th>
-                  <th className="px-3 py-2 text-left font-medium text-gray-700">Region</th>
-                  <th className="px-3 py-2 text-right font-medium text-gray-700">Avail</th>
-                  <th className="px-3 py-2 text-right font-medium text-gray-700">Δ Avail</th>
-                  <th className="px-3 py-2 text-right font-medium text-gray-700">In transit</th>
-                  <th className="px-3 py-2 text-right font-medium text-gray-700">Δ Transit</th>
-                  <th className="px-3 py-2 text-right font-medium text-gray-700">Received</th>
-                  <th className="px-3 py-2 text-right font-medium text-gray-700">Δ Recv</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {(historyQuery.data?.rows ?? []).map((r, i) => (
-                  <tr key={`${r.recorded_at}-${r.mfskuid}-${r.service_region}-${i}`} className="hover:bg-gray-50">
-                    <td className="px-3 py-1.5 text-gray-800 whitespace-nowrap font-mono text-xs">
-                      {new Date(r.recorded_at).toISOString().replace('T', ' ').slice(0, 19)}Z
-                    </td>
-                    <td className="px-3 py-1.5 text-gray-800">{r.sku_code ?? '—'}</td>
-                    <td className="px-3 py-1.5 font-mono text-xs">{r.seller_skuid ?? '—'}</td>
-                    <td className="px-3 py-1.5 text-gray-600">{r.service_region}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{r.available}</td>
-                    <td
-                      className={`px-3 py-1.5 text-right tabular-nums font-medium ${
-                        r.delta_available == null
-                          ? 'text-gray-400'
-                          : r.delta_available > 0
-                            ? 'text-green-700'
-                            : r.delta_available < 0
-                              ? 'text-red-700'
-                              : 'text-gray-700'
-                      }`}
-                    >
-                      {formatDelta(r.delta_available)}
-                    </td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{r.in_transit}</td>
-                    <td
-                      className={`px-3 py-1.5 text-right tabular-nums ${
-                        r.delta_in_transit == null
-                          ? 'text-gray-400'
-                          : r.delta_in_transit > 0
-                            ? 'text-green-700'
-                            : r.delta_in_transit < 0
-                              ? 'text-red-700'
-                              : 'text-gray-700'
-                      }`}
-                    >
-                      {formatDelta(r.delta_in_transit)}
-                    </td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">{r.received}</td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-gray-700">{formatDelta(r.delta_received)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {dataSource === 'oc_api' && (
-        <div className="bg-white shadow rounded-lg overflow-hidden border border-gray-200">
-          <div className="p-3 border-b border-gray-200 flex justify-between items-center">
-            <h2 className="text-lg font-semibold text-gray-800">OC movement lines</h2>
-            {ocQuery.data?.row_count === 0 && !ocQuery.isLoading && (
-              <span className="text-sm text-gray-600">No movements in this range.</span>
             )}
           </div>
           <div className="overflow-x-auto max-h-[min(70vh,720px)] overflow-y-auto">
@@ -684,7 +586,7 @@ export default function InventoryMovement() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {(ocQuery.data?.rows ?? []).map((r, i) => (
+                {(movementQuery.data?.rows ?? []).map((r, i) => (
                   <tr key={`${r.movement_id}-${r.update_time}-${i}`} className="hover:bg-gray-50">
                     <td className="px-3 py-1.5 text-gray-800 whitespace-nowrap font-mono text-xs">{r.update_time || '—'}</td>
                     <td className="px-3 py-1.5 text-gray-800">{r.sku_code ?? '—'}</td>
@@ -710,7 +612,6 @@ export default function InventoryMovement() {
             </table>
           </div>
         </div>
-      )}
     </div>
   )
 }

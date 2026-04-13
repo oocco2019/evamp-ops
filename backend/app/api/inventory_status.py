@@ -22,16 +22,20 @@ from app.models.settings import (
     OCConnection,
     OCSkuMapping,
     OCSkuInventory,
-    OCSkuInventoryHistory,
+    OCStockMovementLine,
     OCInboundOrder,
 )
 from app.models.messages import SyncMetadata
 from app.models.stock import LineItem, Order
 from app.core.security import encryption_service
-from app.services.inventory_history import HistoryPoint, attach_deltas
+from app.services.oc_stock_movement_store import (
+    max_movement_update_time_utc,
+    persist_oc_stock_movement_lines,
+)
 from app.services.oc_client import (
     OCAPIError,
     OCConfigError,
+    clamp_oc_movement_query_bounds,
     oc_build_authorize_url,
     oc_debug_inbound_detail_raw,
     oc_debug_raw_calls,
@@ -49,7 +53,6 @@ logger = logging.getLogger(__name__)
 
 SYNC_META_INBOUND_LAST = "oc_inbound_last_sync_at"
 SYNC_META_INBOUND_STATUS_FILTER = "inventory_inbound_status_filter_excluded"
-
 
 def _inbound_status_is_canceled(status: Optional[str]) -> bool:
     """True if OC status indicates the inbound was canceled (Canceled, Cancelled, etc.)."""
@@ -139,38 +142,8 @@ class OCSkuInventoryResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class InventoryHistoryRowResponse(BaseModel):
-    recorded_at: str
-    sku_code: Optional[str] = None
-    seller_skuid: Optional[str] = None
-    mfskuid: str
-    service_region: str
-    available: int
-    in_transit: int
-    received: int
-    reserved_allocated: int
-    reserved_hold: int
-    reserved_vas: int
-    suspend: int
-    unfulfillable: int
-    delta_available: Optional[int] = None
-    delta_in_transit: Optional[int] = None
-    delta_received: Optional[int] = None
-
-
-class InventoryHistoryResponse(BaseModel):
-    rows: List[InventoryHistoryRowResponse]
-    from_date: str
-    to_date: str
-    row_count: int
-    note: str = (
-        "History is recorded on each Pull latest data / scheduled inventory sync. "
-        "Movement is the change vs the previous observation for the same MFSKUID and region."
-    )
-
-
 class OCStockMovementRowResponse(BaseModel):
-    """One inventory movement line from OC GetStockMovement (live API)."""
+    """One inventory movement line (stored from OC GetStockMovement)."""
 
     update_time: str
     mfskuid: str
@@ -197,10 +170,20 @@ class OCStockMovementResponse(BaseModel):
     truncated: bool = False
     line_limit: Optional[int] = Field(None, description="If set, response was cut to this many lines (most recent).")
     note: str = (
-        "Live data from OrangeConnex GetStockMovement (POST /openapi/3pp/inventory/v1/movement). "
-        "OC allows up to ~7 days per request and about the past year of history; EvampOps splits longer ranges. "
-        "Omit seller SKU, SKU code, and mfskuid to aggregate all mapped SKUs (can be slow for long ranges)."
+        "Rows read from EvampOps DB (filled by POST /sync-stock-movement). "
+        "Sync pulls OrangeConnex GetStockMovement and upserts by movement id so repeat syncs are incremental."
     )
+
+
+class SyncStockMovementResponse(BaseModel):
+    fetched: int
+    inserted: int
+    from_date: str
+    to_date: str
+    mfskuid_count: int
+    scope: str
+    clamped: bool = False
+    """True if the requested date range was narrowed to OC's last-12-months limit (see from_date/to_date)."""
 
 
 class OCAuthUrlRequest(BaseModel):
@@ -246,19 +229,14 @@ class OCDebugMovementRawResponse(BaseModel):
     )
 
 
-class SnapshotHistoryDbDebugResponse(BaseModel):
-    """What EvampOps actually stored from Pull latest data (append-only snapshots; not OC historic backfill)."""
+class StoredMovementDbDebugResponse(BaseModel):
+    """Summary of `oc_stock_movement_line` (persisted GetStockMovement lines)."""
 
     connection_id: int
     total_rows: int
-    earliest_recorded_at: Optional[str] = None
-    latest_recorded_at: Optional[str] = None
-    distinct_sync_batches: int
-    recent_sync_times_utc: List[str]
-    note: str = (
-        "Each Pull latest data writes one batch_time for all SKUs in that run. "
-        "There is no older data until you had syncs then — OC snapshot API does not return past dates."
-    )
+    earliest_update_utc: Optional[str] = None
+    latest_update_utc: Optional[str] = None
+    note: str = "Filled by POST /sync-stock-movement; duplicate movement ids are skipped."
 
 
 class OCInboundRawDebugResponse(BaseModel):
@@ -1035,7 +1013,6 @@ async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
             )
         )
         synced += 1
-    batch_time = datetime.now(timezone.utc).replace(tzinfo=None)
     for inv in inventory_rows_data:
         mf = str(inv.get("mfskuid") or "").strip()
         sr = str(inv.get("service_region") or connection.region or "UK").strip() or "UK"
@@ -1052,22 +1029,6 @@ async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
                 reserved_vas=int(inv.get("reserved_vas") or 0),
                 suspend=int(inv.get("suspend") or 0),
                 unfulfillable=int(inv.get("unfulfillable") or 0),
-            )
-        )
-        db.add(
-            OCSkuInventoryHistory(
-                connection_id=connection.id,
-                mfskuid=mf,
-                service_region=sr,
-                available=int(inv.get("available") or 0),
-                in_transit=int(inv.get("in_transit") or 0),
-                received=int(inv.get("received") or 0),
-                reserved_allocated=int(inv.get("reserved_allocated") or 0),
-                reserved_hold=int(inv.get("reserved_hold") or 0),
-                reserved_vas=int(inv.get("reserved_vas") or 0),
-                suspend=int(inv.get("suspend") or 0),
-                unfulfillable=int(inv.get("unfulfillable") or 0),
-                recorded_at=batch_time,
             )
         )
         inventory_rows += 1
@@ -1209,172 +1170,14 @@ async def list_oc_inventory(
     return payload
 
 
-def _iso_history_ts(dt: datetime) -> str:
-    """Serialize DB naive UTC datetimes for JSON."""
-    if dt.tzinfo is not None:
-        return dt.astimezone(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
-    return dt.isoformat() + "Z"
-
-
-@router.get("/inventory-history", response_model=InventoryHistoryResponse)
-async def list_inventory_history(
-    db: AsyncSession = Depends(get_db),
-    from_date: Optional[date] = Query(None, alias="from"),
-    to_date: Optional[date] = Query(None, alias="to"),
-    seller_skuid: Optional[str] = None,
-    sku_code: Optional[str] = None,
-    mfskuid: Optional[str] = None,
-    limit: int = Query(8000, ge=50, le=20000),
-):
-    """
-    Snapshot history: quantities recorded each time OC inventory sync runs.
-    Deltas compare each row to the previous observation for the same MFSKUID + region.
-    """
-    cid = await _active_oc_connection_id(db)
-    if not cid:
-        raise HTTPException(status_code=400, detail="No active OC connection configured.")
-
-    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
-    eff_to = to_date or now_naive.date()
-    eff_from = from_date or (eff_to - timedelta(days=30))
-    start_dt = datetime.combine(eff_from, dt_time.min)
-    end_dt = datetime.combine(eff_to, dt_time.max)
-
-    stmt = select(OCSkuInventoryHistory).where(
-        OCSkuInventoryHistory.connection_id == cid,
-        OCSkuInventoryHistory.recorded_at >= start_dt,
-        OCSkuInventoryHistory.recorded_at <= end_dt,
-    )
-
-    mf_key = (mfskuid or "").strip()
-    if mf_key:
-        stmt = stmt.where(OCSkuInventoryHistory.mfskuid == mf_key)
-    elif (seller_skuid or "").strip():
-        sk = seller_skuid.strip()
-        mr = await db.execute(
-            select(OCSkuMapping.mfskuid).where(
-                OCSkuMapping.connection_id == cid,
-                OCSkuMapping.seller_skuid == sk,
-            )
-        )
-        mfs = [row[0] for row in mr.all() if row[0]]
-        if not mfs:
-            return InventoryHistoryResponse(
-                rows=[],
-                from_date=eff_from.isoformat(),
-                to_date=eff_to.isoformat(),
-                row_count=0,
-            )
-        stmt = stmt.where(OCSkuInventoryHistory.mfskuid.in_(mfs))
-    elif (sku_code or "").strip():
-        sc = sku_code.strip()
-        mr = await db.execute(
-            select(OCSkuMapping.mfskuid).where(
-                OCSkuMapping.connection_id == cid,
-                OCSkuMapping.sku_code == sc,
-            )
-        )
-        mfs = [row[0] for row in mr.all() if row[0]]
-        if not mfs:
-            return InventoryHistoryResponse(
-                rows=[],
-                from_date=eff_from.isoformat(),
-                to_date=eff_to.isoformat(),
-                row_count=0,
-            )
-        stmt = stmt.where(OCSkuInventoryHistory.mfskuid.in_(mfs))
-
-    stmt = stmt.order_by(OCSkuInventoryHistory.recorded_at.asc()).limit(limit)
-    hist_result = await db.execute(stmt)
-    hist_rows = list(hist_result.scalars().all())
-
-    map_result = await db.execute(select(OCSkuMapping).where(OCSkuMapping.connection_id == cid))
-    mappings = list(map_result.scalars().all())
-    by_mf_lower: dict[str, tuple[str, str]] = {}
-    for m in mappings:
-        k = (m.mfskuid or "").strip().lower()
-        if k and k not in by_mf_lower:
-            by_mf_lower[k] = ((m.sku_code or "").strip(), (m.seller_skuid or "").strip())
-
-    points = [
-        HistoryPoint(
-            h.recorded_at,
-            h.mfskuid,
-            h.service_region,
-            h.available,
-            h.in_transit,
-            h.received,
-        )
-        for h in hist_rows
-    ]
-    with_deltas = attach_deltas(points)
-
-    out_rows: List[InventoryHistoryRowResponse] = []
-
-    def _match_hist_row(d_rec: datetime, d_mf: str, d_reg: str) -> Optional[OCSkuInventoryHistory]:
-        d_reg_u = (d_reg or "").upper()
-        for h in hist_rows:
-            if (
-                h.recorded_at == d_rec
-                and h.mfskuid == d_mf
-                and (h.service_region or "").upper() == d_reg_u
-            ):
-                return h
-        return None
-
-    for d in with_deltas:
-        src = _match_hist_row(d["recorded_at"], d["mfskuid"], d["service_region"])
-        if not src:
-            continue
-        mfk = (d["mfskuid"] or "").strip().lower()
-        sku_c, sell_sku = by_mf_lower.get(mfk, (None, None))
-        out_rows.append(
-            InventoryHistoryRowResponse(
-                recorded_at=_iso_history_ts(d["recorded_at"]),
-                sku_code=sku_c,
-                seller_skuid=sell_sku or None,
-                mfskuid=d["mfskuid"],
-                service_region=d["service_region"],
-                available=src.available,
-                in_transit=src.in_transit,
-                received=src.received,
-                reserved_allocated=src.reserved_allocated,
-                reserved_hold=src.reserved_hold,
-                reserved_vas=src.reserved_vas,
-                suspend=src.suspend,
-                unfulfillable=src.unfulfillable,
-                delta_available=d.get("delta_available"),
-                delta_in_transit=d.get("delta_in_transit"),
-                delta_received=d.get("delta_received"),
-            )
-        )
-
-    return InventoryHistoryResponse(
-        rows=out_rows,
-        from_date=eff_from.isoformat(),
-        to_date=eff_to.isoformat(),
-        row_count=len(out_rows),
-    )
-
-
-@router.get("/oc-stock-movement", response_model=OCStockMovementResponse)
-async def list_oc_stock_movement(
-    db: AsyncSession = Depends(get_db),
-    from_date: Optional[date] = Query(None, alias="from"),
-    to_date: Optional[date] = Query(None, alias="to"),
-    seller_skuid: Optional[str] = None,
-    sku_code: Optional[str] = None,
-    mfskuid: Optional[str] = None,
-    line_limit: int = Query(25_000, ge=500, le=100_000, description="Max movement lines returned (newest first if truncated)."),
-):
-    """
-    Fetch inventory movement lines from OrangeConnex (historic, within OC limits), not from EvampOps snapshot history.
-    Omit seller_skuid, sku_code, and mfskuid to query **all** mapped MFSKUIDs (combined dashboard view; may be slow).
-    """
-    cid = await _active_oc_connection_id(db)
-    if not cid:
-        raise HTTPException(status_code=400, detail="No active OC connection configured.")
-
+async def _resolve_mfsku_list_for_movement(
+    db: AsyncSession,
+    cid: int,
+    seller_skuid: Optional[str],
+    sku_code: Optional[str],
+    mfskuid: Optional[str],
+) -> tuple[List[str], str]:
+    """Return (mfsku ids, scope filtered|all_mapped_skus)."""
     scope = "filtered"
     mf_key = (mfskuid or "").strip()
     mfs: List[str] = []
@@ -1404,7 +1207,25 @@ async def list_oc_stock_movement(
             select(OCSkuMapping.mfskuid).where(OCSkuMapping.connection_id == cid).distinct()
         )
         mfs = sorted({str(row[0]).strip() for row in mr.all() if row[0]})
+    return mfs, scope
 
+
+@router.get("/stock-movement", response_model=OCStockMovementResponse)
+async def list_stock_movement(
+    db: AsyncSession = Depends(get_db),
+    from_date: Optional[date] = Query(None, alias="from"),
+    to_date: Optional[date] = Query(None, alias="to"),
+    seller_skuid: Optional[str] = None,
+    sku_code: Optional[str] = None,
+    mfskuid: Optional[str] = None,
+    line_limit: int = Query(25_000, ge=500, le=100_000, description="Max movement lines returned (newest first if truncated)."),
+):
+    """Movement lines persisted from OC GetStockMovement (POST /sync-stock-movement)."""
+    cid = await _active_oc_connection_id(db)
+    if not cid:
+        raise HTTPException(status_code=400, detail="No active OC connection configured.")
+
+    mfs, scope = await _resolve_mfsku_list_for_movement(db, cid, seller_skuid, sku_code, mfskuid)
     if not mfs:
         return OCStockMovementResponse(
             rows=[],
@@ -1418,17 +1239,24 @@ async def list_oc_stock_movement(
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
     eff_to = to_date or now_naive.date()
     eff_from = from_date or (eff_to - timedelta(days=30))
-    start_utc = datetime.combine(eff_from, dt_time.min, tzinfo=timezone.utc)
-    end_utc = datetime.combine(eff_to, dt_time.max, tzinfo=timezone.utc)
+    start_dt = datetime.combine(eff_from, dt_time.min)
+    end_dt = datetime.combine(eff_to, dt_time.max)
 
-    try:
-        raw_rows = await oc_fetch_stock_movement_rows(db, mfs, start_utc, end_utc)
-    except OCAPIError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
+    mf_list = list({str(x).strip().lower() for x in mfs if str(x).strip()})
+    stmt = select(OCStockMovementLine).where(
+        OCStockMovementLine.connection_id == cid,
+        func.lower(OCStockMovementLine.mfskuid).in_(mf_list),
+        OCStockMovementLine.update_time_utc.isnot(None),
+        OCStockMovementLine.update_time_utc >= start_dt,
+        OCStockMovementLine.update_time_utc <= end_dt,
+    )
+    stmt = stmt.order_by(OCStockMovementLine.update_time_utc.asc(), OCStockMovementLine.id.asc())
+    res = await db.execute(stmt)
+    db_rows = list(res.scalars().all())
 
     truncated = False
-    if len(raw_rows) > line_limit:
-        raw_rows = raw_rows[-line_limit:]
+    if len(db_rows) > line_limit:
+        db_rows = db_rows[-line_limit:]
         truncated = True
 
     map_result = await db.execute(select(OCSkuMapping).where(OCSkuMapping.connection_id == cid))
@@ -1440,22 +1268,22 @@ async def list_oc_stock_movement(
             sku_by_mf_lower[k] = (m.sku_code or "").strip()
 
     out_rows: List[OCStockMovementRowResponse] = []
-    for r in raw_rows:
-        mfk = (r.get("mfskuid") or "").strip().lower()
+    for row in db_rows:
+        mfk = (row.mfskuid or "").strip().lower()
         sku_c = sku_by_mf_lower.get(mfk) or None
         out_rows.append(
             OCStockMovementRowResponse(
-                update_time=r.get("update_time") or "",
-                mfskuid=str(r.get("mfskuid") or ""),
+                update_time=row.update_time_raw or "",
+                mfskuid=str(row.mfskuid or ""),
                 sku_code=sku_c or None,
-                seller_skuid=r.get("seller_skuid"),
-                service_region=str(r.get("service_region") or ""),
-                inventory_status=str(r.get("inventory_status") or ""),
-                movement_id=str(r.get("movement_id") or ""),
-                quantity=int(r.get("quantity") or 0),
-                actual_count=r.get("actual_count"),
-                reason=r.get("reason"),
-                order_number=r.get("order_number"),
+                seller_skuid=row.seller_skuid,
+                service_region=str(row.service_region or ""),
+                inventory_status=str(row.inventory_status or ""),
+                movement_id=str(row.movement_id or ""),
+                quantity=int(row.quantity or 0),
+                actual_count=row.actual_count,
+                reason=row.reason,
+                order_number=row.order_number,
             )
         )
 
@@ -1469,6 +1297,119 @@ async def list_oc_stock_movement(
         truncated=truncated,
         line_limit=line_limit if truncated else None,
     )
+
+
+async def execute_stock_movement_pull(
+    db: AsyncSession,
+    from_date: Optional[date] = None,
+    to_date: Optional[date] = None,
+    incremental: bool = False,
+) -> SyncStockMovementResponse:
+    """
+    Pull GetStockMovement from OrangeConnex for the date range and upsert into oc_stock_movement_line.
+    OC only exposes ~the last 12 months; older intervals are clamped (see clamped on response).
+    Rows we insert are kept indefinitely in PostgreSQL — run incremental sync regularly so history is
+    captured before it ages out of OC's API window.
+    If incremental=True and from_date is omitted, starts ~2 days before the newest stored movement (or last 14d if empty).
+    """
+    cid = await _active_oc_connection_id(db)
+    if not cid:
+        raise HTTPException(status_code=400, detail="No active OC connection configured.")
+
+    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    eff_to = to_date or now_naive.date()
+
+    mfs, scope = await _resolve_mfsku_list_for_movement(db, cid, None, None, None)
+    if not mfs:
+        return SyncStockMovementResponse(
+            fetched=0,
+            inserted=0,
+            from_date=eff_to.isoformat(),
+            to_date=eff_to.isoformat(),
+            mfskuid_count=0,
+            scope="all_mapped_skus",
+            clamped=False,
+        )
+
+    if from_date:
+        eff_from = from_date
+    elif incremental:
+        wm = await max_movement_update_time_utc(db, cid)
+        if wm:
+            if wm.tzinfo is not None:
+                wm = wm.astimezone(timezone.utc).replace(tzinfo=None)
+            wm_date = wm.date() if isinstance(wm, datetime) else eff_to
+            eff_from = max(wm_date - timedelta(days=2), eff_to - timedelta(days=365))
+        else:
+            eff_from = eff_to - timedelta(days=14)
+    else:
+        eff_from = eff_to - timedelta(days=30)
+
+    start_utc = datetime.combine(eff_from, dt_time.min, tzinfo=timezone.utc)
+    end_utc = datetime.combine(eff_to, dt_time.max, tzinfo=timezone.utc)
+
+    c_start, c_end = clamp_oc_movement_query_bounds(start_utc, end_utc)
+    clamped = (c_start != start_utc) or (c_end != end_utc)
+    if clamped:
+        logger.info(
+            "Stock movement range clamped for OC GetStockMovement (12-month API limit): requested %s..%s -> %s..%s",
+            start_utc.isoformat(),
+            end_utc.isoformat(),
+            c_start.isoformat(),
+            c_end.isoformat(),
+        )
+
+    if c_start >= c_end:
+        return SyncStockMovementResponse(
+            fetched=0,
+            inserted=0,
+            from_date=c_start.date().isoformat(),
+            to_date=c_end.date().isoformat(),
+            mfskuid_count=len(mfs),
+            scope=scope,
+            clamped=clamped,
+        )
+
+    try:
+        raw_rows = await oc_fetch_stock_movement_rows(db, mfs, start_utc, end_utc)
+    except OCAPIError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+    inserted = await persist_oc_stock_movement_lines(db, cid, raw_rows)
+    await db.commit()
+    return SyncStockMovementResponse(
+        fetched=len(raw_rows),
+        inserted=inserted,
+        from_date=c_start.date().isoformat(),
+        to_date=c_end.date().isoformat(),
+        mfskuid_count=len(mfs),
+        scope=scope,
+        clamped=clamped,
+    )
+
+
+@router.post("/sync-stock-movement", response_model=SyncStockMovementResponse)
+async def sync_stock_movement(
+    db: AsyncSession = Depends(get_db),
+    from_date: Optional[date] = Query(None, alias="from"),
+    to_date: Optional[date] = Query(None, alias="to"),
+    incremental: bool = Query(
+        False,
+        description="If true and from is omitted, extend from stored data (overlap) instead of default 30d window.",
+    ),
+):
+    """Fetch OC GetStockMovement for the range and store new lines (skips duplicates by movement id)."""
+    try:
+        return await execute_stock_movement_pull(
+            db,
+            from_date=from_date,
+            to_date=to_date,
+            incremental=incremental,
+        )
+    except OCAPIError:
+        raise
+    except HTTPException:
+        raise
 
 
 async def execute_oc_inbound_sync(db: AsyncSession, full: bool) -> InboundSyncResponse:
@@ -1845,12 +1786,9 @@ async def debug_oc_movement_raw(
         raise HTTPException(status_code=502, detail=str(e)) from e
 
 
-@router.get("/debug/snapshot-history-db", response_model=SnapshotHistoryDbDebugResponse)
-async def debug_snapshot_history_db(db: AsyncSession = Depends(get_db)):
-    """
-    Rows EvampOps stored in `oc_sku_inventory_history` (one `recorded_at` batch per Pull latest data run).
-    Use this to see why the Recorded chart only spans recent dates: nothing is backfilled from OC.
-    """
+@router.get("/debug/stock-movement-db", response_model=StoredMovementDbDebugResponse)
+async def debug_stock_movement_db(db: AsyncSession = Depends(get_db)):
+    """Row counts and time range for persisted OC movement lines."""
     cid = await _active_oc_connection_id(db)
     if not cid:
         raise HTTPException(status_code=400, detail="No active OC connection configured.")
@@ -1858,32 +1796,14 @@ async def debug_snapshot_history_db(db: AsyncSession = Depends(get_db)):
     agg = (
         await db.execute(
             select(
-                func.count(OCSkuInventoryHistory.id),
-                func.min(OCSkuInventoryHistory.recorded_at),
-                func.max(OCSkuInventoryHistory.recorded_at),
-            ).where(OCSkuInventoryHistory.connection_id == cid)
+                func.count(OCStockMovementLine.id),
+                func.min(OCStockMovementLine.update_time_utc),
+                func.max(OCStockMovementLine.update_time_utc),
+            ).where(OCStockMovementLine.connection_id == cid)
         )
     ).one()
     total_rows = int(agg[0] or 0)
     earliest, latest = agg[1], agg[2]
-
-    subq = (
-        select(OCSkuInventoryHistory.recorded_at)
-        .where(OCSkuInventoryHistory.connection_id == cid)
-        .distinct()
-        .subquery()
-    )
-    distinct_sync_batches = int((await db.execute(select(func.count()).select_from(subq))).scalar_one() or 0)
-
-    recent = (
-        await db.execute(
-            select(OCSkuInventoryHistory.recorded_at)
-            .where(OCSkuInventoryHistory.connection_id == cid)
-            .distinct()
-            .order_by(OCSkuInventoryHistory.recorded_at.desc())
-            .limit(40)
-        )
-    ).scalars().all()
 
     def _iso(dt: Optional[datetime]) -> Optional[str]:
         if dt is None:
@@ -1892,13 +1812,11 @@ async def debug_snapshot_history_db(db: AsyncSession = Depends(get_db)):
             return dt.astimezone(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
         return dt.isoformat() + "Z"
 
-    return SnapshotHistoryDbDebugResponse(
+    return StoredMovementDbDebugResponse(
         connection_id=cid,
         total_rows=total_rows,
-        earliest_recorded_at=_iso(earliest),
-        latest_recorded_at=_iso(latest),
-        distinct_sync_batches=distinct_sync_batches,
-        recent_sync_times_utc=[_iso(x) for x in recent if x is not None],
+        earliest_update_utc=_iso(earliest),
+        latest_update_utc=_iso(latest),
     )
 
 

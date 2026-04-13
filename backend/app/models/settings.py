@@ -195,30 +195,30 @@ class OCSkuInventory(Base):
     )
 
 
-class OCSkuInventoryHistory(Base):
+class OCStockMovementLine(Base):
     """
-    Append-only inventory quantities observed on each OC sync (snapshot history).
-    Used for stock movement / availability over time; OC integration only exposes current snapshot.
+    Persisted lines from OC GetStockMovement; upserted on sync so dashboards read DB without re-pulling full history.
     """
 
-    __tablename__ = "oc_sku_inventory_history"
+    __tablename__ = "oc_stock_movement_line"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    connection_id: Mapped[int] = mapped_column(ForeignKey("oc_connections.id", ondelete="CASCADE"), nullable=False)
+    connection_id: Mapped[int] = mapped_column(ForeignKey("oc_connections.id", ondelete="CASCADE"), nullable=False, index=True)
     mfskuid: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    service_region: Mapped[str] = mapped_column(String(20), nullable=False, default="UK")
-    available: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    in_transit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    received: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    reserved_allocated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    reserved_hold: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    reserved_vas: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    suspend: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    unfulfillable: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    seller_skuid: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    service_region: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    inventory_status: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    movement_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    actual_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    order_number: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    update_time_raw: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    update_time_utc: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
-        # Typical query: time range + optional mfskuid
+        UniqueConstraint("connection_id", "movement_id", name="uq_oc_stock_mov_conn_movement"),
     )
 
 

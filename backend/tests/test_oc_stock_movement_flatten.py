@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.services.oc_client import (
     _iter_movement_windows,
+    clamp_oc_movement_query_bounds,
     flatten_stock_movement_response,
 )
 
@@ -70,3 +71,29 @@ def test_iter_movement_windows_single_day():
     wins = _iter_movement_windows(start, end)
     assert len(wins) == 1
     assert wins[0] == (start, end)
+
+
+def test_clamp_raises_old_start_to_lookback():
+    ref = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+    start = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 6, 10, 23, 59, 59, tzinfo=timezone.utc)
+    s, e = clamp_oc_movement_query_bounds(start, end, reference_time=ref)
+    assert s == ref - timedelta(days=365)
+    assert e == end
+
+
+def test_clamp_caps_end_to_reference_now():
+    ref = datetime(2026, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+    start = datetime(2025, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2027, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    s, e = clamp_oc_movement_query_bounds(start, end, reference_time=ref)
+    assert e == ref
+    assert s >= ref - timedelta(days=365)
+
+
+def test_clamp_empty_range_when_entirely_before_window():
+    ref = datetime(2026, 1, 10, 12, 0, 0, tzinfo=timezone.utc)
+    start = datetime(2018, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2019, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    s, e = clamp_oc_movement_query_bounds(start, end, reference_time=ref)
+    assert s >= e

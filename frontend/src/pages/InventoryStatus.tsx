@@ -698,11 +698,24 @@ export default function InventoryStatus() {
     },
   })
 
-  /** Same steps as server-scheduled refresh + Sales Analytics background import: incremental eBay + OC syncs. */
+  /**
+   * Same steps as server-scheduled refresh: eBay import, OC SKU + inventory snapshot, OC stock movement (incremental),
+   * inbound cache. Movement is best-effort so a OC range/API error does not fail the whole pull.
+   */
   const executeInventoryPull = useCallback(async () => {
     await stockAPI.runImport('incremental')
     await inventoryStatusAPI.syncSkuMappings()
+    let movementSummary = ''
+    try {
+      const mvRes = await inventoryStatusAPI.syncStockMovementFromOc({ incremental: true })
+      const mv = mvRes.data
+      const clampNote = mv.clamped ? ' (range clamped to OC last-12-months limit).' : ''
+      movementSummary = ` OrangeConnex stock movement: inserted ${mv.inserted} new line(s) (${mv.from_date} → ${mv.to_date}).${clampNote}`
+    } catch (e: unknown) {
+      movementSummary = ` OrangeConnex stock movement sync skipped: ${e instanceof Error ? e.message : String(e)}`
+    }
     await inventoryStatusAPI.syncInboundOrders(false)
+    return movementSummary
   }, [])
 
   const suppressPullNoticeRef = useRef(false)
@@ -712,15 +725,17 @@ export default function InventoryStatus() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['inventory-status'] })
       qc.invalidateQueries({ queryKey: ['analytics'] })
+      qc.invalidateQueries({ queryKey: ['stock-movement'] })
     },
-    onSuccess: () => {
+    onSuccess: (movementSummary: string) => {
       if (suppressPullNoticeRef.current) {
         suppressPullNoticeRef.current = false
         return
       }
       setError(null)
       setNotice(
-        'Latest data pulled: eBay orders (incremental import), OrangeConnex SKU mappings + inventory snapshot, and inbound cache (incremental).'
+        'Latest data pulled: eBay orders (incremental import), OrangeConnex SKU mappings + inventory snapshot, inbound cache (incremental).' +
+          movementSummary
       )
     },
     onError: (e: unknown) => {
