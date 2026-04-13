@@ -4,16 +4,15 @@ import { Link } from 'react-router-dom'
 import {
   LineChart,
   Line,
-  BarChart,
-  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  Legend,
+  ReferenceLine,
 } from 'recharts'
 import { inventoryStatusAPI } from '../services/api'
+import { buildDailyStockLevelsFromHistory } from '../utils/inventoryHistoryFormat'
 
 const formatLocalDate = (d: Date): string => {
   const year = d.getFullYear()
@@ -39,26 +38,6 @@ function formatDelta(n: number | null): string {
   if (n === null || n === undefined) return '—'
   if (n === 0) return '0'
   return n > 0 ? `+${n}` : String(n)
-}
-
-function calendarDaysInclusive(fromIso: string, toIso: string): number {
-  const a = new Date(`${fromIso}T12:00:00`)
-  const b = new Date(`${toIso}T12:00:00`)
-  return Math.max(1, Math.round((b.getTime() - a.getTime()) / 86_400_000) + 1)
-}
-
-function formatNum(n: number): string {
-  if (!Number.isFinite(n)) return '—'
-  return n >= 10 ? Math.round(n).toLocaleString() : n.toFixed(1)
-}
-
-/** OC returns times like 2024-07-15T19:48:37+0800 — take YYYY-MM-DD for daily rollups. */
-function ocDateKey(updateTime: string): string | null {
-  const s = (updateTime || '').trim()
-  if (s.length >= 10 && /^\d{4}-\d{2}-\d{2}/.test(s)) {
-    return s.slice(0, 10)
-  }
-  return null
 }
 
 function DiagnosticsPanel() {
@@ -99,13 +78,11 @@ function DiagnosticsPanel() {
 
 export default function InventoryMovement() {
   const queryClient = useQueryClient()
-  const [periodPreset, setPeriodPreset] = useState<PeriodPreset>('1m')
-  const [from, setFrom] = useState(() => lastNDaysFrom(30))
+  const [periodPreset, setPeriodPreset] = useState<PeriodPreset>('1y')
+  const [from, setFrom] = useState(() => lastNDaysFrom(365))
   const [to, setTo] = useState(() => todayIso())
-  const [sellerSku, setSellerSku] = useState('')
-  const [skuCode, setSkuCode] = useState('')
-
-  const combinedSkuScope = !sellerSku.trim() && !skuCode.trim()
+  /** `all` = every mapped seller SKU (aggregated). Otherwise OC seller SKU id. */
+  const [skuSelect, setSkuSelect] = useState<string>('all')
 
   const applyPeriodPreset = (preset: PeriodPreset) => {
     const today = todayIso()
@@ -146,14 +123,25 @@ export default function InventoryMovement() {
   })
 
   const movementQuery = useQuery({
-    queryKey: ['stock-movement', from, to, sellerSku, skuCode],
+    queryKey: ['stock-movement', from, to, skuSelect],
     queryFn: async () =>
       (
         await inventoryStatusAPI.listStockMovement({
           from,
           to,
-          ...(sellerSku.trim() ? { seller_skuid: sellerSku.trim() } : {}),
-          ...(skuCode.trim() ? { sku_code: skuCode.trim() } : {}),
+          ...(skuSelect !== 'all' ? { seller_skuid: skuSelect } : {}),
+        })
+      ).data,
+  })
+
+  const inventoryHistoryQuery = useQuery({
+    queryKey: ['inventory-history', from, to, skuSelect],
+    queryFn: async () =>
+      (
+        await inventoryStatusAPI.getInventoryHistory({
+          from,
+          to,
+          ...(skuSelect !== 'all' ? { seller_skuid: skuSelect } : {}),
         })
       ).data,
   })
@@ -171,25 +159,21 @@ export default function InventoryMovement() {
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['stock-movement'] })
+      await queryClient.invalidateQueries({ queryKey: ['inventory-history'] })
     },
   })
 
+  const rawHistoryPoints = inventoryHistoryQuery.data?.points ?? []
+  const dailyStockChartData = useMemo(
+    () => buildDailyStockLevelsFromHistory(rawHistoryPoints, from, to),
+    [inventoryHistoryQuery.data?.points, from, to],
+  )
+
   const invRows = useMemo(() => {
     const rows = inventoryQuery.data ?? []
-    const ss = sellerSku.trim()
-    const sc = skuCode.trim().toLowerCase()
-    if (ss) return rows.filter((r) => (r.seller_skuid || '').trim() === ss)
-    if (sc) {
-      const mfSet = new Set(
-        (mappingsQuery.data ?? [])
-          .filter((m) => (m.sku_code || '').trim().toLowerCase() === sc)
-          .map((m) => (m.mfskuid || '').toLowerCase())
-          .filter(Boolean)
-      )
-      return rows.filter((r) => mfSet.has((r.mfskuid || '').toLowerCase()))
-    }
-    return rows
-  }, [inventoryQuery.data, sellerSku, skuCode, mappingsQuery.data])
+    if (skuSelect === 'all') return rows
+    return rows.filter((r) => (r.seller_skuid || '').trim() === skuSelect)
+  }, [inventoryQuery.data, skuSelect])
 
   const skuCodeByMfskuid = useMemo(() => {
     const m = new Map<string, string>()
@@ -216,50 +200,6 @@ export default function InventoryMovement() {
       oosLines: oos,
     }
   }, [invRows])
-
-  const stockBarData = useMemo(() => {
-    return [...invRows]
-      .sort((a, b) => b.available - a.available)
-      .slice(0, 14)
-      .map((r) => {
-        const label =
-          skuCodeByMfskuid.get((r.mfskuid || '').toLowerCase()) || r.seller_skuid || r.mfskuid || '?'
-        return {
-          name: String(label).slice(0, 22),
-          available: r.available,
-        }
-      })
-  }, [invRows, skuCodeByMfskuid])
-
-  const restockInsight = useMemo(() => {
-    const rows = movementQuery.data?.rows ?? []
-    const net = rows.reduce((s, r) => s + r.quantity, 0)
-    const days = calendarDaysInclusive(from, to)
-    const avgDaily = net / days
-    const totalAvail = invRows.reduce((s, r) => s + r.available, 0)
-    let coverDays: number | null = null
-    if (avgDaily < -0.0001 && totalAvail >= 0) {
-      coverDays = totalAvail / -avgDaily
-    }
-    return { net, days, avgDaily, totalAvail, coverDays }
-  }, [movementQuery.data?.rows, from, to, invRows])
-
-  const ocChartPoints = useMemo(() => {
-    const rows = movementQuery.data?.rows ?? []
-    const agg = new Map<string, number>()
-    for (const r of rows) {
-      const dk = ocDateKey(r.update_time)
-      if (!dk) continue
-      agg.set(dk, (agg.get(dk) ?? 0) + r.quantity)
-    }
-    return [...agg.entries()]
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([day, net_qty]) => ({
-        day,
-        label: day,
-        net_qty,
-      }))
-  }, [movementQuery.data?.rows])
 
   const sellerOptions = useMemo(() => {
     const m = mappingsQuery.data ?? []
@@ -298,111 +238,107 @@ export default function InventoryMovement() {
         <Link to="/inventory-status" className="text-blue-600 hover:underline">
           Inventory status
         </Link>{' '}
-        → <strong>Pull latest data</strong>. This page is only for <strong>movement history</strong> from OrangeConnex.
+        → <strong>Pull latest data</strong>.         The <strong>stock chart</strong> uses persisted GetStockMovement rows (
+        <code className="text-xs">actual_count</code>, AVL only); sync movement below to fill history. This page
+        also lists raw <strong>movement lines</strong> for audit.
       </p>
 
       <DiagnosticsPanel />
 
-      <p className="text-sm text-gray-600 mb-3 max-w-3xl">
-        <strong>Charts and table below</strong> read from EvampOps storage (not live OC). OrangeConnex only exposes
-        movement for roughly the <strong>last 12 months</strong>; anything we have synced earlier stays in the database
-        for reporting. Use <strong>Incremental sync</strong> regularly so new lines are captured before they fall
-        outside OC&apos;s API window.
+      <p className="text-sm text-gray-600 mb-6 max-w-3xl">
+        Stock levels by day (from movement data in PostgreSQL — same filter card layout as Sales Analytics). Table below
+        shows the same feed in detail.
       </p>
 
-      <div className="flex flex-wrap items-end gap-3 mb-6 p-4 bg-gray-50 border border-gray-200 rounded-lg">
-        <label className="text-sm">
-          <span className="text-gray-600 block mb-1">Period</span>
-          <select
-            value={periodPreset}
-            onChange={(e) => applyPeriodPreset(e.target.value as PeriodPreset)}
-            className="rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm min-w-[11rem]"
+      <div className="bg-white shadow rounded-lg p-4 mb-6">
+        <h2 className="text-lg font-semibold text-gray-800 mb-3">Filters</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Period</label>
+            <select
+              value={periodPreset}
+              onChange={(e) => applyPeriodPreset(e.target.value as PeriodPreset)}
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
+            >
+              <option value="today">Today</option>
+              <option value="7d">Last 7 days</option>
+              <option value="1m">Last month</option>
+              <option value="3m">Last 3 months</option>
+              <option value="6m">Last 6 months</option>
+              <option value="1y">Last year</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">From</label>
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => {
+                setFrom(e.target.value)
+                setPeriodPreset('custom')
+              }}
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">To</label>
+            <input
+              type="date"
+              value={to}
+              onChange={(e) => {
+                setTo(e.target.value)
+                setPeriodPreset('custom')
+              }}
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">SKU</label>
+            <select
+              value={skuSelect}
+              onChange={(e) => setSkuSelect(e.target.value)}
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
+            >
+              <option value="all">All</option>
+              {sellerOptions.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 mt-4">
+          <button
+            type="button"
+            onClick={() => {
+              void inventoryQuery.refetch()
+              void movementQuery.refetch()
+              void inventoryHistoryQuery.refetch()
+            }}
+            className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
           >
-            <option value="today">Today</option>
-            <option value="7d">Last 7 days</option>
-            <option value="1m">Last month</option>
-            <option value="3m">Last 3 months</option>
-            <option value="6m">Last 6 months</option>
-            <option value="1y">Last year</option>
-            <option value="custom">Custom</option>
-          </select>
-        </label>
-        <label className="text-sm">
-          <span className="text-gray-600 block mb-1">From</span>
-          <input
-            type="date"
-            value={from}
-            onChange={(e) => {
-              setFrom(e.target.value)
-              setPeriodPreset('custom')
-            }}
-            className="rounded border border-gray-300 px-2 py-1 text-sm"
-          />
-        </label>
-        <label className="text-sm">
-          <span className="text-gray-600 block mb-1">To</span>
-          <input
-            type="date"
-            value={to}
-            onChange={(e) => {
-              setTo(e.target.value)
-              setPeriodPreset('custom')
-            }}
-            className="rounded border border-gray-300 px-2 py-1 text-sm"
-          />
-        </label>
-        <label className="text-sm">
-          <span className="text-gray-600 block mb-1">Seller SKU</span>
-          <input
-            type="text"
-            value={sellerSku}
-            onChange={(e) => setSellerSku(e.target.value)}
-            list="inv-move-seller-skus"
-            placeholder="All SKUs if empty"
-            className="rounded border border-gray-300 px-2 py-1 text-sm w-48"
-          />
-          <datalist id="inv-move-seller-skus">
-            {sellerOptions.map((s) => (
-              <option key={s} value={s} />
-            ))}
-          </datalist>
-        </label>
-        <label className="text-sm">
-          <span className="text-gray-600 block mb-1">SKU code</span>
-          <input
-            type="text"
-            value={skuCode}
-            onChange={(e) => setSkuCode(e.target.value)}
-            placeholder="All if empty"
-            className="rounded border border-gray-300 px-2 py-1 text-sm w-36"
-          />
-        </label>
-        <button
-          type="button"
-          onClick={() => {
-            void inventoryQuery.refetch()
-            void movementQuery.refetch()
-          }}
-          className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
-        >
-          Refresh
-        </button>
-        <button
-          type="button"
-          disabled={syncFromOcMutation.isPending}
-          onClick={() => syncFromOcMutation.mutate({ mode: 'range' })}
-          className="px-4 py-2 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:opacity-50"
-        >
-          {syncFromOcMutation.isPending ? 'Syncing…' : 'Sync range from OC'}
-        </button>
-        <button
-          type="button"
-          disabled={syncFromOcMutation.isPending}
-          onClick={() => syncFromOcMutation.mutate({ mode: 'incremental' })}
-          className="px-4 py-2 border border-indigo-600 text-indigo-700 text-sm rounded hover:bg-indigo-50 disabled:opacity-50"
-        >
-          Incremental sync
-        </button>
+            Refresh
+          </button>
+          <button
+            type="button"
+            disabled={syncFromOcMutation.isPending}
+            onClick={() => syncFromOcMutation.mutate({ mode: 'range' })}
+            className="px-4 py-2 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {syncFromOcMutation.isPending ? 'Syncing…' : 'Sync range from OC'}
+          </button>
+          <button
+            type="button"
+            disabled={syncFromOcMutation.isPending}
+            onClick={() => syncFromOcMutation.mutate({ mode: 'incremental' })}
+            className="px-4 py-2 border border-indigo-600 text-indigo-700 text-sm rounded hover:bg-indigo-50 disabled:opacity-50"
+          >
+            Incremental sync
+          </button>
+        </div>
+        {inventoryHistoryQuery.isLoading && <p className="mt-2 text-sm text-gray-500">Loading chart data…</p>}
       </div>
       {syncFromOcMutation.isError && (
         <p className="text-red-600 text-sm mb-2">
@@ -421,11 +357,114 @@ export default function InventoryMovement() {
         </p>
       )}
 
+      {inventoryHistoryQuery.isError && (
+        <p className="text-red-600 text-sm mb-4">
+          {inventoryHistoryQuery.error instanceof Error
+            ? inventoryHistoryQuery.error.message
+            : 'Failed to load inventory history'}
+        </p>
+      )}
+
+      {inventoryHistoryQuery.data?.note && (
+        <p className="text-xs text-gray-500 mb-2 max-w-3xl">{inventoryHistoryQuery.data.note}</p>
+      )}
+
+      {!inventoryHistoryQuery.isError && dailyStockChartData.length > 0 && (
+        <div className="bg-white shadow rounded-lg p-4 mb-6">
+          <h2 className="text-lg font-semibold text-gray-800 mb-4">Stock level by day</h2>
+          <p className="text-sm text-gray-600 mb-4">
+            Available stock from GetStockMovement (<code className="text-xs">actual_count</code>, AVL bucket only),
+            grouped by event time — not eBay sales.{' '}
+            {skuSelect === 'all' ? (
+              <strong>All</strong>
+            ) : (
+              <>
+                Seller SKU <span className="font-mono">{skuSelect}</span>
+              </>
+            )}
+            . One point per calendar day (local); levels carry forward after the first sample in range.{' '}
+            <span className="text-gray-500">
+              {rawHistoryPoints.length.toLocaleString()} chart point(s) from movement rows in this filter.
+            </span>
+          </p>
+          {rawHistoryPoints.length === 0 && !inventoryHistoryQuery.isLoading && (
+            <p className="text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+              No movement samples in this range — line stays at 0. Run <strong>Sync range from OC</strong> or{' '}
+              <strong>Incremental sync</strong>, then <strong>Refresh</strong>.
+            </p>
+          )}
+          {rawHistoryPoints.length === 1 && !inventoryHistoryQuery.isLoading && (
+            <p className="text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-lg p-3 mb-4">
+              Only one time bucket in this window: earlier days show 0 until that event; from its date through{' '}
+              <strong>to</strong> levels carry forward (step). More points appear as you sync wider movement history.
+            </p>
+          )}
+          <ResponsiveContainer width="100%" height={360}>
+            <LineChart data={dailyStockChartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+              <XAxis dataKey="period" tick={{ fontSize: 11 }} interval="preserveStartEnd" minTickGap={24} />
+              <YAxis tick={{ fontSize: 12 }} allowDecimals={false} domain={[0, 'auto']} />
+              <Tooltip
+                formatter={(value: number) => [value, 'Available']}
+                labelFormatter={(label) => `Day: ${label}`}
+              />
+              <ReferenceLine y={0} stroke="#cbd5e1" strokeDasharray="4 4" />
+              <Line
+                type="stepAfter"
+                dataKey="available"
+                name="Available"
+                stroke="#3b82f6"
+                strokeWidth={2}
+                dot={false}
+                isAnimationActive={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+          <div className="overflow-x-auto border-t border-gray-100 pt-4 mt-4 max-h-64 overflow-y-auto">
+            <table className="min-w-full text-sm text-left">
+              <caption className="sr-only">Daily stock levels for the chart</caption>
+              <thead>
+                <tr className="text-gray-500 border-b border-gray-200">
+                  <th className="py-2 pr-4 font-medium">Day (local)</th>
+                  <th className="py-2 font-medium text-right">Available</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dailyStockChartData.map((row) => (
+                  <tr key={row.period} className="border-b border-gray-50">
+                    <td className="py-1.5 pr-4 font-mono text-xs">{row.period}</td>
+                    <td className="py-1.5 text-right tabular-nums">{row.available}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {!inventoryHistoryQuery.isLoading &&
+        dailyStockChartData.length === 0 &&
+        !inventoryHistoryQuery.isError && (
+          <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-900">
+            Invalid date range (from must be on or before to), or adjust filters.
+          </div>
+        )}
+
+      {!mappingsQuery.isLoading && sellerOptions.length === 0 && (
+        <div className="mb-6 p-4 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-700">
+          Add OrangeConnex SKU mappings on{' '}
+          <Link to="/inventory-status" className="text-blue-600 hover:underline">
+            Inventory status
+          </Link>{' '}
+          so a seller SKU can be chosen for the stock cycle chart.
+        </div>
+      )}
+
       {inventoryQuery.isLoading && <p className="text-gray-500 text-sm mb-2">Loading stock levels…</p>}
 
       <div className="mb-6 grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="bg-white border border-gray-200 rounded-lg p-3 shadow-sm">
-          <div className="text-xs text-gray-500 uppercase tracking-wide">Available (filtered)</div>
+          <div className="text-xs text-gray-500 uppercase tracking-wide">Available</div>
           <div className="text-2xl font-semibold tabular-nums text-gray-900">{stockStats.totalAvail.toLocaleString()}</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-3 shadow-sm">
@@ -433,63 +472,18 @@ export default function InventoryMovement() {
           <div className="text-2xl font-semibold tabular-nums text-gray-900">{stockStats.totalTransit.toLocaleString()}</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-3 shadow-sm">
-          <div className="text-xs text-gray-500 uppercase tracking-wide">Seller lines</div>
+          <div className="text-xs text-gray-500 uppercase tracking-wide">SKU count</div>
           <div className="text-2xl font-semibold tabular-nums text-gray-900">{stockStats.lines}</div>
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-3 shadow-sm">
-          <div className="text-xs text-gray-500 uppercase tracking-wide">No available stock</div>
+          <div className="text-xs text-gray-500 uppercase tracking-wide">SKU not available</div>
           <div className="text-2xl font-semibold tabular-nums text-amber-800">{stockStats.oosLines}</div>
         </div>
       </div>
 
-      {stockBarData.length > 0 && (
-        <div className="mb-6 bg-white border border-gray-200 rounded-lg p-4 h-64">
-          <h2 className="text-sm font-medium text-gray-700 mb-2">Available by SKU (top {stockBarData.length})</h2>
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={stockBarData} layout="vertical" margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" horizontal={false} />
-              <XAxis type="number" tick={{ fontSize: 11 }} allowDecimals={false} />
-              <YAxis type="category" dataKey="name" width={120} tick={{ fontSize: 10 }} />
-              <Tooltip />
-              <Bar dataKey="available" name="Available" fill="#3b82f6" radius={[0, 4, 4, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      )}
-
-      {movementQuery.data && !movementQuery.isLoading && (
-        <div className="mb-6 p-4 bg-emerald-50 border border-emerald-200 rounded-lg text-sm">
-          <h2 className="text-sm font-semibold text-emerald-900 mb-2">Restock-oriented movement (selected period, from DB)</h2>
-          <p className="text-emerald-800 mb-2">
-            Net quantity change: <strong>{formatDelta(restockInsight.net)}</strong> over {restockInsight.days} day(s) (
-            ~{formatNum(restockInsight.avgDaily)} / day). Current available (same filter as above):{' '}
-            <strong>{restockInsight.totalAvail.toLocaleString()}</strong>.
-            {restockInsight.coverDays != null && restockInsight.coverDays > 0 && restockInsight.coverDays < 10_000 ? (
-              <>
-                {' '}
-                Rough days of cover at average outflow: <strong>{formatNum(restockInsight.coverDays)}</strong> (only
-                meaningful when net change is negative / outbound).
-              </>
-            ) : (
-              <span className="text-emerald-700"> No stable outbound pace to estimate cover (net change not negative).</span>
-            )}
-          </p>
-          <p className="text-xs text-emerald-800">
-            Scope: <code className="bg-emerald-100 px-1 rounded">{movementQuery.data.scope}</code> —{' '}
-            {movementQuery.data.mfskuid_count} MFSKUID(s).{' '}
-            {movementQuery.data.truncated ? (
-              <span className="text-amber-800">
-                Table truncated to {movementQuery.data.line_limit?.toLocaleString()} most recent lines.
-              </span>
-            ) : null}
-          </p>
-        </div>
-      )}
-
-      {combinedSkuScope && (
+      {skuSelect === 'all' && (
         <p className="text-sm text-gray-600 mb-3">
-          <strong>All SKUs combined:</strong> movement and charts aggregate every mapped SKU. Narrow with seller SKU or SKU
-          code if the request is slow.
+          <strong>SKU: All</strong> — chart and tables sum every mapped seller SKU. Choose one SKU to see that line only.
         </p>
       )}
 
@@ -501,24 +495,6 @@ export default function InventoryMovement() {
           {movementQuery.data.note} {movementQuery.data.row_count.toLocaleString()} line(s), {movementQuery.data.from_date}{' '}
           → {movementQuery.data.to_date}.
         </p>
-      )}
-
-      {ocChartPoints.length > 0 && (
-        <div className="mb-8 bg-white border border-gray-200 rounded-lg p-4 h-72">
-          <h2 className="text-sm font-medium text-gray-700 mb-2">
-            Net quantity change by day {combinedSkuScope ? '(all SKUs combined)' : '(filtered)'}
-          </h2>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={ocChartPoints} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-              <XAxis dataKey="label" tick={{ fontSize: 11 }} interval="preserveStartEnd" />
-              <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-              <Tooltip />
-              <Legend />
-              <Line type="monotone" dataKey="net_qty" name="Net qty" stroke="#059669" dot={false} strokeWidth={2} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
       )}
 
       <div className="mb-8 bg-white shadow rounded-lg overflow-hidden border border-gray-200">

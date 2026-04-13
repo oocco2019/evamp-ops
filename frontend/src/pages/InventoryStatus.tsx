@@ -726,6 +726,7 @@ export default function InventoryStatus() {
       qc.invalidateQueries({ queryKey: ['inventory-status'] })
       qc.invalidateQueries({ queryKey: ['analytics'] })
       qc.invalidateQueries({ queryKey: ['stock-movement'] })
+      qc.invalidateQueries({ queryKey: ['inventory-history'] })
     },
     onSuccess: (movementSummary: string) => {
       if (suppressPullNoticeRef.current) {

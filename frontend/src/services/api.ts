@@ -157,6 +157,23 @@ export interface OCStockMovementResponse {
   note: string
 }
 
+/** Stock chart series from GetStockMovement (AVL actual_count). `in_transit` is always 0. */
+export interface InventoryHistoryPoint {
+  recorded_at: string
+  available: number
+  in_transit: number
+  stockout: boolean
+}
+
+export interface InventoryHistorySeries {
+  points: InventoryHistoryPoint[]
+  from_date: string
+  to_date: string
+  mfskuid_count: number
+  scope: string
+  note?: string | null
+}
+
 /** GET /api/inventory-status/debug-raw — StockSnapshot v2 + SKU query verbatim. */
 export interface OCRawDebugResponse {
   connection: Record<string, unknown>
@@ -890,6 +907,25 @@ export const inventoryStatusAPI = {
       params: sku ? { sku } : {},
     }),
   listInventory: () => api.get<OCSkuInventoryRow[]>('/api/inventory-status/inventory'),
+  /** Stock chart series from movement DB (GET /inventory-history); optional SKU filters. */
+  getInventoryHistory: (params: {
+    from?: string
+    to?: string
+    seller_skuid?: string
+    sku_code?: string
+    mfskuid?: string
+    service_region?: string
+  }) =>
+    api.get<InventoryHistorySeries>('/api/inventory-status/inventory-history', {
+      params: {
+        ...(params.from ? { from: params.from } : {}),
+        ...(params.to ? { to: params.to } : {}),
+        ...(params.seller_skuid ? { seller_skuid: params.seller_skuid } : {}),
+        ...(params.sku_code ? { sku_code: params.sku_code } : {}),
+        ...(params.mfskuid ? { mfskuid: params.mfskuid } : {}),
+        ...(params.service_region ? { service_region: params.service_region } : {}),
+      },
+    }),
   /** Stored movement lines (GET); fill with syncStockMovementFromOc first. */
   listStockMovement: (params: {
     from?: string

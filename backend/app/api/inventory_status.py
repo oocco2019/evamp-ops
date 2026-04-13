@@ -8,11 +8,12 @@ import logging
 import re
 from collections import defaultdict
 from datetime import datetime, date, timedelta, timezone, time as dt_time
-from typing import Any, Dict, List, Optional
+from itertools import groupby
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select, func, case, or_
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -120,6 +121,22 @@ class SyncSkuResponse(BaseModel):
     synced: int
     skipped: int
     inventory_rows: int
+
+
+class InventoryHistoryPointResponse(BaseModel):
+    recorded_at: datetime
+    available: int
+    in_transit: int
+    stockout: bool
+
+
+class InventoryHistorySeriesResponse(BaseModel):
+    points: List[InventoryHistoryPointResponse]
+    from_date: str
+    to_date: str
+    mfskuid_count: int
+    scope: str
+    note: Optional[str] = None
 
 
 class OCSkuInventoryResponse(BaseModel):
@@ -1032,6 +1049,7 @@ async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
             )
         )
         inventory_rows += 1
+
     await db.commit()
     return SyncSkuResponse(synced=synced, skipped=skipped, inventory_rows=inventory_rows)
 
@@ -1170,6 +1188,115 @@ async def list_oc_inventory(
     return payload
 
 
+@router.get("/inventory-history", response_model=InventoryHistorySeriesResponse)
+async def list_inventory_history(
+    db: AsyncSession = Depends(get_db),
+    from_date: Optional[date] = Query(None, alias="from"),
+    to_date: Optional[date] = Query(None, alias="to"),
+    seller_skuid: Optional[str] = None,
+    sku_code: Optional[str] = None,
+    mfskuid: Optional[str] = None,
+    service_region: Optional[str] = None,
+):
+    """
+    Stock level time series from persisted GetStockMovement rows: AVL bucket only (actual_count → available).
+    Carries forward last AVL per (mfskuid, region), then sums across keys (correct “All” total — not only SKUs moving at T).
+    `in_transit` is always 0. Omit filters to aggregate **all mapped** SKUs (same as “All” in the UI).
+    """
+    cid = await _active_oc_connection_id(db)
+    if not cid:
+        raise HTTPException(status_code=400, detail="No active OC connection configured.")
+
+    mfs, scope = await _resolve_mfsku_list_for_movement(db, cid, seller_skuid, sku_code, mfskuid)
+    if not mfs:
+        return InventoryHistorySeriesResponse(
+            points=[],
+            from_date=(from_date or date.today()).isoformat(),
+            to_date=(to_date or date.today()).isoformat(),
+            mfskuid_count=0,
+            scope=scope,
+            note="No mappings for this filter.",
+        )
+
+    now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+    eff_to = to_date or now_naive.date()
+    eff_from = from_date or (eff_to - timedelta(days=365))
+    start_dt = datetime.combine(eff_from, dt_time.min)
+    end_dt = datetime.combine(eff_to, dt_time.max)
+
+    mf_list = list({str(x).strip().lower() for x in mfs if str(x).strip()})
+
+    mov = OCStockMovementLine
+    tu = mov.update_time_utc
+    st = func.upper(mov.inventory_status)
+    ac = func.coalesce(mov.actual_count, 0)
+
+    base_filters = [
+        mov.connection_id == cid,
+        func.lower(mov.mfskuid).in_(mf_list),
+        tu.isnot(None),
+        st == "AVL",
+    ]
+    if service_region and service_region.strip():
+        base_filters.append(mov.service_region == service_region.strip())
+
+    # Last AVL per (mfskuid, region) before the chart window — so "All" total does not drop when only one SKU moves.
+    rn = func.row_number().over(partition_by=(mov.mfskuid, mov.service_region), order_by=tu.desc()).label("rn")
+    seed_sq = (
+        select(mov.mfskuid, mov.service_region, ac.label("avl_after"), rn).where(*base_filters, tu < start_dt)
+    ).subquery()
+    seed_stmt = select(seed_sq.c.mfskuid, seed_sq.c.service_region, seed_sq.c.avl_after).where(seed_sq.c.rn == 1)
+    seed_res = await db.execute(seed_stmt)
+    state: Dict[Tuple[str, str], int] = {}
+    for row in seed_res.all():
+        key = ((row.mfskuid or "").strip().lower(), (row.service_region or "").strip().lower())
+        state[key] = int(row.avl_after or 0)
+
+    # In-window: many AVL lines per second (put-away) — MAX per (ts, mfskuid, region), then apply in time order.
+    range_filters = [*base_filters, tu >= start_dt, tu <= end_dt]
+    per_burst = (
+        select(
+            tu.label("ts"),
+            mov.mfskuid.label("mfskuid"),
+            mov.service_region.label("service_region"),
+            func.max(ac).label("avl_after"),
+        )
+        .where(*range_filters)
+        .group_by(tu, mov.mfskuid, mov.service_region)
+    )
+    burst_res = await db.execute(per_burst.order_by(tu.asc(), mov.mfskuid.asc(), mov.service_region.asc()))
+    burst_rows = burst_res.all()
+
+    points: List[InventoryHistoryPointResponse] = []
+    for ts, chunk in groupby(burst_rows, key=lambda r: r.ts):
+        for br in chunk:
+            k = ((br.mfskuid or "").strip().lower(), (br.service_region or "").strip().lower())
+            state[k] = int(br.avl_after or 0)
+        total = sum(state.values())
+        points.append(
+            InventoryHistoryPointResponse(
+                recorded_at=ts,
+                available=total,
+                in_transit=0,
+                stockout=(total <= 0),
+            )
+        )
+
+    note = (
+        "AVL: running sum of last known level per SKU/region (seeded before range), "
+        "max per second for put-away bursts. INTRAN omitted. Sync movement if empty."
+    )
+
+    return InventoryHistorySeriesResponse(
+        points=points,
+        from_date=eff_from.isoformat(),
+        to_date=eff_to.isoformat(),
+        mfskuid_count=len(mfs),
+        scope=scope,
+        note=note,
+    )
+
+
 async def _resolve_mfsku_list_for_movement(
     db: AsyncSession,
     cid: int,
@@ -1188,7 +1315,7 @@ async def _resolve_mfsku_list_for_movement(
         mr = await db.execute(
             select(OCSkuMapping.mfskuid).where(
                 OCSkuMapping.connection_id == cid,
-                OCSkuMapping.seller_skuid == sk,
+                func.lower(OCSkuMapping.seller_skuid) == sk.lower(),
             )
         )
         mfs = [row[0] for row in mr.all() if row[0]]

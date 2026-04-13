@@ -58,7 +58,13 @@ A full-stack application for managing eBay stock operations and customer service
    ```
    Or: `docker compose up -d`. From project root only.
 
-4. **Access the app:**
+4. **Apply database migrations** (first run and whenever Alembic revisions change). This project’s default workflow is **Docker**—do not rely on a local Python venv for migrations unless you use [Manual Setup](#manual-setup-without-docker).
+   ```bash
+   make migrate
+   ```
+   Equivalent: `docker compose run --rm backend python -m alembic upgrade head`. **Cursor (and similar assistants) can run `make migrate` from the project root** when applying schema updates—no need to paste that into a local shell if the assistant has shell access.
+
+5. **Access the app:**
    - Frontend: http://localhost:5173
    - Backend API: http://localhost:8000
    - API Docs: http://localhost:8000/docs

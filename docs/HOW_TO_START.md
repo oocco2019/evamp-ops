@@ -63,6 +63,19 @@ Stop the tunnel in Terminal 2 with **Ctrl+C**.
 
 ---
 
+## Database migrations (Docker)
+
+Normal development uses **Docker Compose**; apply Alembic from the project root:
+
+```bash
+cd /path/to/evamp-ops
+make migrate
+```
+
+Same as `docker compose run --rm backend python -m alembic upgrade head`. Run after pulling changes that add or alter migrations. **AI assistants (e.g. Cursor) with shell access can run `make migrate` for you**—you do not need to execute it manually on your machine if the assistant applies it in the repo environment.
+
+---
+
 ## Hot Reload (no restart needed)
 
 Both frontend and backend have **hot reload** enabled. When you edit code:
@@ -86,6 +99,7 @@ You do **NOT** need to run `make down && make up` after code changes. Just save 
 |-------------------|----------------------------|
 | App + tunnel + browser | `cd evamp-ops && make run` |
 | Start app         | `cd evamp-ops && make up`  |
+| DB migrations     | `cd evamp-ops && make migrate` |
 | Start tunnel      | `cd evamp-ops && make tunnel` |
 | Stop app          | `cd evamp-ops && make down`|
 | View logs         | `cd evamp-ops && make logs`|
