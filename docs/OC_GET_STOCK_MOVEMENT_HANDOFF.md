@@ -29,7 +29,7 @@ Full, untruncated Python is in **Appendix A** (end of this doc).
 | HTTP + OAuth | Same file: `_call_oc`, `_get_valid_access_token` (not duplicated in appendix—search in repo) |
 | API | `inventory_status.py`: `list_stock_movement`, `execute_stock_movement_pull`, `sync_stock_movement` |
 | DB write | `oc_stock_movement_store.py` (full file in appendix) |
-| Scheduler | `inventory_refresh_scheduler.py`: `execute_stock_movement_pull(..., incremental=True)` |
+| Scheduler | `inventory_refresh_scheduler.py`: `run_scheduled_inventory_refresh` on `INVENTORY_REFRESH_INTERVAL_MINUTES` → includes `execute_stock_movement_pull(..., incremental=True)` |
 | UI | `frontend/src/pages/InventoryMovement.tsx`, `frontend/src/services/api.ts` |
 | Tests | `backend/tests/test_oc_stock_movement_flatten.py` |
 
@@ -42,6 +42,10 @@ Full, untruncated Python is in **Appendix A** (end of this doc).
 - **Persistence:** Lines go to PostgreSQL `oc_stock_movement_line`; duplicate `(connection_id, movement_id)` skipped (`oc_stock_movement_store.py`).
 - **API surface:** `POST /api/inventory-status/sync-stock-movement` (pull from OC → DB), `GET /api/inventory-status/stock-movement` (read DB for charts).
 - **Frontend:** `frontend/src/pages/InventoryMovement.tsx` — **Sync range from OC** / **Incremental sync** (the dedicated “pull all movement” button was removed per product decision).
+
+### Background scheduler (automatic DB fill)
+
+While the FastAPI process is running, `backend/app/services/inventory_refresh_scheduler.py` registers **one** interval job: every **`INVENTORY_REFRESH_INTERVAL_MINUTES`** (default **15**; **`0`** disables the scheduler). Each tick runs, in order: incremental eBay import → OC SKU mappings + inventory snapshot → **`execute_stock_movement_pull(..., incremental=True)`** → incremental inbound cache. That matches **Inventory status → Pull latest data** (manual button). OC movement is therefore refreshed on the **same cadence** as the rest of inventory data, not on a separate daily cron.
 
 ---
 
@@ -59,7 +63,7 @@ Per OC (Apifox): GetStockMovement serves **only the past ~12 months** (rolling w
    Up to **50** `mfSkuId` per POST.
 
 4. **Long-term history**  
-   **PostgreSQL** keeps whatever was synced; the app does not TTL-delete movement rows. Run **incremental sync** (scheduled or UI) so lines are stored **before** they age out of OC’s API.
+   **PostgreSQL** keeps whatever was synced; the app does not TTL-delete movement rows. Keep **`INVENTORY_REFRESH_INTERVAL_MINUTES` > 0** (or use **Pull latest** / **Incremental sync** on Stock & movement) so new lines are stored **before** they age out of OC’s API.
 
 ---
 
@@ -97,7 +101,7 @@ Same paths as **Related code (index)** above; **Appendix A** has the full Python
 | GET/POST routes, `execute_stock_movement_pull`, `list_stock_movement` | `backend/app/api/inventory_status.py` |
 | DB insert | `backend/app/services/oc_stock_movement_store.py` |
 | Model | `backend/app/models/settings.py` (`OCStockMovementLine`) |
-| Scheduled incremental movement | `backend/app/services/inventory_refresh_scheduler.py` |
+| Scheduled movement (with inventory interval) | `backend/app/services/inventory_refresh_scheduler.py` |
 | UI + API client | `frontend/src/pages/InventoryMovement.tsx`, `frontend/src/services/api.ts` |
 | Tests | `backend/tests/test_oc_stock_movement_flatten.py` |
 

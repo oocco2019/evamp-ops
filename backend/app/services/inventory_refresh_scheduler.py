@@ -1,5 +1,5 @@
 """
-Periodic inventory refresh: incremental eBay import + OC SKU/inventory + inbound cache.
+Periodic inventory refresh: incremental eBay import + OC SKU/inventory + OC stock movement + inbound cache.
 Runs in-process while the API is up; set INVENTORY_REFRESH_INTERVAL_MINUTES=0 to disable.
 
 Each step runs in its own DB session. Failures are logged but do not skip later steps (so inbound
@@ -29,7 +29,7 @@ _scheduler: AsyncIOScheduler | None = None
 
 
 async def run_scheduled_inventory_refresh() -> None:
-    """Same three calls as Inventory Status 'Pull latest data' (incremental); steps are independent."""
+    """Same steps as Inventory Status 'Pull latest data' (incremental); steps are independent."""
     logger.info("Scheduled inventory refresh started")
 
     # 1) eBay orders (incremental)
@@ -70,11 +70,12 @@ async def run_scheduled_inventory_refresh() -> None:
         async with async_session_maker() as db:
             mv = await execute_stock_movement_pull(db, incremental=True)
         logger.info(
-            "Scheduled OC stock movement sync OK: fetched=%s inserted=%s (%s → %s)",
+            "Scheduled OC stock movement sync OK: fetched=%s inserted=%s (%s → %s) clamped=%s",
             mv.fetched,
             mv.inserted,
             mv.from_date,
             mv.to_date,
+            mv.clamped,
         )
     except HTTPException as e:
         logger.warning("Scheduled OC stock movement skipped: %s", e.detail)
@@ -102,7 +103,7 @@ def start_inventory_refresh_scheduler() -> None:
         return
     if _scheduler is not None:
         return
-    _scheduler = AsyncIOScheduler()
+    _scheduler = AsyncIOScheduler(timezone=timezone.utc)
     _scheduler.add_job(
         run_scheduled_inventory_refresh,
         trigger=IntervalTrigger(minutes=minutes),
@@ -110,11 +111,13 @@ def start_inventory_refresh_scheduler() -> None:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        # First run soon after startup (otherwise IntervalTrigger often waits ~15m before first fire).
         next_run_time=datetime.now(timezone.utc),
     )
     _scheduler.start()
-    logger.info("Inventory refresh scheduler: every %s minute(s), first run scheduled", minutes)
+    logger.info(
+        "Inventory refresh scheduler: every %s minute(s) (eBay + OC SKU/inventory + stock movement + inbound), first run soon",
+        minutes,
+    )
 
 
 def shutdown_inventory_refresh_scheduler() -> None:

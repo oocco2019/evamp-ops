@@ -1099,13 +1099,14 @@ export default function InventoryStatus() {
           onClick={() => pullLatestDataMutation.mutate()}
           className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 text-sm font-medium"
           disabled={pullLatestDataMutation.isPending}
-          title="Incremental eBay import, OrangeConnex SKU mappings + inventory snapshot, and inbound cache (same as automatic refresh)"
+          title="Incremental eBay import, OrangeConnex SKU mappings + inventory snapshot, OC stock movement, and inbound cache (same as the scheduled background refresh)"
         >
           {pullLatestDataMutation.isPending ? 'Pulling latest data…' : 'Pull latest data'}
         </button>
         <p className="text-sm text-gray-600 max-w-2xl">
-          Refreshes eBay orders, OC inventory, and inbound cache. The backend runs the same incremental pull on a schedule
-          (default every <span className="font-mono">15</span> minutes; configurable via{' '}
+          Refreshes eBay orders, OC inventory, <strong>OC stock movement</strong> (into the database for Stock &amp;
+          movement), and inbound cache. The backend runs the same incremental pull on a schedule (default every{' '}
+          <span className="font-mono">15</span> minutes; configurable via{' '}
           <span className="font-mono">INVENTORY_REFRESH_INTERVAL_MINUTES</span>, <span className="font-mono">0</span> to
           disable). Sold columns use the same date windows as Sales Analytics (30 / 90 inclusive days).
         </p>
