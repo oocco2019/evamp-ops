@@ -1228,22 +1228,23 @@ async def list_inventory_history(
 
     mov = OCStockMovementLine
     tu = mov.update_time_utc
+    # OC sometimes returns update_time strings we cannot parse → update_time_utc NULL; use insert time for range/order.
+    event_t = func.coalesce(tu, mov.created_at)
     st = func.upper(mov.inventory_status)
     ac = func.coalesce(mov.actual_count, 0)
 
     base_filters = [
         mov.connection_id == cid,
         func.lower(mov.mfskuid).in_(mf_list),
-        tu.isnot(None),
         st == "AVL",
     ]
     if service_region and service_region.strip():
         base_filters.append(mov.service_region == service_region.strip())
 
     # Last AVL per (mfskuid, region) before the chart window — so "All" total does not drop when only one SKU moves.
-    rn = func.row_number().over(partition_by=(mov.mfskuid, mov.service_region), order_by=tu.desc()).label("rn")
+    rn = func.row_number().over(partition_by=(mov.mfskuid, mov.service_region), order_by=event_t.desc()).label("rn")
     seed_sq = (
-        select(mov.mfskuid, mov.service_region, ac.label("avl_after"), rn).where(*base_filters, tu < start_dt)
+        select(mov.mfskuid, mov.service_region, ac.label("avl_after"), rn).where(*base_filters, event_t < start_dt)
     ).subquery()
     seed_stmt = select(seed_sq.c.mfskuid, seed_sq.c.service_region, seed_sq.c.avl_after).where(seed_sq.c.rn == 1)
     seed_res = await db.execute(seed_stmt)
@@ -1253,18 +1254,18 @@ async def list_inventory_history(
         state[key] = int(row.avl_after or 0)
 
     # In-window: many AVL lines per second (put-away) — MAX per (ts, mfskuid, region), then apply in time order.
-    range_filters = [*base_filters, tu >= start_dt, tu <= end_dt]
+    range_filters = [*base_filters, event_t >= start_dt, event_t <= end_dt]
     per_burst = (
         select(
-            tu.label("ts"),
+            event_t.label("ts"),
             mov.mfskuid.label("mfskuid"),
             mov.service_region.label("service_region"),
             func.max(ac).label("avl_after"),
         )
         .where(*range_filters)
-        .group_by(tu, mov.mfskuid, mov.service_region)
+        .group_by(event_t, mov.mfskuid, mov.service_region)
     )
-    burst_res = await db.execute(per_burst.order_by(tu.asc(), mov.mfskuid.asc(), mov.service_region.asc()))
+    burst_res = await db.execute(per_burst.order_by(event_t.asc(), mov.mfskuid.asc(), mov.service_region.asc()))
     burst_rows = burst_res.all()
 
     points: List[InventoryHistoryPointResponse] = []
@@ -1283,8 +1284,8 @@ async def list_inventory_history(
         )
 
     note = (
-        "AVL: running sum of last known level per SKU/region (seeded before range), "
-        "max per second for put-away bursts. INTRAN omitted. Sync movement if empty."
+        "AVL: running sum per SKU/region (seeded before range), max per event time for bursts. "
+        "Event time is COALESCE(update_time_utc, created_at) when OC time did not parse. INTRAN omitted."
     )
 
     return InventoryHistorySeriesResponse(
@@ -1347,7 +1348,10 @@ async def list_stock_movement(
     mfskuid: Optional[str] = None,
     line_limit: int = Query(25_000, ge=500, le=100_000, description="Max movement lines returned (newest first if truncated)."),
 ):
-    """Movement lines persisted from OC GetStockMovement (POST /sync-stock-movement)."""
+    """
+    Movement lines persisted from OC GetStockMovement (POST /sync-stock-movement).
+    Range filter uses COALESCE(update_time_utc, created_at) so rows with unparsed OC times still appear.
+    """
     cid = await _active_oc_connection_id(db)
     if not cid:
         raise HTTPException(status_code=400, detail="No active OC connection configured.")
@@ -1370,14 +1374,15 @@ async def list_stock_movement(
     end_dt = datetime.combine(eff_to, dt_time.max)
 
     mf_list = list({str(x).strip().lower() for x in mfs if str(x).strip()})
-    stmt = select(OCStockMovementLine).where(
-        OCStockMovementLine.connection_id == cid,
-        func.lower(OCStockMovementLine.mfskuid).in_(mf_list),
-        OCStockMovementLine.update_time_utc.isnot(None),
-        OCStockMovementLine.update_time_utc >= start_dt,
-        OCStockMovementLine.update_time_utc <= end_dt,
+    mov_line = OCStockMovementLine
+    ev = func.coalesce(mov_line.update_time_utc, mov_line.created_at)
+    stmt = select(mov_line).where(
+        mov_line.connection_id == cid,
+        func.lower(mov_line.mfskuid).in_(mf_list),
+        ev >= start_dt,
+        ev <= end_dt,
     )
-    stmt = stmt.order_by(OCStockMovementLine.update_time_utc.asc(), OCStockMovementLine.id.asc())
+    stmt = stmt.order_by(ev.asc(), mov_line.id.asc())
     res = await db.execute(stmt)
     db_rows = list(res.scalars().all())
 

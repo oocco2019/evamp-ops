@@ -15,7 +15,7 @@ A full-stack application for managing eBay stock operations and customer service
 ### OrangeConnex (inventory)
 
 - **Inventory status** — OrangeConnex SKU mappings and stock snapshot (pull latest from OC).
-- **Stock & movement** — `GetStockMovement` lines are stored in PostgreSQL for charts and analytics. The same **scheduled inventory refresh** (default every 15 minutes via `INVENTORY_REFRESH_INTERVAL_MINUTES`) runs **incremental OC stock movement** along with eBay import and OC inventory. OrangeConnex only exposes roughly the **last 12 months** of movement per request; rows already synced **remain in the database**. Technical details: [docs/OC_GET_STOCK_MOVEMENT_HANDOFF.md](docs/OC_GET_STOCK_MOVEMENT_HANDOFF.md).
+- **Stock & movement** — `GetStockMovement` lines are stored in PostgreSQL for charts and analytics. The same **scheduled inventory refresh** (default every 15 minutes via `INVENTORY_REFRESH_INTERVAL_MINUTES`) runs **incremental OC stock movement** along with eBay import and OC inventory. OrangeConnex only exposes roughly the **last 12 months** of movement per request; rows already synced **remain in the database**. **Stock chart** (UI, APIs, aggregation): [docs/STOCK_CHART.md](docs/STOCK_CHART.md). OC HTTP/sync behaviour: [docs/OC_GET_STOCK_MOVEMENT_HANDOFF.md](docs/OC_GET_STOCK_MOVEMENT_HANDOFF.md).
 
 ### Customer Service
 - **Message Import** (CS01) - Real-time eBay message sync (incremental, full, periodic full every 10 min). See [docs/SYNC_LOGIC.md](docs/SYNC_LOGIC.md).
@@ -153,7 +153,7 @@ Configure AI providers in the Settings page:
 evamp-ops/
 ├── backend/          # FastAPI application
 ├── frontend/         # React application
-├── docs/             # Operator handoff and integration notes (e.g. OC GetStockMovement)
+├── docs/             # e.g. STOCK_CHART.md, OC_GET_STOCK_MOVEMENT_HANDOFF.md
 ├── docker-compose.yml
 ├── .env.example
 └── README.md
