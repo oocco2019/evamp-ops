@@ -18,6 +18,18 @@ from app.core.config import settings as app_settings
 from app.core.security import encryption_service
 from app.models.settings import APICredential, Warehouse
 from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem
+from app.services.shopify_client import (
+    fetch_shopify_orders_paginated,
+    parse_shopify_order_to_import,
+)
+from app.services.shopify_settings import (
+    clear_shopify_credentials_db,
+    get_shopify_token_from_db,
+    resolve_shopify_credentials,
+    shopify_configured_db,
+    shopify_from_env,
+    upsert_shopify_credentials,
+)
 from app.services.ebay_client import (
     get_authorization_url,
     exchange_code_for_token,
@@ -34,6 +46,31 @@ from app.services.ebay_auth import get_ebay_access_token
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _parsed_order_to_orm_payload(od: dict) -> dict:
+    """Shared by eBay and Shopify importers: maps parse_* dict to Order columns."""
+    return {
+        "date": od["date"],
+        "country": od["country"],
+        "last_modified": od["last_modified"],
+        "cancel_status": od.get("cancel_status"),
+        "buyer_username": od.get("buyer_username"),
+        "order_currency": od.get("order_currency"),
+        "price_subtotal": od.get("price_subtotal"),
+        "price_total": od.get("price_total"),
+        "tax_total": od.get("tax_total"),
+        "delivery_cost": od.get("delivery_cost"),
+        "price_discount": od.get("price_discount"),
+        "fee_total": od.get("fee_total"),
+        "total_fee_basis_amount": od.get("total_fee_basis_amount"),
+        "total_marketplace_fee": od.get("total_marketplace_fee"),
+        "total_due_seller": od.get("total_due_seller"),
+        "total_due_seller_currency": od.get("total_due_seller_currency"),
+        "order_payment_status": od.get("order_payment_status"),
+        "sales_record_reference": od.get("sales_record_reference"),
+        "ebay_collect_and_remit_tax": od.get("ebay_collect_and_remit_tax"),
+    }
 
 
 # === eBay OAuth ===
@@ -260,10 +297,99 @@ async def ebay_connection_status(db: AsyncSession = Depends(get_db)):
     return eBayStatusResponse(connected=cred is not None)
 
 
+class ShopifyStatusResponse(BaseModel):
+    """Shopify Admin API: env vars override database-stored credentials."""
+    connected: bool
+    shop_domain: Optional[str] = None
+    has_token: bool = False
+    source: str = Field(
+        ...,
+        description="env | database | none (where working credentials were resolved from)",
+    )
+
+
+class ShopifySaveRequest(BaseModel):
+    shop: str = Field(..., description="Store domain, e.g. your-store.myshopify.com")
+    access_token: str = Field(
+        "",
+        description="Admin API access token; leave empty to keep the current token when updating shop",
+    )
+
+
+@router.get("/shopify/status", response_model=ShopifyStatusResponse)
+async def shopify_status(db: AsyncSession = Depends(get_db)):
+    """Return whether Shopify import can run, and how credentials are provided (not the secret)."""
+    env = shopify_from_env()
+    if env:
+        shop, _ = env
+        return ShopifyStatusResponse(
+            connected=True,
+            shop_domain=shop,
+            has_token=True,
+            source="env",
+        )
+    creds = await resolve_shopify_credentials(db)
+    if creds:
+        shop, _ = creds
+        return ShopifyStatusResponse(
+            connected=True,
+            shop_domain=shop,
+            has_token=True,
+            source="database",
+        )
+    return ShopifyStatusResponse(connected=False, shop_domain=None, has_token=False, source="none")
+
+
+@router.put("/shopify", response_model=ShopifyStatusResponse)
+async def shopify_save(
+    body: ShopifySaveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Store Shopify shop domain and Admin API token (encrypted in api_credentials).
+    Blocked if SHOPIFY_SHOP and SHOPIFY_ACCESS_TOKEN are set in the environment (those take precedence).
+    """
+    if shopify_from_env():
+        raise HTTPException(
+            status_code=400,
+            detail="Shopify is configured via environment variables. Remove SHOPIFY_SHOP and SHOPIFY_ACCESS_TOKEN from the environment to use Settings storage.",
+        )
+    shop = (body.shop or "").strip()
+    if not shop:
+        raise HTTPException(status_code=400, detail="shop is required")
+    token = (body.access_token or "").strip()
+    if not token:
+        token = await get_shopify_token_from_db(db) or ""
+    if not token:
+        raise HTTPException(
+            status_code=400,
+            detail="access_token is required on first save (paste the Admin API access token from your Shopify app)",
+        )
+    await upsert_shopify_credentials(db, shop, token)
+    return await shopify_status(db=db)
+
+
+@router.delete("/shopify", status_code=status.HTTP_204_NO_CONTENT)
+async def shopify_clear_stored(
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove Shopify credentials from the database. Does not change environment-based configuration."""
+    if shopify_from_env():
+        raise HTTPException(
+            status_code=400,
+            detail="Shopify is configured via environment variables. Remove SHOPIFY_SHOP and SHOPIFY_ACCESS_TOKEN to clear that configuration.",
+        )
+    await clear_shopify_credentials_db(db)
+
+
 # === Import ===
 
 class ImportRequest(BaseModel):
     mode: str = Field(..., description="full or incremental")
+    import_shopify: bool = Field(
+        True,
+        description="When true and Shopify is configured (env or Settings), also import Shopify orders.",
+    )
 
 
 class ImportResponse(BaseModel):
@@ -290,8 +416,12 @@ async def execute_order_import(db: AsyncSession, mode: str) -> ImportResponse:
 
     try:
         access_token = await get_ebay_access_token(db)
-    except HTTPException:
-        raise
+    except HTTPException as e:
+        msg = e.detail if isinstance(e.detail, str) else str(e.detail)
+        return ImportResponse(
+            orders_added=0, orders_updated=0, line_items_added=0, line_items_updated=0,
+            error=msg,
+        )
     except Exception as e:
         return ImportResponse(
             orders_added=0, orders_updated=0, line_items_added=0, line_items_updated=0,
@@ -306,7 +436,9 @@ async def execute_order_import(db: AsyncSession, mode: str) -> ImportResponse:
 
     try:
         if mode == "incremental":
-            result = await db.execute(select(func.max(Order.last_modified)))
+            result = await db.execute(
+                select(func.max(Order.last_modified)).where(Order.sales_channel == "ebay")
+            )
             max_modified = result.scalar()
             since = (max_modified or datetime(2000, 1, 1)) - timedelta(seconds=1)
             chunks = [await fetch_orders_modified_since(access_token, since)]
@@ -326,34 +458,14 @@ async def execute_order_import(db: AsyncSession, mode: str) -> ImportResponse:
             for o in order_batch:
                 # Use Fulfillment API data as-is (total_due_seller from batch). Use backfill endpoint to correct earnings with Finances API when needed.
                 result = await db.execute(
-                    select(Order).where(Order.ebay_order_id == o["ebay_order_id"])
+                    select(Order).where(
+                        Order.sales_channel == "ebay",
+                        Order.ebay_order_id == o["ebay_order_id"],
+                    )
                 )
                 existing_order = result.scalar_one_or_none()
-                def _order_payload(o: dict) -> dict:
-                    return {
-                        "date": o["date"],
-                        "country": o["country"],
-                        "last_modified": o["last_modified"],
-                        "cancel_status": o.get("cancel_status"),
-                        "buyer_username": o.get("buyer_username"),
-                        "order_currency": o.get("order_currency"),
-                        "price_subtotal": o.get("price_subtotal"),
-                        "price_total": o.get("price_total"),
-                        "tax_total": o.get("tax_total"),
-                        "delivery_cost": o.get("delivery_cost"),
-                        "price_discount": o.get("price_discount"),
-                        "fee_total": o.get("fee_total"),
-                        "total_fee_basis_amount": o.get("total_fee_basis_amount"),
-                        "total_marketplace_fee": o.get("total_marketplace_fee"),
-                        "total_due_seller": o.get("total_due_seller"),
-                        "total_due_seller_currency": o.get("total_due_seller_currency"),
-                        "order_payment_status": o.get("order_payment_status"),
-                        "sales_record_reference": o.get("sales_record_reference"),
-                        "ebay_collect_and_remit_tax": o.get("ebay_collect_and_remit_tax"),
-                    }
-
                 if existing_order:
-                    payload = _order_payload(o)
+                    payload = _parsed_order_to_orm_payload(o)
                     order_changed = any(
                         getattr(existing_order, k, None) != payload.get(k)
                         for k in payload
@@ -367,7 +479,11 @@ async def execute_order_import(db: AsyncSession, mode: str) -> ImportResponse:
                     result_li = await db.execute(select(LineItem).where(LineItem.order_id == order_id))
                     existing_items = {(li.ebay_line_item_id): li for li in result_li.scalars().all()}
                 else:
-                    new_order = Order(ebay_order_id=o["ebay_order_id"], **_order_payload(o))
+                    new_order = Order(
+                        sales_channel="ebay",
+                        ebay_order_id=o["ebay_order_id"],
+                        **_parsed_order_to_orm_payload(o),
+                    )
                     db.add(new_order)
                     await db.flush()
                     orders_added += 1
@@ -423,19 +539,170 @@ async def execute_order_import(db: AsyncSession, mode: str) -> ImportResponse:
     )
 
 
+async def execute_shopify_order_import(db: AsyncSession, mode: str) -> ImportResponse:
+    """
+    Import Shopify Admin orders into the same `orders` / `line_items` shape as eBay; `sales_channel=shopify`.
+    Credentials: SHOPIFY_SHOP + SHOPIFY_ACCESS_TOKEN in env, or values saved in Settings (encrypted). Payout in `total_due_seller` (same profit path as eBay after GBP conversion).
+    """
+    if mode not in ("full", "incremental"):
+        return ImportResponse(
+            orders_added=0,
+            orders_updated=0,
+            line_items_added=0,
+            line_items_updated=0,
+            error="mode must be 'full' or 'incremental'",
+        )
+    creds = await resolve_shopify_credentials(db)
+    if not creds:
+        return ImportResponse(0, 0, 0, 0, None, None)
+
+    shop, token = creds
+    last_import = datetime.utcnow()
+    orders_added = 0
+    orders_updated = 0
+    line_items_added = 0
+    line_items_updated = 0
+
+    try:
+        if mode == "incremental":
+            result = await db.execute(
+                select(func.max(Order.last_modified)).where(Order.sales_channel == "shopify")
+            )
+            max_modified = result.scalar()
+            since = (max_modified or datetime(2000, 1, 1)) - timedelta(seconds=1)
+            order_rows = await fetch_shopify_orders_paginated(shop, token, updated_at_min=since)
+        else:
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(days=90)
+            order_rows = await fetch_shopify_orders_paginated(shop, token, created_at_min=start_date)
+
+        for row in order_rows:
+            try:
+                o = parse_shopify_order_to_import(row)
+            except Exception as e:
+                logger.warning("shopify import skip order: %s", e)
+                continue
+            result = await db.execute(
+                select(Order).where(
+                    Order.sales_channel == "shopify",
+                    Order.ebay_order_id == o["ebay_order_id"],
+                )
+            )
+            existing_order = result.scalar_one_or_none()
+            if existing_order:
+                payload = _parsed_order_to_orm_payload(o)
+                order_changed = any(
+                    getattr(existing_order, k, None) != payload.get(k)
+                    for k in payload
+                )
+                if order_changed:
+                    for k, v in payload.items():
+                        setattr(existing_order, k, v)
+                    await db.flush()
+                    orders_updated += 1
+                order_id = existing_order.order_id
+                result_li = await db.execute(select(LineItem).where(LineItem.order_id == order_id))
+                existing_items = {li.ebay_line_item_id: li for li in result_li.scalars().all()}
+            else:
+                new_order = Order(
+                    sales_channel="shopify",
+                    ebay_order_id=o["ebay_order_id"],
+                    **_parsed_order_to_orm_payload(o),
+                )
+                db.add(new_order)
+                await db.flush()
+                orders_added += 1
+                order_id = new_order.order_id
+                existing_items = {}
+
+            for li in o["line_items"]:
+                eid = li["ebay_line_item_id"]
+                line_payload = {
+                    "sku": li["sku"],
+                    "quantity": li["quantity"],
+                    "currency": li.get("currency"),
+                    "line_item_cost": li.get("line_item_cost"),
+                    "discounted_line_item_cost": li.get("discounted_line_item_cost"),
+                    "line_total": li.get("line_total"),
+                    "tax_amount": li.get("tax_amount"),
+                }
+                if eid in existing_items:
+                    line_changed = any(
+                        getattr(existing_items[eid], k, None) != line_payload.get(k)
+                        for k in line_payload
+                    )
+                    if line_changed:
+                        for k, v in line_payload.items():
+                            setattr(existing_items[eid], k, v)
+                        line_items_updated += 1
+                else:
+                    db.add(
+                        LineItem(
+                            order_id=order_id,
+                            ebay_line_item_id=eid,
+                            **line_payload,
+                        )
+                    )
+                    line_items_added += 1
+
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        return ImportResponse(
+            orders_added=orders_added,
+            orders_updated=orders_updated,
+            line_items_added=line_items_added,
+            line_items_updated=line_items_updated,
+            last_import=last_import,
+            error=str(e),
+        )
+
+    return ImportResponse(
+        orders_added=orders_added,
+        orders_updated=orders_updated,
+        line_items_added=line_items_added,
+        line_items_updated=line_items_updated,
+        last_import=last_import,
+    )
+
+
 @router.post("/import", response_model=ImportResponse)
 async def run_import(
     body: ImportRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Run order import: full (last 90 days; eBay filter limit) or incremental (since last import).
-    Uses Fulfillment API batch data only (no per-order Finances calls). total_due_seller comes from
-    paymentSummary in the batch; for net earnings after ad fees, run the backfill-order-earnings endpoint separately.
+    Run order import: eBay (when connected) and optionally Shopify.
+    eBay: full = last 90 days (API limit) or incremental since last eBay import.
+    Shopify: same when `import_shopify` and Shopify is configured (env or Settings); incremental uses last Shopify `last_modified`.
+    eBay total_due_seller is Fulfillment batch data; for net after ad fees, use backfill-order-earnings (eBay only).
     """
     if body.mode not in ("full", "incremental"):
         raise HTTPException(status_code=400, detail="mode must be 'full' or 'incremental'")
-    return await execute_order_import(db, body.mode)
+    eb = await execute_order_import(db, body.mode)
+    if not body.import_shopify or not (await shopify_configured_db(db)):
+        return eb
+    sp = await execute_shopify_order_import(db, body.mode)
+    drop_eb_unconnected = (
+        bool(eb.error)
+        and "eBay not connected" in eb.error
+        and not sp.error
+    )
+    errs: List[str] = []
+    if eb.error and not drop_eb_unconnected:
+        errs.append(eb.error)
+    if sp.error:
+        errs.append(sp.error)
+    li_candidates = [t for t in (eb.last_import, sp.last_import) if t is not None]
+    last = max(li_candidates) if li_candidates else eb.last_import
+    return ImportResponse(
+        orders_added=eb.orders_added + sp.orders_added,
+        orders_updated=eb.orders_updated + sp.orders_updated,
+        line_items_added=eb.line_items_added + sp.line_items_added,
+        line_items_updated=eb.line_items_updated + sp.line_items_updated,
+        last_import=last,
+        error="; ".join(errs) if errs else None,
+    )
 
 
 class BackfillOrderEarningsResponse(BaseModel):
@@ -465,7 +732,10 @@ async def backfill_order_earnings(
     try:
         marketplace_id = getattr(app_settings, "EBAY_MARKETPLACE_ID", None) or "EBAY_GB"
         result = await db.execute(
-            select(Order).order_by(Order.total_due_seller.asc().nulls_first()).limit(limit)
+            select(Order)
+            .where(Order.sales_channel == "ebay")
+            .order_by(Order.total_due_seller.asc().nulls_first())
+            .limit(limit)
         )
         orders = result.scalars().all()
         updated = 0
@@ -628,6 +898,22 @@ def _order_currency_to_gbp_rate(order_currency: Optional[str]) -> float:
     return getattr(app_settings, "USD_TO_GBP_RATE", 0.79)
 
 
+def _total_due_seller_gbp_amount(
+    total_due_seller: Optional[Decimal],
+    total_due_seller_currency: Optional[str],
+    order_currency: Optional[str],
+) -> Optional[Decimal]:
+    """
+    Convert total_due_seller (stored in total_due_seller_currency) to GBP for profit math.
+    Matches eBay + Shopify: amounts are in marketplace currency until here.
+    """
+    if total_due_seller is None:
+        return None
+    cc = (total_due_seller_currency or order_currency or "GBP").strip().upper()[:3]
+    rate = _order_currency_to_gbp_rate(cc)
+    return (total_due_seller * Decimal(str(rate))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
 def _uk_vat_gbp(
     country: Optional[str],
     tax_total: Optional[Decimal],
@@ -656,6 +942,7 @@ def _uk_vat_gbp(
 
 def _order_profit_gbp(
     total_due_seller: Optional[Decimal],
+    total_due_seller_currency: Optional[str],
     price_total: Optional[Decimal],
     tax_total: Optional[Decimal],
     order_currency: Optional[str],
@@ -675,20 +962,21 @@ def _order_profit_gbp(
     Cost = 2× outbound postage only (USD summed as line_postage_usd_total, then ×2, then to GBP).
     UK VAT is not applied on these orders (refund reverses the sale for VAT purposes in this model).
     """
-    if total_due_seller is None:
+    td_gbp = _total_due_seller_gbp_amount(total_due_seller, total_due_seller_currency, order_currency)
+    if td_gbp is None:
         return None
     rate = _order_currency_to_gbp_rate(order_currency)
     rate_d = Decimal(str(rate))
     price_gbp = (price_total or Decimal(0)) * rate_d
     usd_to_gbp_d = Decimal(str(usd_to_gbp))
-    if total_due_seller <= 0:
+    if td_gbp <= 0:
         cost_gbp = (Decimal("2") * line_postage_usd_total) * usd_to_gbp_d
     else:
         cost_gbp = line_cost_usd_total * usd_to_gbp_d
     vat_gbp = _uk_vat_gbp(country, tax_total, price_gbp, rate_d)
-    if total_due_seller <= 0:
+    if td_gbp <= 0:
         vat_gbp = Decimal(0)
-    return total_due_seller - cost_gbp - vat_gbp
+    return td_gbp - cost_gbp - vat_gbp
 
 
 def _profit_after_tax(gross_profit: Decimal) -> Decimal:
@@ -766,6 +1054,7 @@ async def get_analytics_by_sku(
             continue
         order_profit = _order_profit_gbp(
             o.total_due_seller,
+            o.total_due_seller_currency,
             o.price_total,
             o.tax_total,
             o.order_currency,
@@ -867,6 +1156,7 @@ async def get_analytics_by_country(
             qty_for_country += qty
         order_profit = _order_profit_gbp(
             o.total_due_seller,
+            o.total_due_seller_currency,
             o.price_total,
             o.tax_total,
             o.order_currency,
@@ -1015,7 +1305,10 @@ async def get_analytics_order_details(
             line_cost_usd += (landed + postage) * qty
             line_postage_usd += postage * qty
 
-        refund_mode = o.total_due_seller is not None and o.total_due_seller <= 0
+        td_gbp_check = _total_due_seller_gbp_amount(
+            o.total_due_seller, o.total_due_seller_currency, o.order_currency
+        )
+        refund_mode = td_gbp_check is not None and td_gbp_check <= 0
         rate = _order_currency_to_gbp_rate(o.order_currency)
         rate_d = Decimal(str(rate))
         price_gbp = price_total * rate_d
@@ -1030,6 +1323,7 @@ async def get_analytics_order_details(
 
         order_profit = _order_profit_gbp(
             o.total_due_seller,
+            o.total_due_seller_currency,
             o.price_total,
             o.tax_total,
             o.order_currency,
@@ -1091,9 +1385,9 @@ async def get_analytics_order_details(
             sum_line_cost += line_cost_gbp
             sum_line_net += line_net
             sum_line_gross += line_gross
-            oid = o.ebay_order_id
+            oid = f"{o.sales_channel}:{o.ebay_order_id}"
             if oid not in payout_by_order:
-                payout_by_order[oid] = o.total_due_seller or Decimal(0)
+                payout_by_order[oid] = td_gbp_check or Decimal(0)
 
     rows.sort(key=lambda r: (r.order_date, r.ebay_order_id, r.sku))
     sum_payout = sum(payout_by_order.values(), Decimal(0))

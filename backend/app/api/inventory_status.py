@@ -33,6 +33,7 @@ from app.services.oc_stock_movement_store import (
     max_movement_update_time_utc,
     persist_oc_stock_movement_lines,
 )
+from app.services.stock_forecast import build_stock_forecast_payload
 from app.services.oc_client import (
     OCAPIError,
     OCConfigError,
@@ -137,6 +138,26 @@ class InventoryHistorySeriesResponse(BaseModel):
     mfskuid_count: int
     scope: str
     note: Optional[str] = None
+
+
+class StockForecastRowResponse(BaseModel):
+    seller_skuid: str
+    mfskuid: str
+    sku_name: str
+    service_region: str
+    current_available: int
+    burn_rate_per_day: Optional[float] = None
+    in_stock_days_used: int
+    days_of_cover: Optional[float] = None
+    estimated_oos_date: Optional[str] = None
+    confidence: str
+    total_sales_in_window: Optional[int] = None
+
+
+class StockForecastBundleResponse(BaseModel):
+    forecasts: List[StockForecastRowResponse]
+    generated_at: str
+    note: str
 
 
 class OCSkuInventoryResponse(BaseModel):
@@ -1295,6 +1316,22 @@ async def list_inventory_history(
         mfskuid_count=len(mfs),
         scope=scope,
         note=note,
+    )
+
+
+@router.get("/stock-forecast", response_model=StockForecastBundleResponse)
+async def get_stock_forecast(db: AsyncSession = Depends(get_db)):
+    """
+    Linear-weighted burn (last 90 in-stock days, AVL >= 5) vs current AVL; one row per OC SKU mapping.
+    """
+    cid = await _active_oc_connection_id(db)
+    if not cid:
+        raise HTTPException(status_code=400, detail="No active OC connection configured.")
+    raw = await build_stock_forecast_payload(db, cid)
+    return StockForecastBundleResponse(
+        forecasts=[StockForecastRowResponse(**r) for r in raw["forecasts"]],
+        generated_at=raw["generated_at"],
+        note=raw["note"],
     )
 
 

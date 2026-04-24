@@ -29,6 +29,23 @@ const offsetDaysFromToday = (daysAgo: number) => {
   return formatLocalDate(d)
 }
 
+function formatOosDayLabel(iso: string): string {
+  const [y, m, d] = iso.split('-').map((v) => Number(v))
+  if (!y || !m || !d) return iso
+  return new Date(y, m - 1, d).toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  })
+}
+
+function daysCoverTextClass(doc: number | null | undefined): string {
+  if (doc == null || Number.isNaN(doc)) return 'text-slate-700'
+  if (doc < 14) return 'text-red-700 font-medium'
+  if (doc <= 30) return 'text-amber-800 font-medium'
+  return 'text-emerald-800 font-medium'
+}
+
 /** Inclusive last N calendar days (same as Sales Analytics). */
 const lastNDaysFrom = (n: number) => offsetDaysFromToday(n - 1)
 
@@ -146,6 +163,11 @@ export default function InventoryMovement() {
       ).data,
   })
 
+  const stockForecastQuery = useQuery({
+    queryKey: ['stock-forecast'],
+    queryFn: async () => (await inventoryStatusAPI.getStockForecast()).data,
+  })
+
   type SyncStockMovementMode = { mode: 'incremental' } | { mode: 'range' }
 
   const syncFromOcMutation = useMutation({
@@ -160,6 +182,7 @@ export default function InventoryMovement() {
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['stock-movement'] })
       await queryClient.invalidateQueries({ queryKey: ['inventory-history'] })
+      await queryClient.invalidateQueries({ queryKey: ['stock-forecast'] })
     },
   })
 
@@ -316,6 +339,7 @@ export default function InventoryMovement() {
               void inventoryQuery.refetch()
               void movementQuery.refetch()
               void inventoryHistoryQuery.refetch()
+              void stockForecastQuery.refetch()
             }}
             className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
           >
@@ -367,6 +391,70 @@ export default function InventoryMovement() {
 
       {inventoryHistoryQuery.data?.note && (
         <p className="text-xs text-gray-500 mb-2 max-w-3xl">{inventoryHistoryQuery.data.note}</p>
+      )}
+
+      {stockForecastQuery.isError && (
+        <p className="text-red-600 text-sm mb-4">
+          {stockForecastQuery.error instanceof Error
+            ? stockForecastQuery.error.message
+            : 'Failed to load stock forecast'}
+        </p>
+      )}
+
+      {stockForecastQuery.data && !stockForecastQuery.isError && (
+        <div className="mb-6 rounded-lg border border-slate-200 bg-white overflow-hidden shadow-sm">
+          <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
+            <h2 className="text-lg font-semibold text-slate-800">Stock run-out forecast</h2>
+          </div>
+          <div className="overflow-x-auto max-h-[28rem] overflow-y-auto">
+            <table className="min-w-full text-sm text-left">
+              <caption className="sr-only">Stock run-out by mapping, shortest cover first</caption>
+              <thead>
+                <tr className="text-gray-600 border-b border-gray-200 bg-white">
+                  <th className="py-2 pl-4 pr-3 font-medium">SKU</th>
+                  <th className="py-2 pr-3 font-medium">Region</th>
+                  <th className="py-2 pr-3 font-medium text-right">Available</th>
+                  <th className="py-2 pr-3 font-medium text-right">Burn rate/day</th>
+                  <th className="py-2 pr-3 font-medium text-right">Days of cover</th>
+                  <th className="py-2 pr-3 font-medium">Est. run-out</th>
+                  <th className="py-2 pr-4 font-medium">Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stockForecastQuery.data.forecasts.map((f) => (
+                  <tr
+                    key={`${f.seller_skuid}-${f.mfskuid}-${f.service_region}`}
+                    className="border-b border-gray-50 hover:bg-slate-50/80"
+                  >
+                    <td className="py-2 pl-4 pr-3 font-mono text-xs">{f.sku_name || f.seller_skuid}</td>
+                    <td className="py-2 pr-3">{f.service_region}</td>
+                    <td className="py-2 pr-3 text-right tabular-nums">{f.current_available}</td>
+                    <td className="py-2 pr-3 text-right tabular-nums">
+                      {f.burn_rate_per_day != null ? f.burn_rate_per_day.toFixed(2) : '—'}
+                    </td>
+                    <td
+                      className={`py-2 pr-3 text-right tabular-nums ${daysCoverTextClass(f.days_of_cover)}`}
+                    >
+                      {f.days_of_cover != null ? f.days_of_cover.toFixed(1) : '—'}
+                    </td>
+                    <td className="py-2 pr-3">
+                      {f.estimated_oos_date ? formatOosDayLabel(f.estimated_oos_date) : '—'}
+                    </td>
+                    <td className="py-2 pr-4 text-xs text-slate-700">
+                      {f.confidence === 'normal' ? (
+                        'normal'
+                      ) : (
+                        <span className="inline-block rounded-full bg-slate-200 px-2 py-0.5 font-medium text-slate-800">
+                          {f.confidence}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
       {!inventoryHistoryQuery.isError && dailyStockChartData.length > 0 && (

@@ -10,6 +10,7 @@ const VideoManagement = lazy(() => import('./pages/VideoManagement'))
 const InventoryStatus = lazy(() => import('./pages/InventoryStatus'))
 const InventoryMovement = lazy(() => import('./pages/InventoryMovement'))
 const OrderDetails = lazy(() => import('./pages/OrderDetails'))
+const LenderSummary = lazy(() => import('./pages/LenderSummary'))
 
 function App() {
   return (
@@ -29,6 +30,12 @@ function App() {
                     className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                   >
                     Sales Analytics
+                  </Link>
+                  <Link
+                    to="/lender-summary"
+                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
+                  >
+                    Lender summary
                   </Link>
                   <Link
                     to="/planning"
@@ -84,6 +91,7 @@ function App() {
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/analytics" element={<SalesAnalytics />} />
+              <Route path="/lender-summary" element={<LenderSummary />} />
               <Route path="/order-details" element={<OrderDetails />} />
               <Route path="/planning" element={<StockPlanning />} />
               <Route path="/skus" element={<SKUManager />} />

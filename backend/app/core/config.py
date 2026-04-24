@@ -67,6 +67,10 @@ class Settings(BaseSettings):
     # Profit in EUR: multiply GBP profit by this. E.g. 1.16 = 1 GBP = 1.16 EUR.
     GBP_TO_EUR_RATE: float = 1.16
 
+    # Shopify Admin API (custom app: Admin API access token). Used for sales analytics import.
+    SHOPIFY_SHOP: str = ""  # e.g. your-store.myshopify.com (with or without https)
+    SHOPIFY_ACCESS_TOKEN: str = ""
+
     # AI Providers (can be set via UI)
     ANTHROPIC_API_KEY: str = ""
     OPENAI_API_KEY: str = ""

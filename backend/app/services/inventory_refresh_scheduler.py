@@ -19,7 +19,8 @@ from app.api.inventory_status import (
     execute_oc_sku_mappings_sync,
     execute_stock_movement_pull,
 )
-from app.api.stock import execute_order_import
+from app.api.stock import execute_order_import, execute_shopify_order_import
+from app.services.shopify_settings import shopify_configured_db
 from app.core.config import settings
 from app.core.database import async_session_maker
 
@@ -50,6 +51,25 @@ async def run_scheduled_inventory_refresh() -> None:
         logger.warning("Scheduled order import skipped: %s", e.detail)
     except Exception:
         logger.exception("Scheduled order import failed")
+
+    try:
+        r_sh = None
+        async with async_session_maker() as db:
+            if await shopify_configured_db(db):
+                r_sh = await execute_shopify_order_import(db, "incremental")
+        if r_sh is not None:
+            if r_sh.error:
+                logger.warning("Scheduled Shopify import finished with error: %s", r_sh.error)
+            else:
+                logger.info(
+                    "Scheduled Shopify import OK: +%s orders, +%s lines (updated %s/%s)",
+                    r_sh.orders_added,
+                    r_sh.line_items_added,
+                    r_sh.orders_updated,
+                    r_sh.line_items_updated,
+                )
+    except Exception:
+        logger.exception("Scheduled Shopify import failed")
 
     # 2) OC SKU mappings + inventory snapshot
     try:

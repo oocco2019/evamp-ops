@@ -705,6 +705,8 @@ async def send_message(
     """
     Send a message in an existing conversation via eBay REST Message API.
     message_media: optional list of {mediaName, mediaType, mediaUrl}. Types: IMAGE, DOC, PDF, TXT. Max 5. URLs must be HTTPS.
+    messageText must be non-empty after eBay-side trimming; callers sending attachments only should pass
+    a non-strippable placeholder (see messages.py), not a plain space.
     Returns the created message details including messageId and messageMedia.
     """
     payload: Dict[str, Any] = {

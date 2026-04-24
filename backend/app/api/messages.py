@@ -51,6 +51,9 @@ from app.services.ebay_client import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# eBay rejects send_message when messageText is empty after trimming. A single normal space is stripped
+# to empty, so image-only sends fail. U+2060 is non-whitespace, invisible to readers, and survives trim.
+_SEND_TEXT_WHEN_MEDIA_ONLY = "\u2060"
 
 # === Schemas ===
 
@@ -635,7 +638,12 @@ async def send_reply(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="All attachment URLs must be HTTPS.",
                 )
-    message_text = content if content else " "  # eBay requires messageText; use space when only attachments
+    if content:
+        message_text = content
+    elif message_media_payload:
+        message_text = _SEND_TEXT_WHEN_MEDIA_ONLY
+    else:
+        message_text = ""
     try:
         ebay_response = await ebay_send_message(
             access_token,
@@ -685,7 +693,10 @@ async def send_reply(
         ebay_created_at=ebay_created,
     )
     db.add(new_msg)
-    preview = (content[:497] + "…") if len(content) > 500 else content
+    if content:
+        preview = (content[:497] + "…") if len(content) > 500 else content
+    else:
+        preview = "(image)" if message_media_payload else ""
     thread.last_message_preview = preview
     thread.last_message_at = ebay_created
     thread.message_count = (thread.message_count or 0) + 1

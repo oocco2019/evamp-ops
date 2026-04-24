@@ -174,6 +174,27 @@ export interface InventoryHistorySeries {
   note?: string | null
 }
 
+/** GET /api/inventory-status/stock-forecast — weighted burn over last 90 in-stock days; all mapped SKUs. */
+export interface StockForecastRow {
+  seller_skuid: string
+  mfskuid: string
+  sku_name: string
+  service_region: string
+  current_available: number
+  burn_rate_per_day: number | null
+  in_stock_days_used: number
+  days_of_cover: number | null
+  estimated_oos_date: string | null
+  confidence: string
+  total_sales_in_window: number | null
+}
+
+export interface StockForecastBundle {
+  forecasts: StockForecastRow[]
+  generated_at: string
+  note: string
+}
+
 /** GET /api/inventory-status/debug-raw — StockSnapshot v2 + SKU query verbatim. */
 export interface OCRawDebugResponse {
   connection: Record<string, unknown>
@@ -365,6 +386,13 @@ export interface ImportResult {
   error?: string
 }
 
+export interface ShopifyStatus {
+  connected: boolean
+  shop_domain: string | null
+  has_token: boolean
+  source: 'env' | 'database' | 'none'
+}
+
 export interface AnalyticsSummaryPoint {
   period: string
   order_count: number
@@ -430,6 +458,62 @@ export interface OrderDetailsTotals {
 export interface OrderDetailsResponse {
   rows: OrderDetailRow[]
   totals: OrderDetailsTotals
+}
+
+export interface LenderSummaryHeadline {
+  units_sold: number
+  gross_revenue_gbp: string
+  gross_profit_pre_tax_gbp: string
+  gross_margin_percent: string
+}
+
+export interface LenderSummaryWeekly {
+  week_start: string
+  week_label: string
+  units: number
+  revenue_gbp: string
+  gross_profit_gbp: string
+  margin_percent: string
+}
+
+export interface LenderSummaryRollingPeriod {
+  label: string
+  window_days: number
+  period_start: string
+  period_end: string
+  units: number
+  revenue_gbp: string
+  gross_profit_gbp: string
+  margin_percent: string
+}
+
+export interface LenderSummaryGeography {
+  label: string
+  code: string
+  units: number
+  revenue_gbp: string
+  gross_profit_gbp: string
+  pct_of_total_revenue: string
+}
+
+export interface LenderSummaryMethodology {
+  usd_to_gbp_rate: number
+  eur_to_gbp_rate: number
+  uk_vat_default_rate: number
+  generated_at_utc: string
+  company_footer_note: string
+}
+
+export interface LenderSummaryPayload {
+  period_from: string
+  period_to: string
+  generated_at_utc: string
+  disclosure: string
+  headline: LenderSummaryHeadline
+  weekly: LenderSummaryWeekly[]
+  rolling_periods: LenderSummaryRollingPeriod[]
+  geography: LenderSummaryGeography[]
+  methodology: LenderSummaryMethodology
 }
 
 export interface OrderLineItemRow {
@@ -501,8 +585,12 @@ export const stockAPI = {
   getEbayStatus: () => api.get<{ connected: boolean }>('/api/stock/ebay/status'),
   getEbayCallbackUrl: () =>
     api.get<{ callback_url: string; hint: string }>('/api/stock/ebay/callback-url'),
-  runImport: (mode: 'full' | 'incremental') =>
-    api.post<ImportResult>('/api/stock/import', { mode }),
+  getShopifyStatus: () => api.get<ShopifyStatus>('/api/stock/shopify/status'),
+  saveShopify: (data: { shop: string; access_token: string }) =>
+    api.put<ShopifyStatus>('/api/stock/shopify', data),
+  clearShopify: () => api.delete('/api/stock/shopify'),
+  runImport: (mode: 'full' | 'incremental', importShopify: boolean = true) =>
+    api.post<ImportResult>('/api/stock/import', { mode, import_shopify: importShopify }),
 
   listSKUs: (search?: string) =>
     api.get<SKU[]>('/api/stock/skus', { params: search ? { search } : {} }),
@@ -543,6 +631,9 @@ export const stockAPI = {
     country?: string
     sku?: string
   }) => api.get<OrderDetailsResponse>('/api/stock/analytics/order-details', { params }),
+
+  getLenderSummary: (params: { from: string; to: string }) =>
+    api.get<LenderSummaryPayload>('/api/lender-summary', { params }),
 
   getLatestOrders: (limit = 10) =>
     api.get<OrderWithLines[]>('/api/stock/orders/latest', { params: { limit } }),
@@ -926,6 +1017,8 @@ export const inventoryStatusAPI = {
         ...(params.service_region ? { service_region: params.service_region } : {}),
       },
     }),
+  /** Linear-weighted run-out forecast for all OC mappings (no query params). */
+  getStockForecast: () => api.get<StockForecastBundle>('/api/inventory-status/stock-forecast'),
   /** Stored movement lines (GET); fill with syncStockMovementFromOc first. */
   listStockMovement: (params: {
     from?: string

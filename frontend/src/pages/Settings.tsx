@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { settingsAPI, stockAPI, messagesAPI, inventoryStatusAPI, type AIModelSetting, type APICredential, type Warehouse, type EmailTemplate, type AIInstruction, type OCConnection } from '../services/api'
 
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState<'credentials' | 'ai-models' | 'ai-instructions' | 'ebay' | 'oc' | 'warehouses' | 'email-templates'>('credentials')
+  const [activeTab, setActiveTab] = useState<'credentials' | 'ai-models' | 'ai-instructions' | 'ebay' | 'shopify' | 'oc' | 'warehouses' | 'email-templates'>('credentials')
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -72,6 +72,16 @@ export default function Settings() {
             eBay
           </button>
           <button
+            onClick={() => setActiveTab('shopify')}
+            className={`${
+              activeTab === 'shopify'
+                ? 'border-blue-500 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
+          >
+            Shopify
+          </button>
+          <button
             onClick={() => setActiveTab('oc')}
             className={`${
               activeTab === 'oc'
@@ -109,6 +119,7 @@ export default function Settings() {
       {activeTab === 'ai-models' && <AIModelsTab />}
       {activeTab === 'ai-instructions' && <AIInstructionsTab />}
       {activeTab === 'ebay' && <EbayTab />}
+      {activeTab === 'shopify' && <ShopifyTab />}
       {activeTab === 'oc' && <OCTab />}
       {activeTab === 'email-templates' && <EmailTemplatesTab />}
       {activeTab === 'warehouses' && <WarehousesTab />}
@@ -1335,6 +1346,177 @@ function EbayTab() {
             </div>
           )}
         </div>
+      )}
+    </div>
+  )
+}
+
+function ShopifyTab() {
+  const queryClient = useQueryClient()
+  const [shop, setShop] = useState('')
+  const [accessToken, setAccessToken] = useState('')
+  const [formError, setFormError] = useState<string | null>(null)
+
+  const { data: st, isLoading } = useQuery({
+    queryKey: ['shopify-status'],
+    queryFn: async () => {
+      const response = await stockAPI.getShopifyStatus()
+      return response.data
+    },
+  })
+
+  useEffect(() => {
+    if (st?.shop_domain) {
+      setShop(st.shop_domain)
+    }
+  }, [st?.shop_domain])
+
+  const saveMutation = useMutation({
+    mutationFn: (payload: { shop: string; access_token: string }) => stockAPI.saveShopify(payload),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shopify-status'] })
+      setAccessToken('')
+      setFormError(null)
+    },
+    onError: (err: unknown) => {
+      const message =
+        err && typeof err === 'object' && 'response' in err
+          ? (err as { response?: { data?: { detail?: string | { msg: string }[] } } }).response?.data?.detail
+          : null
+      const text =
+        typeof message === 'string'
+          ? message
+          : Array.isArray(message)
+            ? message.map((m) => (typeof m === 'object' && m && 'msg' in m ? String(m.msg) : String(m))).join(', ')
+            : err instanceof Error
+              ? err.message
+              : 'Failed to save'
+      setFormError(text)
+    },
+  })
+
+  const clearMutation = useMutation({
+    mutationFn: () => stockAPI.clearShopify(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['shopify-status'] })
+      setAccessToken('')
+      setShop('')
+      setFormError(null)
+    },
+    onError: (err: unknown) => {
+      const message =
+        err && typeof err === 'object' && 'response' in err
+          ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
+          : null
+      setFormError(typeof message === 'string' ? message : 'Failed to clear')
+    },
+  })
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    setFormError(null)
+    saveMutation.mutate({ shop, access_token: accessToken })
+  }
+
+  return (
+    <div className="bg-white shadow rounded-lg p-6">
+      <h2 className="text-xl font-semibold mb-4">Shopify</h2>
+      <p className="text-gray-600 mb-4">
+        Connect a <strong>custom app</strong> in Shopify Admin (Settings → Apps → Develop apps), install it on your store, and
+        enable <strong>read orders</strong> (Admin API). Paste the <strong>Admin API access token</strong> and your store
+        domain (e.g. <code className="bg-gray-200 px-1 rounded">your-store.myshopify.com</code>) here. Values are stored
+        encrypted in the database, like other API keys.
+      </p>
+
+      {st?.source === 'env' && (
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-sm">
+          <p className="font-medium">Using environment variables</p>
+          <p className="mt-1">
+            <code className="bg-white/80 px-1 rounded">SHOPIFY_SHOP</code> and{' '}
+            <code className="bg-white/80 px-1 rounded">SHOPIFY_ACCESS_TOKEN</code> are set. They override Settings until you
+            remove them and restart the API.
+            {st.shop_domain && (
+              <span>
+                {' '}
+                Current shop: <code className="bg-white/80 px-1 rounded break-all">{st.shop_domain}</code>
+              </span>
+            )}
+          </p>
+        </div>
+      )}
+
+      {isLoading ? (
+        <p className="text-gray-500">Loading…</p>
+      ) : (
+        <>
+          <div className="mb-4">
+            <p className="text-sm text-gray-600">
+              Status:{' '}
+              {st?.connected ? (
+                <span className="text-green-700 font-medium">Ready for import</span>
+              ) : (
+                <span className="text-gray-600">Not configured</span>
+              )}
+              {st && st.source !== 'none' && (
+                <span className="text-gray-500"> (source: {st.source})</span>
+              )}
+            </p>
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-4 max-w-xl">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Store domain</label>
+              <input
+                type="text"
+                value={shop}
+                onChange={(e) => setShop(e.target.value)}
+                placeholder="your-store.myshopify.com"
+                className="w-full border border-gray-300 rounded-md px-3 py-2"
+                disabled={st?.source === 'env'}
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Admin API access token</label>
+              <input
+                type="password"
+                value={accessToken}
+                onChange={(e) => setAccessToken(e.target.value)}
+                placeholder={st?.connected && st?.source === 'database' ? '•••• (leave empty to keep current token)' : 'shpat_…'}
+                className="w-full border border-gray-300 rounded-md px-3 py-2"
+                disabled={st?.source === 'env'}
+                autoComplete="off"
+              />
+              <p className="text-xs text-gray-500 mt-1">Stored encrypted. Leave empty when updating the domain only.</p>
+            </div>
+            {formError && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">{formError}</div>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="submit"
+                disabled={saveMutation.isPending || st?.source === 'env'}
+                className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
+              >
+                {saveMutation.isPending ? 'Saving…' : 'Save'}
+              </button>
+              {st?.source === 'database' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (window.confirm('Remove Shopify credentials from the database?')) {
+                      clearMutation.mutate()
+                    }
+                  }}
+                  disabled={clearMutation.isPending}
+                  className="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-md hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {clearMutation.isPending ? 'Clearing…' : 'Clear stored credentials'}
+                </button>
+              )}
+            </div>
+          </form>
+        </>
       )}
     </div>
   )

@@ -9,6 +9,7 @@ def test_normal_order_full_cogs():
     """Non-UK: no UK VAT line."""
     gross = _order_profit_gbp(
         total_due_seller=Decimal("100"),
+        total_due_seller_currency="GBP",
         price_total=Decimal("120"),
         tax_total=Decimal("0"),
         order_currency="GBP",
@@ -26,6 +27,7 @@ def test_uk_no_ebay_tax_uses_default_vat():
     """GB + zero tax_total: VAT extracted from VAT-inclusive total (20% rate → ×20/120)."""
     gross = _order_profit_gbp(
         total_due_seller=Decimal("100"),
+        total_due_seller_currency="GBP",
         price_total=Decimal("120"),
         tax_total=Decimal("0"),
         order_currency="GBP",
@@ -47,6 +49,7 @@ def test_uk_default_vat_is_vat_inclusive_extract():
 def test_uk_positive_tax_total_uses_ebay_only():
     gross = _order_profit_gbp(
         total_due_seller=Decimal("100"),
+        total_due_seller_currency="GBP",
         price_total=Decimal("120"),
         tax_total=Decimal("20"),
         order_currency="GBP",
@@ -67,6 +70,7 @@ def test_refund_negative_payout_only_double_postage_not_landed():
     usd_to_gbp = 0.79
     gross = _order_profit_gbp(
         total_due_seller=Decimal("-0.48"),
+        total_due_seller_currency="GBP",
         price_total=Decimal("129.99"),
         tax_total=Decimal("0"),
         order_currency="GBP",
@@ -85,6 +89,7 @@ def test_refund_negative_payout_only_double_postage_not_landed():
 def test_refund_zero_payout_uses_postage_cost():
     gross = _order_profit_gbp(
         total_due_seller=Decimal("0"),
+        total_due_seller_currency="GBP",
         price_total=Decimal("100"),
         tax_total=Decimal("0"),
         order_currency="GBP",

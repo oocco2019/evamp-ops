@@ -18,6 +18,7 @@ from app.api import stock as stock_api
 from app.api import messages as messages_api
 from app.api import listing_video as listing_video_api
 from app.api import inventory_status as inventory_status_api
+from app.api import lender_summary as lender_summary_api
 
 # Configure logging
 logging.basicConfig(
@@ -111,6 +112,11 @@ app.include_router(
     stock_api.router,
     prefix="/api/stock",
     tags=["stock"]
+)
+app.include_router(
+    lender_summary_api.router,
+    prefix="/api",
+    tags=["lender-summary"],
 )
 app.include_router(
     messages_api.router,
