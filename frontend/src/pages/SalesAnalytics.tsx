@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   BarChart,
   Bar,
+  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -11,7 +12,7 @@ import {
   ResponsiveContainer,
   Legend,
 } from 'recharts'
-import { stockAPI, type AnalyticsSummary, type AnalyticsBySkuPoint, type AnalyticsByCountryPoint } from '../services/api'
+import { stockAPI } from '../services/api'
 
 const formatLocalDate = (d: Date): string => {
   const year = d.getFullYear()
@@ -100,12 +101,16 @@ export default function SalesAnalytics() {
   const [tableSort, setTableSort] = useState<{ key: SkuSortKey; dir: 'asc' | 'desc' }>(loadSkuSort)
   const [countrySort, setCountrySort] = useState<{ key: CountrySortKey; dir: 'asc' | 'desc' }>(loadCountrySort)
   const [filterOptions, setFilterOptions] = useState<{ countries: string[]; skus: string[] } | null>(null)
+  /** null = rolling last 12 calendar months; number = Jan–Dec that year */
+  const [profitChartYear, setProfitChartYear] = useState<number | null>(null)
 
   useEffect(() => {
     let cancelled = false
     stockAPI.runImport('incremental').then(() => {
       if (!cancelled) {
         queryClient.invalidateQueries({ queryKey: ['analytics'] })
+        queryClient.invalidateQueries({ queryKey: ['analytics-monthly-profit'] })
+        queryClient.invalidateQueries({ queryKey: ['analytics-monthly-profit-years'] })
       }
     }).catch(() => {
       // Background import failed; keep showing current data
@@ -117,7 +122,6 @@ export default function SalesAnalytics() {
     data: analyticsData,
     isLoading: loading,
     error: analyticsError,
-    refetch: refetchAnalytics,
   } = useQuery({
     queryKey: ['analytics', from, to, groupBy, country, sku],
     queryFn: async () => {
@@ -139,6 +143,39 @@ export default function SalesAnalytics() {
       }
     },
   })
+
+  const { data: monthlyProfitYearsRes } = useQuery({
+    queryKey: ['analytics-monthly-profit-years'],
+    queryFn: async () => (await stockAPI.getAnalyticsMonthlyProfitYears()).data,
+  })
+
+  const {
+    data: monthlyProfitRows,
+    isLoading: loadingMonthlyProfit,
+    error: monthlyProfitError,
+  } = useQuery({
+    queryKey: ['analytics-monthly-profit', profitChartYear],
+    queryFn: async () => {
+      const params = profitChartYear != null ? { year: profitChartYear } : {}
+      return (await stockAPI.getAnalyticsMonthlyProfit(params)).data
+    },
+  })
+
+  const monthlyProfitChartData =
+    monthlyProfitRows?.map((r) => ({
+      ...r,
+      profit: Number(r.profit_eur),
+    })) ?? []
+
+  const profitYearChoices = monthlyProfitYearsRes?.years ?? []
+
+  useEffect(() => {
+    if (profitChartYear == null || monthlyProfitYearsRes?.years === undefined) return
+    if (!monthlyProfitYearsRes.years.includes(profitChartYear)) {
+      setProfitChartYear(null)
+    }
+  }, [profitChartYear, monthlyProfitYearsRes])
+
   const data = analyticsData?.data ?? null
   const bySku = analyticsData?.bySku ?? null
   const byCountry = analyticsData?.byCountry ?? null
@@ -506,7 +543,7 @@ export default function SalesAnalytics() {
             )}
           </div>
 
-          <div className="bg-white shadow rounded-lg p-4 overflow-x-auto">
+          <div className="bg-white shadow rounded-lg p-4 overflow-x-auto mb-6">
             <h2 className="text-lg font-semibold text-gray-800 mb-4">Sales by SKU</h2>
             <p className="text-sm text-gray-500 mb-3">
               Profit = quantity sold × profit per unit (set in SKU Manager).
@@ -564,6 +601,69 @@ export default function SalesAnalytics() {
           Loading analytics...
         </div>
       )}
+
+      {monthlyProfitError && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
+          {monthlyProfitError instanceof Error ? monthlyProfitError.message : 'Failed to load monthly profit'}
+        </div>
+      )}
+
+      <div className="bg-white shadow rounded-lg p-4 mb-6">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-800">Profit by month</h2>
+            <p className="text-sm text-gray-500 mt-1">
+              EUR after profit tax — company-wide totals (not filtered by Country/SKU above). Uses GBP→EUR rate from
+              server config.
+            </p>
+          </div>
+          <label className="flex items-center gap-2 text-sm text-gray-700 shrink-0">
+            <span className="font-medium whitespace-nowrap">View</span>
+            <select
+              value={profitChartYear === null ? '' : String(profitChartYear)}
+              onChange={(e) => {
+                const v = e.target.value
+                setProfitChartYear(v === '' ? null : Number(v))
+              }}
+              className="rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm min-w-[10rem]"
+            >
+              <option value="">Last 12 months</option>
+              {profitYearChoices.map((y) => (
+                <option key={y} value={y}>
+                  Year {y}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        {loadingMonthlyProfit ? (
+          <p className="text-gray-500 text-sm py-12 text-center">Loading monthly profit…</p>
+        ) : monthlyProfitChartData.length === 0 ? (
+          <p className="text-gray-500 text-sm">No data.</p>
+        ) : (
+          <ResponsiveContainer width="100%" height={360}>
+            <BarChart
+              data={monthlyProfitChartData}
+              margin={{ top: 10, right: 10, left: 8, bottom: 0 }}
+              barSize={profitChartYear === null ? 24 : 20}
+              barCategoryGap={profitChartYear === null ? '12%' : '18%'}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+              <XAxis dataKey="label" tick={{ fontSize: 11 }} interval={0} angle={-35} textAnchor="end" height={72} />
+              <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => `€${v}`} />
+              <Tooltip
+                formatter={(value: number) => [`€${Number(value).toFixed(2)}`, 'Profit']}
+                labelFormatter={(label) => String(label)}
+              />
+              <Bar dataKey="profit" name="Profit (EUR)" radius={[4, 4, 0, 0]} isAnimationActive={false}>
+                {monthlyProfitChartData.map((entry) => (
+                  <Cell key={entry.period} fill={entry.is_partial ? '#93c5fd' : '#2563eb'} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        )}
+      </div>
 
       <div className="mt-10 pt-6 border-t border-gray-200">
         <p className="text-sm text-gray-500">

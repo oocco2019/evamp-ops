@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from sqlalchemy import select, func, or_, case
+from sqlalchemy import select, func, or_, case, extract
 from pydantic import BaseModel, Field
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -825,6 +825,72 @@ class AnalyticsSummaryResponse(BaseModel):
     totals: dict
 
 
+class AnalyticsMonthlyProfitPoint(BaseModel):
+    """One calendar month bucket; company-wide totals (no country/SKU filter). After profit tax."""
+
+    period: str
+    label: str
+    profit_gbp: str
+    profit_eur: str
+    is_partial: bool
+
+
+class AnalyticsMonthlyProfitYearsResponse(BaseModel):
+    """Calendar years that have at least one non-cancelled order (newest first)."""
+
+    years: List[int]
+
+
+def _month_start(d: date) -> date:
+    return date(d.year, d.month, 1)
+
+
+def _add_months(month_start: date, delta: int) -> date:
+    y, m = month_start.year, month_start.month + delta
+    while m > 12:
+        m -= 12
+        y += 1
+    while m < 1:
+        m += 12
+        y -= 1
+    return date(y, m, 1)
+
+
+def _month_is_partial(month_start: date, today: date) -> bool:
+    """True for current month or future months (lighter styling in UI)."""
+    return (month_start.year, month_start.month) >= (today.year, today.month)
+
+
+@router.get("/analytics/monthly-profit-years", response_model=AnalyticsMonthlyProfitYearsResponse)
+async def get_analytics_monthly_profit_years(db: AsyncSession = Depends(get_db)):
+    """
+    Years for Profit-by-month year filter: only calendar years with at least one non-cancelled order.
+    Omits years with no data (empty list if there are no qualifying orders).
+    """
+    stmt = (
+        select(extract("year", Order.date))
+        .distinct()
+        .where(_not_canceled())
+        .order_by(extract("year", Order.date).desc())
+    )
+    result = await db.execute(stmt)
+    seen = set()
+    years = []
+    for row in result.all():
+        raw = row[0]
+        if raw is None:
+            continue
+        try:
+            y = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if y not in seen:
+            seen.add(y)
+            years.append(y)
+    years.sort(reverse=True)
+    return AnalyticsMonthlyProfitYearsResponse(years=years)
+
+
 @router.get("/analytics/summary", response_model=AnalyticsSummaryResponse)
 async def get_analytics_summary(
     from_date: date = Query(..., alias="from", description="Start date (YYYY-MM-DD)"),
@@ -884,6 +950,91 @@ async def get_analytics_summary(
         series=series,
         totals={"order_count": total_orders, "units_sold": total_units},
     )
+
+
+@router.get("/analytics/monthly-profit", response_model=List[AnalyticsMonthlyProfitPoint])
+async def get_analytics_monthly_profit(
+    year: Optional[int] = Query(None, ge=2000, le=2100, description="Calendar year (Jan–Dec). Omit for rolling last 12 months."),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Monthly profit (after PROFIT_TAX): company-wide totals (same rules as analytics profit).
+    Always returns 12 rows: selected calendar year or rolling last 12 calendar months ending this month.
+    """
+    today = date.today()
+    if year is not None:
+        month_keys = [date(year, m, 1) for m in range(1, 13)]
+        from_date = date(year, 1, 1)
+        to_date = min(date(year, 12, 31), today)
+    else:
+        first_this = _month_start(today)
+        month_keys = [_add_months(first_this, i) for i in range(-11, 1)]
+        from_date = month_keys[0]
+        to_date = today
+
+    stmt = (
+        select(Order)
+        .options(selectinload(Order.line_items))
+        .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
+    )
+    result = await db.execute(stmt)
+    orders = result.scalars().unique().all()
+
+    sku_codes = set()
+    for o in orders:
+        for li in o.line_items:
+            if li.sku:
+                sku_codes.add(li.sku)
+    sku_map = {}
+    if sku_codes:
+        sku_result = await db.execute(select(SKU).where(SKU.sku_code.in_(sku_codes)))
+        sku_map = {s.sku_code: s for s in sku_result.scalars().all()}
+    usd_to_gbp = getattr(app_settings, "USD_TO_GBP_RATE", 0.79)
+    gbp_to_eur = Decimal(str(getattr(app_settings, "GBP_TO_EUR_RATE", 1.16)))
+
+    month_profit: dict = {}
+    for o in orders:
+        line_cost_usd = Decimal(0)
+        line_postage_usd = Decimal(0)
+        for li in o.line_items:
+            s = sku_map.get(li.sku) if li.sku else None
+            landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
+            postage = (s.postage_price or Decimal(0)) if s else Decimal(0)
+            qty = li.quantity or 0
+            line_cost_usd += (landed + postage) * qty
+            line_postage_usd += postage * qty
+        order_profit = _order_profit_gbp(
+            o.total_due_seller,
+            o.total_due_seller_currency,
+            o.price_total,
+            o.tax_total,
+            o.order_currency,
+            o.country,
+            line_cost_usd,
+            line_postage_usd,
+            usd_to_gbp,
+        )
+        if order_profit is None:
+            continue
+        net_profit = _profit_after_tax(order_profit)
+        mk = _month_start(o.date)
+        month_profit[mk] = month_profit.get(mk, Decimal(0)) + net_profit
+
+    out: List[AnalyticsMonthlyProfitPoint] = []
+    for mk in month_keys:
+        prof = month_profit.get(mk, Decimal(0))
+        prof_q = prof.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        prof_eur = (prof_q * gbp_to_eur).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        out.append(
+            AnalyticsMonthlyProfitPoint(
+                period=mk.isoformat(),
+                label=mk.strftime("%b %Y"),
+                profit_gbp=str(prof_q),
+                profit_eur=str(prof_eur),
+                is_partial=_month_is_partial(mk, today),
+            )
+        )
+    return out
 
 
 def _order_currency_to_gbp_rate(order_currency: Optional[str]) -> float:

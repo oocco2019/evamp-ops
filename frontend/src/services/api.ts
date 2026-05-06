@@ -404,6 +404,14 @@ export interface AnalyticsSummary {
   totals: { order_count: number; units_sold: number }
 }
 
+export interface AnalyticsMonthlyProfitPoint {
+  period: string
+  label: string
+  profit_gbp: string
+  profit_eur: string
+  is_partial: boolean
+}
+
 export interface AnalyticsBySkuPoint {
   sku_code: string
   quantity_sold: number
@@ -624,6 +632,12 @@ export const stockAPI = {
     to: string
     sku?: string
   }) => api.get<AnalyticsByCountryPoint[]>('/api/stock/analytics/by-country', { params }),
+
+  getAnalyticsMonthlyProfit: (params?: { year?: number }) =>
+    api.get<AnalyticsMonthlyProfitPoint[]>('/api/stock/analytics/monthly-profit', { params }),
+
+  getAnalyticsMonthlyProfitYears: () =>
+    api.get<{ years: number[] }>('/api/stock/analytics/monthly-profit-years'),
 
   getOrderDetails: (params: {
     from: string

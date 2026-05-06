@@ -81,6 +81,16 @@ export default function LenderSummary() {
   const chartMinWidthPx = Math.max(100, weekTickCount * 36)
   const xAxisBottom = weekTickCount > 10 ? 78 : 28
 
+  const disclosureParas = (data?.disclosure ?? '')
+    .trim()
+    .split(/\n\n+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const disclosureStructured = disclosureParas.length >= 3
+  const disclosureFirst = disclosureParas[0]
+  const disclosureSecond = disclosureParas[1]
+  const disclosureLast = disclosureParas.slice(2).join('\n\n')
+
   return (
     <div className="px-4 py-6 sm:px-0 lender-summary-print">
       <style>{`
@@ -189,9 +199,47 @@ export default function LenderSummary() {
               <dt className="text-gray-500">Report generated</dt>
               <dd>{genAt}</dd>
             </dl>
-            <p className="mt-4 text-amber-900 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 text-sm whitespace-pre-line leading-relaxed">
-              {data.disclosure}
-            </p>
+            <div className="mt-4 text-amber-900 bg-amber-50 border border-amber-200 rounded-md px-3 py-3 text-sm leading-relaxed">
+              <h3 className="font-semibold text-amber-950 mb-3 text-sm">Methodology notes</h3>
+              {!disclosureStructured ? (
+                <ul className="list-disc pl-5 space-y-1">
+                  {disclosureParas.map((p, i) => (
+                    <li key={i}>{p}</li>
+                  ))}
+                  <li>
+                    Foreign exchange: USD→GBP {data.methodology.usd_to_gbp_rate}, EUR→GBP{' '}
+                    {data.methodology.eur_to_gbp_rate} (config values, not spot rates per transaction). UK VAT default
+                    rate: {data.methodology.uk_vat_default_rate}.
+                  </li>
+                  <li>Cancelled orders and Order refunds are accounted for.</li>
+                  <li>
+                    Data sources: eBay Finances API, Shopify Orders API, OrangeConnex inventory API, internal SKU
+                    master.
+                  </li>
+                </ul>
+              ) : (
+                <ul className="list-disc pl-5 space-y-1">
+                  <li>{disclosureFirst}</li>
+                  <li>{disclosureSecond}</li>
+                  <li>
+                    Foreign exchange: USD→GBP {data.methodology.usd_to_gbp_rate}, EUR→GBP{' '}
+                    {data.methodology.eur_to_gbp_rate} (config values, not spot rates per transaction). UK VAT default
+                    rate: {data.methodology.uk_vat_default_rate}.
+                  </li>
+                  <li>Cancelled orders and Order refunds are accounted for.</li>
+                  <li>
+                    Data sources: eBay Finances API, Shopify Orders API, OrangeConnex inventory API, internal SKU
+                    master.
+                  </li>
+                  <li>{disclosureLast}</li>
+                </ul>
+              )}
+              {data.methodology.company_footer_note?.trim() ? (
+                <p className="text-amber-900/80 text-xs mt-3 pt-3 border-t border-amber-200/80">
+                  {data.methodology.company_footer_note}
+                </p>
+              ) : null}
+            </div>
           </section>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
@@ -226,16 +274,11 @@ export default function LenderSummary() {
               <p className="text-gray-500 text-sm">No data in range.</p>
             ) : (
               <div className="space-y-8">
-                <p className="text-xs text-gray-500 no-print">
-                  Volume (units) and gross profit (GBP) use separate scales below so bar heights are not compared across
-                  the two series.
-                </p>
                 {(
                   [
                     {
                       dataKey: 'units' as const,
                       heading: 'Units sold per week',
-                      sub: 'Count of line-item quantities (same definition as Sales Analytics).',
                       yLabel: 'Units',
                       fill: '#3b82f6',
                       valueLabel: 'Units',
@@ -244,7 +287,6 @@ export default function LenderSummary() {
                     {
                       dataKey: 'profit' as const,
                       heading: 'Gross profit (pre-tax) per week',
-                      sub: 'Payout in GBP net of direct COGS and VAT (before Sales Analytics PROFIT_TAX on margin).',
                       yLabel: 'GBP',
                       fill: '#1d4ed8',
                       valueLabel: 'Gross profit',
@@ -253,8 +295,7 @@ export default function LenderSummary() {
                   ] as const
                 ).map((spec) => (
                   <div key={spec.dataKey} className="lender-weekly-chart">
-                    <h3 className="text-sm font-semibold text-gray-900 mb-0.5">{spec.heading}</h3>
-                    <p className="text-xs text-gray-500 mb-2">{spec.sub}</p>
+                    <h3 className="text-sm font-semibold text-gray-900 mb-2">{spec.heading}</h3>
                     <div className="w-full overflow-x-auto pb-1">
                       <div style={{ minWidth: chartMinWidthPx, height: 300 }}>
                         <ResponsiveContainer width="100%" height="100%">
@@ -315,7 +356,6 @@ export default function LenderSummary() {
                     </div>
                   </div>
                 ))}
-                <p className="text-xs text-gray-500 -mt-4 no-print">Scroll each chart horizontally if many weeks.</p>
               </div>
             )}
             <div className="mt-6">
@@ -383,28 +423,6 @@ export default function LenderSummary() {
               </tbody>
             </table>
           </section>
-
-          <footer className="text-sm text-gray-600 border-t border-gray-200 pt-6 mt-6 space-y-2">
-            <h3 className="font-semibold text-gray-800">Methodology notes</h3>
-            <ul className="list-disc pl-5 space-y-1">
-              <li>
-                Foreign exchange: USD→GBP {data.methodology.usd_to_gbp_rate}, EUR→GBP {data.methodology.eur_to_gbp_rate}{' '}
-                (config values, not spot rates per transaction). UK VAT default rate: {data.methodology.uk_vat_default_rate}
-                .
-              </li>
-              <li>
-                Weekly charts and tables list only full Monday–Sunday weeks that sit fully inside the report dates.
-                Headline figures use the full date range.
-              </li>
-              <li>Cancelled orders are excluded. Refund orders use the documented postage-only cost model.</li>
-              <li>
-                Data sources: eBay Finances API, Shopify Orders API, OrangeConnex inventory API, internal SKU master.
-              </li>
-            </ul>
-            {data.methodology.company_footer_note?.trim() ? (
-              <p className="text-gray-500 text-xs pt-2">{data.methodology.company_footer_note}</p>
-            ) : null}
-          </footer>
         </>
       )}
 
