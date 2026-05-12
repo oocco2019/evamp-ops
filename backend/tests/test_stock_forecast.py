@@ -1,7 +1,11 @@
 """Unit tests for stock run-out forecast helpers."""
 from datetime import date, datetime, time as dt_time
 
-from app.services.stock_forecast import forward_fill_daily_avl, weighted_burn_rate
+from app.services.stock_forecast import (
+    _not_canceled_order_filter,
+    forward_fill_daily_avl,
+    weighted_burn_rate,
+)
 
 
 def test_forward_fill_daily_avl_resets_each_day_like_chart():
@@ -33,3 +37,10 @@ def test_weighted_burn_rate_linear_weights():
 
 def test_weighted_burn_rate_empty():
     assert weighted_burn_rate([]) == 0.0
+
+
+def test_not_canceled_order_filter_includes_null_status():
+    compiled = str(_not_canceled_order_filter().compile(compile_kwargs={"literal_binds": True}))
+
+    assert "orders.cancel_status IS NULL" in compiled
+    assert "orders.cancel_status != 'CANCELED'" in compiled

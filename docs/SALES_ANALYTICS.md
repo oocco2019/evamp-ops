@@ -17,6 +17,8 @@ This doc captures how the Sales Analytics page works and why, so context is pres
 - **Dual currency (GBP / EUR)** is shown **only on the Profit card** at the top.
 - The Sales by SKU and Sales by Country tables show profit in **GBP only** (£).
 - EUR on the card is derived from the same GBP total using `GBP_TO_EUR_RATE` (1.16) so it stays consistent.
+- Country and SKU filters must scope the Profit card and both tables consistently.
+- With a SKU filter on a multi-line order, profit is computed for the full order first, then allocated to the matching SKU lines by `line_total / order price_total`.
 
 ### Table sort persistence
 

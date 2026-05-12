@@ -3,7 +3,7 @@ Stock API: eBay OAuth, order import, SKU CRUD (SM02, SM03).
 """
 import logging
 from datetime import datetime, date, timedelta
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from urllib.parse import quote, unquote
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from fastapi.responses import RedirectResponse
@@ -787,6 +787,25 @@ def _not_canceled():
     return or_(Order.cancel_status.is_(None), Order.cancel_status != "CANCELED")
 
 
+def _analytics_country_codes(country: Optional[str]) -> Optional[List[str]]:
+    """Country filter values for analytics, preserving the PR/VI-as-US rule."""
+    if not country or not country.strip():
+        return None
+    cc = country.strip().upper()[:2]
+    if cc == "US":
+        return ["US", "PR", "VI"]
+    return [cc]
+
+
+def _apply_analytics_country_filter(stmt, country: Optional[str]):
+    codes = _analytics_country_codes(country)
+    if not codes:
+        return stmt
+    if len(codes) == 1:
+        return stmt.where(Order.country == codes[0])
+    return stmt.where(Order.country.in_(codes))
+
+
 @router.get("/analytics/filter-options", response_model=AnalyticsFilterOptionsResponse)
 async def get_analytics_filter_options(db: AsyncSession = Depends(get_db)):
     """Return distinct countries and SKUs for analytics filter dropdowns. PR and VI merged into US. Cancelled orders excluded."""
@@ -1136,6 +1155,69 @@ def _profit_after_tax(gross_profit: Decimal) -> Decimal:
     return gross_profit * Decimal(str(1.0 - rate))
 
 
+def _sku_filter_value(sku: Optional[str]) -> Optional[str]:
+    return sku.strip() if sku and sku.strip() else None
+
+
+def _line_matches_sku(li: LineItem, sku_filter: Optional[str]) -> bool:
+    return not sku_filter or li.sku == sku_filter
+
+
+def _order_cost_inputs_usd(line_items, sku_map: dict) -> Tuple[Decimal, Decimal]:
+    line_cost_usd = Decimal(0)
+    line_postage_usd = Decimal(0)
+    for li in line_items:
+        s = sku_map.get(li.sku) if li.sku else None
+        landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
+        postage = (s.postage_price or Decimal(0)) if s else Decimal(0)
+        qty = li.quantity or 0
+        line_cost_usd += (landed + postage) * qty
+        line_postage_usd += postage * qty
+    return line_cost_usd, line_postage_usd
+
+
+def _allocated_line_net_profits(
+    order: Order,
+    sku_map: dict,
+    usd_to_gbp: float,
+    sku_filter: Optional[str] = None,
+) -> List[Tuple[str, int, Decimal]]:
+    """
+    Allocate full-order net profit to selected lines by line_total / order price_total.
+    This keeps SKU-filtered aggregates consistent with the order-details report.
+    """
+    price_total = order.price_total or Decimal(0)
+    if price_total == 0:
+        return []
+
+    selected_lines = [li for li in order.line_items if _line_matches_sku(li, sku_filter)]
+    if not selected_lines:
+        return []
+
+    line_cost_usd, line_postage_usd = _order_cost_inputs_usd(order.line_items, sku_map)
+    order_profit = _order_profit_gbp(
+        order.total_due_seller,
+        order.total_due_seller_currency,
+        order.price_total,
+        order.tax_total,
+        order.order_currency,
+        order.country,
+        line_cost_usd,
+        line_postage_usd,
+        usd_to_gbp,
+    )
+    if order_profit is None:
+        return []
+
+    net_profit = _profit_after_tax(order_profit)
+    out: List[Tuple[str, int, Decimal]] = []
+    for li in selected_lines:
+        line_total = li.line_total or Decimal(0)
+        allocation_share = line_total / price_total
+        out.append((li.sku or "", li.quantity or 0, net_profit * allocation_share))
+    return out
+
+
 class AnalyticsBySkuPoint(BaseModel):
     sku_code: str
     quantity_sold: int
@@ -1161,18 +1243,14 @@ async def get_analytics_by_sku(
         .options(selectinload(Order.line_items))
         .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
     )
-    if country and country.strip():
-        cc = country.strip().upper()[:2]
-        if cc == "US":
-            stmt = stmt.where(Order.country.in_(["US", "PR", "VI"]))
-        else:
-            stmt = stmt.where(Order.country == cc)
+    stmt = _apply_analytics_country_filter(stmt, country)
     result = await db.execute(stmt)
     orders = result.scalars().unique().all()
+    sku_filter = _sku_filter_value(sku)
     sku_codes = set()
     for o in orders:
         for li in o.line_items:
-            if li.sku and (not sku or li.sku == sku.strip()):
+            if li.sku:
                 sku_codes.add(li.sku)
     if not sku_codes:
         return []
@@ -1184,42 +1262,11 @@ async def get_analytics_by_sku(
     sku_qty: dict = {}
     sku_profit: dict = {}
     for o in orders:
-        price_total = o.price_total or Decimal(0)
-        if price_total == 0:
-            continue
-        line_cost_usd = Decimal(0)
-        line_postage_usd = Decimal(0)
-        line_proportions = []
-        for li in o.line_items:
-            if sku and li.sku != sku.strip():
-                continue
-            s = sku_map.get(li.sku) if li.sku else None
-            landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
-            postage = (s.postage_price or Decimal(0)) if s else Decimal(0)
-            qty = li.quantity or 0
-            line_cost_usd += (landed + postage) * qty
-            line_postage_usd += postage * qty
-            line_total = li.line_total or Decimal(0)
-            line_proportions.append((li.sku or "", qty, line_total / price_total))
-        if sku and not line_proportions:
-            continue
-        order_profit = _order_profit_gbp(
-            o.total_due_seller,
-            o.total_due_seller_currency,
-            o.price_total,
-            o.tax_total,
-            o.order_currency,
-            o.country,
-            line_cost_usd,
-            line_postage_usd,
-            usd_to_gbp,
-        )
-        if order_profit is None:
-            continue
-        net_profit = _profit_after_tax(order_profit)
-        for sku_code, qty, prop in line_proportions:
+        for sku_code, qty, line_net_profit in _allocated_line_net_profits(
+            o, sku_map, usd_to_gbp, sku_filter
+        ):
             sku_qty[sku_code] = sku_qty.get(sku_code, 0) + qty
-            sku_profit[sku_code] = sku_profit.get(sku_code, Decimal(0)) + net_profit * prop
+            sku_profit[sku_code] = sku_profit.get(sku_code, Decimal(0)) + line_net_profit
 
     out = []
     for sku_code in sorted(sku_profit.keys(), key=lambda x: (-sku_qty.get(x, 0), x)):
@@ -1261,6 +1308,7 @@ def _country_group(country: Optional[str]) -> str:
 async def get_analytics_by_country(
     from_date: date = Query(..., alias="from", description="Start date (YYYY-MM-DD)"),
     to_date: date = Query(..., alias="to", description="End date (YYYY-MM-DD)"),
+    country: Optional[str] = Query(None, description="Filter by order country (2-letter code)"),
     sku: Optional[str] = Query(None, description="Filter by line item SKU"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1273,10 +1321,12 @@ async def get_analytics_by_country(
         .options(selectinload(Order.line_items))
         .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
     )
+    stmt = _apply_analytics_country_filter(stmt, country)
     result = await db.execute(stmt)
     orders = result.scalars().unique().all()
-    if sku and sku.strip():
-        orders = [o for o in orders if any(li.sku == sku.strip() for li in o.line_items)]
+    sku_filter = _sku_filter_value(sku)
+    if sku_filter:
+        orders = [o for o in orders if any(_line_matches_sku(li, sku_filter) for li in o.line_items)]
     sku_codes = set()
     for o in orders:
         for li in o.line_items:
@@ -1292,33 +1342,29 @@ async def get_analytics_by_country(
     country_qty = {}
     country_profit = {}
     for o in orders:
-        line_cost_usd = Decimal(0)
-        line_postage_usd = Decimal(0)
-        qty_for_country = 0
-        for li in o.line_items:
-            if sku and li.sku != sku.strip():
+        if sku_filter:
+            allocated_lines = _allocated_line_net_profits(o, sku_map, usd_to_gbp, sku_filter)
+            if not allocated_lines:
                 continue
-            s = sku_map.get(li.sku) if li.sku else None
-            landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
-            postage = (s.postage_price or Decimal(0)) if s else Decimal(0)
-            qty = li.quantity or 0
-            line_cost_usd += (landed + postage) * qty
-            line_postage_usd += postage * qty
-            qty_for_country += qty
-        order_profit = _order_profit_gbp(
-            o.total_due_seller,
-            o.total_due_seller_currency,
-            o.price_total,
-            o.tax_total,
-            o.order_currency,
-            o.country,
-            line_cost_usd,
-            line_postage_usd,
-            usd_to_gbp,
-        )
-        if order_profit is None:
-            continue
-        net_profit = _profit_after_tax(order_profit)
+            qty_for_country = sum(qty for _sku_code, qty, _profit in allocated_lines)
+            net_profit = sum((profit for _sku_code, _qty, profit in allocated_lines), Decimal(0))
+        else:
+            line_cost_usd, line_postage_usd = _order_cost_inputs_usd(o.line_items, sku_map)
+            order_profit = _order_profit_gbp(
+                o.total_due_seller,
+                o.total_due_seller_currency,
+                o.price_total,
+                o.tax_total,
+                o.order_currency,
+                o.country,
+                line_cost_usd,
+                line_postage_usd,
+                usd_to_gbp,
+            )
+            if order_profit is None:
+                continue
+            net_profit = _profit_after_tax(order_profit)
+            qty_for_country = sum((li.quantity or 0) for li in o.line_items)
         cg = _country_group(o.country)
         country_qty[cg] = country_qty.get(cg, 0) + qty_for_country
         country_profit[cg] = country_profit.get(cg, Decimal(0)) + net_profit

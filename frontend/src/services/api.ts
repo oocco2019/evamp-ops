@@ -630,6 +630,7 @@ export const stockAPI = {
   getAnalyticsByCountry: (params: {
     from: string
     to: string
+    country?: string
     sku?: string
   }) => api.get<AnalyticsByCountryPoint[]>('/api/stock/analytics/by-country', { params }),
 
