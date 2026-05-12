@@ -134,7 +134,7 @@ export default function SalesAnalytics() {
       const [summaryRes, bySkuRes, byCountryRes] = await Promise.all([
         stockAPI.getAnalyticsSummary({ ...params, group_by: groupBy }),
         stockAPI.getAnalyticsBySku(params),
-        stockAPI.getAnalyticsByCountry({ from, to, sku: sku.trim() || undefined }),
+        stockAPI.getAnalyticsByCountry(params),
       ])
       return {
         data: summaryRes.data,
