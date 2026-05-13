@@ -711,6 +711,15 @@ class BackfillOrderEarningsResponse(BaseModel):
     error: Optional[str] = None
 
 
+def _apply_order_earnings_update(order: Order, val: Optional[Decimal], cc: Optional[str]) -> bool:
+    """Only replace seller payout when eBay returns a numeric amount."""
+    if val is None:
+        return False
+    order.total_due_seller = val
+    order.total_due_seller_currency = cc
+    return True
+
+
 @router.post("/orders/backfill-order-earnings", response_model=BackfillOrderEarningsResponse)
 async def backfill_order_earnings(
     db: AsyncSession = Depends(get_db),
@@ -750,9 +759,7 @@ async def backfill_order_earnings(
                 if raw:
                     ps = raw.get("paymentSummary") or {}
                     val, cc = _parse_total_due_seller(ps.get("totalDueSeller"))
-            if val is not None or cc is not None:
-                o.total_due_seller = val
-                o.total_due_seller_currency = cc
+            if _apply_order_earnings_update(o, val, cc):
                 updated += 1
             else:
                 skipped += 1

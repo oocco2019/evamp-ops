@@ -7,7 +7,7 @@ import math
 from datetime import date, datetime, timedelta, timezone, time as dt_time
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.settings import OCStockMovementLine, OCSkuMapping
@@ -124,6 +124,11 @@ async def _line_item_skus_for_mapping(
     return sorted(keys)
 
 
+def _not_canceled_order_filter():
+    """Include Shopify and legacy rows where non-cancelled orders have NULL status."""
+    return or_(Order.cancel_status.is_(None), Order.cancel_status != "CANCELED")
+
+
 async def _ebay_units_by_order_date(
     db: AsyncSession,
     line_item_skus: List[str],
@@ -138,7 +143,7 @@ async def _ebay_units_by_order_date(
         .join(Order, Order.order_id == LineItem.order_id)
         .where(
             LineItem.sku.in_(line_item_skus),
-            Order.cancel_status != "CANCELED",
+            _not_canceled_order_filter(),
             Order.date >= window_start,
             Order.date <= window_end,
         )
