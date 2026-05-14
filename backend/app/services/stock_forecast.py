@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.settings import OCStockMovementLine, OCSkuMapping
 from app.models.stock import LineItem, Order
+from app.services.order_filters import order_not_canceled_condition
 
 MIN_AVL_IN_STOCK = 5
 LOOKBACK_DAYS = 183  # ~6 months
@@ -138,7 +139,7 @@ async def _ebay_units_by_order_date(
         .join(Order, Order.order_id == LineItem.order_id)
         .where(
             LineItem.sku.in_(line_item_skus),
-            Order.cancel_status != "CANCELED",
+            order_not_canceled_condition(),
             Order.date >= window_start,
             Order.date <= window_end,
         )
