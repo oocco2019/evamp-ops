@@ -1,5 +1,4 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import MessageDashboard from './MessageDashboard'
@@ -88,20 +87,20 @@ describe('MessageDashboard failed sends', () => {
   })
 
   it('preserves reply text, attachments, and error when send fails', async () => {
-    const user = userEvent.setup()
     render(<MessageDashboard />)
 
-    await user.click(await screen.findByRole('button', { name: /buyer1/i }))
+    fireEvent.click(await screen.findByRole('button', { name: /buyer1/i }))
+    await waitFor(() => expect(mocks.messagesAPI.getThread).toHaveBeenCalledTimes(2))
 
     const replyBox = await screen.findByPlaceholderText('Type or use Draft reply...')
-    await user.type(replyBox, '  Please confirm delivery.  ')
+    fireEvent.change(replyBox, { target: { value: '  Please confirm delivery.  ' } })
 
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
     const file = new File(['image bytes'], 'photo.png', { type: 'image/png' })
     fireEvent.change(fileInput, { target: { files: [file] } })
     await screen.findByText('photo.png')
 
-    await user.click(screen.getByRole('button', { name: 'Send' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
 
     await waitFor(() => {
       expect(mocks.messagesAPI.sendReply).toHaveBeenCalledWith(
@@ -117,6 +116,7 @@ describe('MessageDashboard failed sends', () => {
         ]
       )
     })
+    await waitFor(() => expect(mocks.messagesAPI.getThread).toHaveBeenCalledTimes(3))
     await screen.findByText('Network down')
     await waitFor(() => {
       expect(screen.getByPlaceholderText('Type or use Draft reply...')).toHaveValue(
