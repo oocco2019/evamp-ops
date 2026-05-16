@@ -42,6 +42,17 @@ def test_parse_total_due_seller_gbp_as_converted():
     assert cc == "GBP"
 
 
+def test_parse_total_due_seller_ignores_currency_without_value():
+    """A currency-only payload is not a usable payout and must not drive backfill updates."""
+    for amount in (
+        {"value": None, "currency": "GBP"},
+        {"value": "not-a-number", "currency": "GBP"},
+    ):
+        val, cc = _parse_total_due_seller(amount)
+        assert val is None
+        assert cc is None
+
+
 def test_parse_total_due_seller_expected_order_11():
     """11-14176-11233: Order earnings £54.15."""
     amount_gbp_main = {"value": "54.15", "currency": "GBP"}

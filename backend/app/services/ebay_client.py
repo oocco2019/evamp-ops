@@ -152,8 +152,12 @@ def _parse_total_due_seller(amount: Any) -> Tuple[Optional[Decimal], Optional[st
                 return Decimal(str(raw).strip()), "GBP"
             except Exception:
                 pass
-    # Fallback: use main value/currency
-    return _parse_amount(amount)
+    # Fallback: use main value/currency. A currency without a parsed value is not a
+    # usable payout and must not overwrite an existing total_due_seller.
+    value, fallback_currency = _parse_amount(amount)
+    if value is None:
+        return None, None
+    return value, fallback_currency
 
 
 def _sum_tax_amounts(taxes: Any, collect_and_remit: Any) -> Optional[Decimal]:
