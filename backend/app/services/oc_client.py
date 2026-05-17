@@ -626,6 +626,9 @@ async def _persist_oc_refresh_token_if_rotated(
         return
     row.encrypted_value = encryption_service.encrypt(new_rt)
     await db.flush()
+    # OC can invalidate the previous refresh token as soon as it returns a rotated one.
+    # Persist that rotation even if the API call that triggered refresh fails later.
+    await db.commit()
     invalidate_oc_access_token_cache(oauth_base_url, client_id)
 
 
