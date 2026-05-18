@@ -6,7 +6,7 @@ This document describes how profit is computed so the context is not lost when c
 
 ## Gross profit per order (GBP)
 
-1. **Total Due Seller (Order Earnings)** – from eBay, in GBP. Treated as the order’s gross payout.
+1. **Total Due Seller (Order Earnings)** – from marketplace import, in GBP when available. Treated as the order’s gross payout; GB Shopify imports keep this VAT-inclusive because VAT is subtracted by the UK rule below.
 2. **Cost (landed + postage)** – from SKU Manager, in USD. Per line: `(landed_cost + postage_price) * quantity`. Sum over lines, then convert to GBP using `USD_TO_GBP_RATE`.
 3. **UK only (ship-to GB): VAT** – subtract VAT in GBP.  
    - If eBay’s `tax_total` is **greater than zero**, use that amount (order currency × FX to GBP, same rate as `price_total`).  
