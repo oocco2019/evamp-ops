@@ -1028,6 +1028,37 @@ async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC sync failed: {e}") from e
 
+    existing_mapping_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(OCSkuMapping)
+            .where(OCSkuMapping.connection_id == connection.id)
+        )
+    ).scalar_one()
+    existing_inventory_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(OCSkuInventory)
+            .where(OCSkuInventory.connection_id == connection.id)
+        )
+    ).scalar_one()
+    if existing_mapping_count > 0 and not rows:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "OC sync returned no SKU mappings while cached mappings exist; "
+                "preserving existing data."
+            ),
+        )
+    if existing_inventory_count > 0 and not inventory_rows_data:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "OC sync returned no inventory rows while cached inventory exists; "
+                "preserving existing data."
+            ),
+        )
+
     await db.execute(delete(OCSkuMapping).where(OCSkuMapping.connection_id == connection.id))
     await db.execute(delete(OCSkuInventory).where(OCSkuInventory.connection_id == connection.id))
     synced = 0
