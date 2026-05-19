@@ -345,6 +345,7 @@ function OCTab() {
   const missingRequired = ['client_id', 'client_secret', 'refresh_token'].filter(
     (k) => !(summary?.credentials_present ?? []).includes(k)
   )
+  const connectionSummaryReady = Boolean(summary)
 
   return (
     <div className="space-y-6">
@@ -462,9 +463,9 @@ function OCTab() {
             type="button"
             onClick={() => upsertConnection.mutate(connectionDraft)}
             className="px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
-            disabled={upsertConnection.isPending}
+            disabled={upsertConnection.isPending || !connectionSummaryReady}
           >
-            {upsertConnection.isPending ? 'Saving...' : 'Save connection'}
+            {!connectionSummaryReady ? 'Loading connection...' : upsertConnection.isPending ? 'Saving...' : 'Save connection'}
           </button>
           <button
             type="button"
