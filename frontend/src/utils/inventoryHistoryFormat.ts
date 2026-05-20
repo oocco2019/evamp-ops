@@ -16,6 +16,13 @@ function formatLocalDateFromDate(d: Date): string {
   return `${year}-${month}-${day}`
 }
 
+function parseApiTimestampMs(value: string): number {
+  const trimmed = (value || '').trim()
+  if (!trimmed) return Number.NaN
+  const hasExplicitZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)
+  return new Date(hasExplicitZone ? trimmed : `${trimmed}Z`).getTime()
+}
+
 export function buildDailyStockLevelsFromHistory(
   rawPoints: Array<{ recorded_at: string; available: number; in_transit: number }>,
   fromIso: string,
@@ -27,7 +34,7 @@ export function buildDailyStockLevelsFromHistory(
 
   const sorted = [...rawPoints]
     .filter((p) => (p.recorded_at || '').trim())
-    .sort((a, b) => new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime())
+    .sort((a, b) => parseApiTimestampMs(a.recorded_at) - parseApiTimestampMs(b.recorded_at))
 
   const out: Array<{ period: string; available: number; in_transit: number }> = []
   const cur = new Date(start.getTime())
@@ -36,7 +43,7 @@ export function buildDailyStockLevelsFromHistory(
     let lastA = 0
     let lastT = 0
     for (let i = 0; i < sorted.length; i++) {
-      const t = new Date(sorted[i].recorded_at).getTime()
+      const t = parseApiTimestampMs(sorted[i].recorded_at)
       if (t <= dayEnd) {
         lastA = sorted[i].available
         lastT = sorted[i].in_transit

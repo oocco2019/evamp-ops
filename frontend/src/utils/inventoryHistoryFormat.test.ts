@@ -21,4 +21,17 @@ describe('buildDailyStockLevelsFromHistory', () => {
     expect(rows[1].available).toBe(7)
     expect(rows[2].available).toBe(7)
   })
+
+  it('treats backend timestamps without an offset as UTC', () => {
+    const originalTz = process.env.TZ
+    process.env.TZ = 'Europe/Berlin'
+    try {
+      const pts = [{ recorded_at: '2026-04-10T23:30:00', available: 9, in_transit: 0 }]
+      const rows = buildDailyStockLevelsFromHistory(pts, '2026-04-10', '2026-04-11')
+      expect(rows[0].available).toBe(0)
+      expect(rows[1].available).toBe(9)
+    } finally {
+      process.env.TZ = originalTz
+    }
+  })
 })

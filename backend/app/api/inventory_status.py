@@ -1290,6 +1290,17 @@ async def list_inventory_history(
     burst_rows = burst_res.all()
 
     points: List[InventoryHistoryPointResponse] = []
+    if state and (not burst_rows or burst_rows[0].ts != start_dt):
+        total = sum(state.values())
+        points.append(
+            InventoryHistoryPointResponse(
+                recorded_at=start_dt,
+                available=total,
+                in_transit=0,
+                stockout=(total <= 0),
+            )
+        )
+
     for ts, chunk in groupby(burst_rows, key=lambda r: r.ts):
         for br in chunk:
             k = ((br.mfskuid or "").strip().lower(), (br.service_region or "").strip().lower())
