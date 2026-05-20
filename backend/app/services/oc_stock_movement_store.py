@@ -79,8 +79,9 @@ async def persist_oc_stock_movement_lines(
 
 
 async def max_movement_update_time_utc(db: AsyncSession, connection_id: int) -> Optional[datetime]:
+    event_time = func.coalesce(OCStockMovementLine.update_time_utc, OCStockMovementLine.created_at)
     r = await db.execute(
-        select(func.max(OCStockMovementLine.update_time_utc)).where(
+        select(func.max(event_time)).where(
             OCStockMovementLine.connection_id == connection_id
         )
     )

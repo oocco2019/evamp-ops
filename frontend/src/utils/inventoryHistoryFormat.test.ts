@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { buildDailyStockLevelsFromHistory } from './inventoryHistoryFormat'
+import {
+  buildDailyStockLevelsFromHistory,
+  parseInventoryHistoryTimestampMs,
+} from './inventoryHistoryFormat'
 
 describe('buildDailyStockLevelsFromHistory', () => {
   it('outputs one row per calendar day across the range', () => {
@@ -20,5 +23,14 @@ describe('buildDailyStockLevelsFromHistory', () => {
     expect(rows[0].available).toBe(0)
     expect(rows[1].available).toBe(7)
     expect(rows[2].available).toBe(7)
+  })
+
+  it('treats backend timestamps without an offset as UTC', () => {
+    expect(parseInventoryHistoryTimestampMs('2026-04-10T23:30:00')).toBe(
+      Date.parse('2026-04-10T23:30:00Z')
+    )
+    expect(parseInventoryHistoryTimestampMs('2026-04-10T23:30:00+0200')).toBe(
+      Date.parse('2026-04-10T23:30:00+0200')
+    )
   })
 })
