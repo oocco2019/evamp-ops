@@ -233,10 +233,12 @@ async def fetch_shopify_orders_paginated(
         s = updated_at_min.replace(tzinfo=timezone.utc) if updated_at_min.tzinfo is None else updated_at_min
         s = s.astimezone(timezone.utc).replace(tzinfo=None)
         first_params["updated_at_min"] = s.replace(microsecond=0).isoformat() + "Z"
+        first_params["order"] = "updated_at asc"
     elif created_at_min:
         s = created_at_min.replace(tzinfo=timezone.utc) if created_at_min.tzinfo is None else created_at_min
         s = s.astimezone(timezone.utc).replace(tzinfo=None)
         first_params["created_at_min"] = s.replace(microsecond=0).isoformat() + "Z"
+        first_params["order"] = "created_at asc"
 
     all_orders: List[dict] = []
     url = f"{base}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
@@ -251,7 +253,6 @@ async def fetch_shopify_orders_paginated(
                     "limit": "250",
                     "page_info": page_info,
                     "fields": field_list,
-                    "status": "any",
                 }
             r = await client.get(url, headers=headers, params=p)
             r.raise_for_status()
