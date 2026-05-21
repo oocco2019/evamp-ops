@@ -1028,48 +1028,87 @@ async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC sync failed: {e}") from e
 
-    await db.execute(delete(OCSkuMapping).where(OCSkuMapping.connection_id == connection.id))
-    await db.execute(delete(OCSkuInventory).where(OCSkuInventory.connection_id == connection.id))
     synced = 0
     skipped = 0
     inventory_rows = 0
+    mapping_payloads: List[Dict[str, Any]] = []
     for r in rows:
         sku_code = (r.get("sku_code") or "").strip()
         mfskuid = (r.get("mfskuid") or "").strip()
         if not sku_code or not mfskuid:
             skipped += 1
             continue
-        db.add(
-            OCSkuMapping(
-                connection_id=connection.id,
-                sku_code=sku_code,
-                seller_skuid=(r.get("seller_skuid") or sku_code).strip(),
-                reference_skuid=(r.get("reference_skuid") or sku_code).strip(),
-                mfskuid=mfskuid,
-                service_region=r.get("service_region"),
-                raw_payload=json.dumps(r.get("raw_payload") or {}, ensure_ascii=False),
-            )
+        mapping_payloads.append(
+            {
+                "sku_code": sku_code,
+                "seller_skuid": (r.get("seller_skuid") or sku_code).strip(),
+                "reference_skuid": (r.get("reference_skuid") or sku_code).strip(),
+                "mfskuid": mfskuid,
+                "service_region": r.get("service_region"),
+                "raw_payload": json.dumps(r.get("raw_payload") or {}, ensure_ascii=False),
+            }
         )
         synced += 1
+    inventory_payloads: List[Dict[str, Any]] = []
     for inv in inventory_rows_data:
         mf = str(inv.get("mfskuid") or "").strip()
+        if not mf:
+            continue
         sr = str(inv.get("service_region") or connection.region or "UK").strip() or "UK"
+        inventory_payloads.append(
+            {
+                "mfskuid": mf,
+                "service_region": sr,
+                "available": int(inv.get("available") or 0),
+                "in_transit": int(inv.get("in_transit") or 0),
+                "received": int(inv.get("received") or 0),
+                "reserved_allocated": int(inv.get("reserved_allocated") or 0),
+                "reserved_hold": int(inv.get("reserved_hold") or 0),
+                "reserved_vas": int(inv.get("reserved_vas") or 0),
+                "suspend": int(inv.get("suspend") or 0),
+                "unfulfillable": int(inv.get("unfulfillable") or 0),
+            }
+        )
+        inventory_rows += 1
+
+    existing_mapping_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(OCSkuMapping)
+            .where(OCSkuMapping.connection_id == connection.id)
+        )
+    ).scalar_one()
+    existing_inventory_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(OCSkuInventory)
+            .where(OCSkuInventory.connection_id == connection.id)
+        )
+    ).scalar_one()
+    if existing_mapping_count and not mapping_payloads:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="OC returned no SKU mappings; existing mappings were preserved.",
+        )
+    if existing_inventory_count and not inventory_payloads:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="OC returned no inventory rows; existing inventory was preserved.",
+        )
+
+    await db.execute(delete(OCSkuMapping).where(OCSkuMapping.connection_id == connection.id))
+    await db.execute(delete(OCSkuInventory).where(OCSkuInventory.connection_id == connection.id))
+    for payload in mapping_payloads:
+        db.add(OCSkuMapping(connection_id=connection.id, **payload))
+    for payload in inventory_payloads:
         db.add(
             OCSkuInventory(
                 connection_id=connection.id,
-                mfskuid=mf,
-                service_region=sr,
-                available=int(inv.get("available") or 0),
-                in_transit=int(inv.get("in_transit") or 0),
-                received=int(inv.get("received") or 0),
-                reserved_allocated=int(inv.get("reserved_allocated") or 0),
-                reserved_hold=int(inv.get("reserved_hold") or 0),
-                reserved_vas=int(inv.get("reserved_vas") or 0),
-                suspend=int(inv.get("suspend") or 0),
-                unfulfillable=int(inv.get("unfulfillable") or 0),
+                **payload,
             )
         )
-        inventory_rows += 1
 
     await db.commit()
     return SyncSkuResponse(synced=synced, skipped=skipped, inventory_rows=inventory_rows)
