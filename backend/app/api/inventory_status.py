@@ -135,6 +135,8 @@ class InventoryHistorySeriesResponse(BaseModel):
     points: List[InventoryHistoryPointResponse]
     from_date: str
     to_date: str
+    opening_available: int = 0
+    opening_in_transit: int = 0
     mfskuid_count: int
     scope: str
     note: Optional[str] = None
@@ -1234,6 +1236,8 @@ async def list_inventory_history(
             points=[],
             from_date=(from_date or date.today()).isoformat(),
             to_date=(to_date or date.today()).isoformat(),
+            opening_available=0,
+            opening_in_transit=0,
             mfskuid_count=0,
             scope=scope,
             note="No mappings for this filter.",
@@ -1273,6 +1277,7 @@ async def list_inventory_history(
     for row in seed_res.all():
         key = ((row.mfskuid or "").strip().lower(), (row.service_region or "").strip().lower())
         state[key] = int(row.avl_after or 0)
+    opening_available = sum(state.values())
 
     # In-window: many AVL lines per second (put-away) — MAX per (ts, mfskuid, region), then apply in time order.
     range_filters = [*base_filters, event_t >= start_dt, event_t <= end_dt]
@@ -1313,6 +1318,8 @@ async def list_inventory_history(
         points=points,
         from_date=eff_from.isoformat(),
         to_date=eff_to.isoformat(),
+        opening_available=opening_available,
+        opening_in_transit=0,
         mfskuid_count=len(mfs),
         scope=scope,
         note=note,

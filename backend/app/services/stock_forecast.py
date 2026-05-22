@@ -44,6 +44,7 @@ def forward_fill_daily_avl(
     points: List[Tuple[datetime, int]],
     start: date,
     end: date,
+    initial_avl: int = 0,
 ) -> Dict[date, int]:
     """Last AVL total on or before end of each calendar day (matches chart forward-fill)."""
     if start > end:
@@ -56,7 +57,7 @@ def forward_fill_daily_avl(
         if day_end.tzinfo is not None:
             day_end = day_end.replace(tzinfo=None)
         lim = day_end
-        last_avl = 0
+        last_avl = initial_avl
         for ts, avl in sorted_pts:
             if ts <= lim:
                 last_avl = avl
@@ -82,6 +83,7 @@ async def _latest_avl_actual_count(
 ) -> Optional[int]:
     mov = OCStockMovementLine
     event_t = func.coalesce(mov.update_time_utc, mov.created_at)
+    ac = func.coalesce(mov.actual_count, 0)
     filters = [
         mov.connection_id == connection_id,
         func.lower(mov.mfskuid) == mfskuid.strip().lower(),
@@ -89,10 +91,39 @@ async def _latest_avl_actual_count(
     ]
     if service_region is not None and str(service_region).strip():
         filters.append(mov.service_region == str(service_region).strip())
-    stmt = (
-        select(mov.actual_count)
+
+    if service_region is None or not str(service_region).strip():
+        region_expr = func.lower(mov.service_region)
+        per_burst = (
+            select(
+                event_t.label("ts"),
+                region_expr.label("service_region"),
+                func.max(ac).label("avl_after"),
+            )
+            .where(*filters)
+            .group_by(event_t, region_expr)
+        ).subquery()
+        rn = func.row_number().over(
+            partition_by=per_burst.c.service_region,
+            order_by=per_burst.c.ts.desc(),
+        ).label("rn")
+        latest_by_region = select(per_burst.c.avl_after, rn).subquery()
+        stmt = select(func.sum(latest_by_region.c.avl_after)).where(latest_by_region.c.rn == 1)
+        r = await db.execute(stmt)
+        total = r.scalar()
+        return int(total) if total is not None else None
+
+    per_burst = (
+        select(
+            event_t.label("ts"),
+            func.max(ac).label("avl_after"),
+        )
         .where(*filters)
-        .order_by(event_t.desc())
+        .group_by(event_t)
+    ).subquery()
+    stmt = (
+        select(per_burst.c.avl_after)
+        .order_by(per_burst.c.ts.desc())
         .limit(1)
     )
     r = await db.execute(stmt)
@@ -216,7 +247,7 @@ async def _forecast_for_mapping_row(
             ts = ts.replace(tzinfo=None)
         raw_pts.append((ts, int(p.available or 0)))
 
-    daily = forward_fill_daily_avl(raw_pts, window_start, today)
+    daily = forward_fill_daily_avl(raw_pts, window_start, today, initial_avl=int(hist.opening_available or 0))
     in_stock_days_ordered = [d for d in _daterange(window_start, today) if daily.get(d, 0) >= MIN_AVL_IN_STOCK]
     newest_90 = in_stock_days_ordered[-IN_STOCK_SAMPLE_CAP:]
     n = len(newest_90)

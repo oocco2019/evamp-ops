@@ -188,8 +188,18 @@ export default function InventoryMovement() {
 
   const rawHistoryPoints = inventoryHistoryQuery.data?.points ?? []
   const dailyStockChartData = useMemo(
-    () => buildDailyStockLevelsFromHistory(rawHistoryPoints, from, to),
-    [inventoryHistoryQuery.data?.points, from, to],
+    () =>
+      buildDailyStockLevelsFromHistory(rawHistoryPoints, from, to, {
+        available: inventoryHistoryQuery.data?.opening_available ?? 0,
+        in_transit: inventoryHistoryQuery.data?.opening_in_transit ?? 0,
+      }),
+    [
+      inventoryHistoryQuery.data?.opening_available,
+      inventoryHistoryQuery.data?.opening_in_transit,
+      inventoryHistoryQuery.data?.points,
+      from,
+      to,
+    ],
   )
 
   const invRows = useMemo(() => {

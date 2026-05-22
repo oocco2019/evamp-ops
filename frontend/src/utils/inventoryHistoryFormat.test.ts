@@ -21,4 +21,15 @@ describe('buildDailyStockLevelsFromHistory', () => {
     expect(rows[1].available).toBe(7)
     expect(rows[2].available).toBe(7)
   })
+
+  it('uses opening stock before the first in-range movement', () => {
+    const pts = [{ recorded_at: '2026-04-12T08:00:00.000Z', available: 7, in_transit: 1 }]
+    const rows = buildDailyStockLevelsFromHistory(pts, '2026-04-10', '2026-04-12', {
+      available: 13,
+      in_transit: 2,
+    })
+    expect(rows[0]).toEqual({ period: '2026-04-10', available: 13, in_transit: 2 })
+    expect(rows[1]).toEqual({ period: '2026-04-11', available: 13, in_transit: 2 })
+    expect(rows[2]).toEqual({ period: '2026-04-12', available: 7, in_transit: 1 })
+  })
 })
