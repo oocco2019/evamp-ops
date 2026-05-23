@@ -7,7 +7,7 @@ import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse
 
 import httpx
 
@@ -168,7 +168,7 @@ def parse_shopify_order_to_import(order: dict) -> dict:
     }
 
 
-def _next_page_info(link_header: str) -> Optional[str]:
+def _next_page_url(link_header: str) -> Optional[str]:
     if not link_header:
         return None
     for part in link_header.split(","):
@@ -177,11 +177,9 @@ def _next_page_info(link_header: str) -> Optional[str]:
         m = re.search(r"[<]([^>]+)[>]", part)
         if not m:
             continue
-        url = m.group(1)
-        q = parse_qs(urlparse(url).query)
-        info = (q.get("page_info") or [None])[0]
-        if info:
-            return unquote(info)
+        url = m.group(1).strip()
+        if urlparse(url).query:
+            return url
     return None
 
 
@@ -240,27 +238,22 @@ async def fetch_shopify_orders_paginated(
 
     all_orders: List[dict] = []
     url = f"{base}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
-    page_info: Optional[str] = None
+    next_url: Optional[str] = None
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         for _ in range(500):
-            if page_info is None:
-                p = first_params
+            if next_url is None:
+                r = await client.get(url, headers=headers, params=first_params)
             else:
-                p = {
-                    "limit": "250",
-                    "page_info": page_info,
-                    "fields": field_list,
-                    "status": "any",
-                }
-            r = await client.get(url, headers=headers, params=p)
+                # Shopify requires the cursor URL to be used without re-adding filters such as status.
+                r = await client.get(next_url, headers=headers)
             r.raise_for_status()
             data = r.json() or {}
             batch = data.get("orders") or []
             all_orders.extend(batch)
-            nxt = _next_page_info(r.headers.get("link") or "")
+            nxt = _next_page_url(r.headers.get("link") or "")
             if not nxt:
                 break
-            page_info = nxt
+            next_url = nxt
 
     return all_orders
