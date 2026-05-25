@@ -56,6 +56,19 @@ logger = logging.getLogger(__name__)
 SYNC_META_INBOUND_LAST = "oc_inbound_last_sync_at"
 SYNC_META_INBOUND_STATUS_FILTER = "inventory_inbound_status_filter_excluded"
 
+
+def _empty_oc_sku_snapshot_would_wipe_existing(
+    mapping_rows: List[Dict[str, Any]],
+    inventory_rows: List[Dict[str, Any]],
+    existing_mapping_count: int,
+    existing_inventory_count: int,
+) -> bool:
+    return (
+        (existing_mapping_count > 0 and not mapping_rows)
+        or (existing_inventory_count > 0 and not inventory_rows)
+    )
+
+
 def _inbound_status_is_canceled(status: Optional[str]) -> bool:
     """True if OC status indicates the inbound was canceled (Canceled, Cancelled, etc.)."""
     return "cancel" in (status or "").strip().lower()
@@ -1027,6 +1040,37 @@ async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC sync failed: {e}") from e
+
+    existing_mapping_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(OCSkuMapping)
+            .where(OCSkuMapping.connection_id == connection.id)
+        )
+    ).scalar_one()
+    existing_inventory_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(OCSkuInventory)
+            .where(OCSkuInventory.connection_id == connection.id)
+        )
+    ).scalar_one()
+    if _empty_oc_sku_snapshot_would_wipe_existing(
+        rows,
+        inventory_rows_data,
+        int(existing_mapping_count or 0),
+        int(existing_inventory_count or 0),
+    ):
+        logger.error(
+            "OC SKU sync returned an empty replacement snapshot; preserving existing rows "
+            "(mappings=%s, inventory=%s).",
+            existing_mapping_count,
+            existing_inventory_count,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="OC SKU sync returned an empty replacement snapshot; existing inventory data was preserved.",
+        )
 
     await db.execute(delete(OCSkuMapping).where(OCSkuMapping.connection_id == connection.id))
     await db.execute(delete(OCSkuInventory).where(OCSkuInventory.connection_id == connection.id))

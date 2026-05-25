@@ -661,7 +661,13 @@ async def fetch_all_conversation_messages(
         )
         messages = data.get("messages") or []
         all_messages.extend(messages)
-        if not data.get("next") or offset + len(messages) >= (data.get("total") or 0):
+        total = data.get("total")
+        try:
+            total_int = int(total) if total is not None else None
+        except (TypeError, ValueError):
+            total_int = None
+        reached_reported_total = total_int is not None and offset + len(messages) >= total_int
+        if not messages or not data.get("next") or reached_reported_total:
             break
         offset += page_size
     return all_messages
