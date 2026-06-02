@@ -33,6 +33,7 @@ from app.services.oc_stock_movement_store import (
     max_movement_update_time_utc,
     persist_oc_stock_movement_lines,
 )
+from app.services.order_filters import order_not_canceled_filter
 from app.services.stock_forecast import build_stock_forecast_payload
 from app.services.oc_client import (
     OCAPIError,
@@ -1132,7 +1133,7 @@ async def list_oc_inventory(
             .join(Order, Order.order_id == LineItem.order_id)
             .where(
                 LineItem.sku.in_(seller_skus),
-                Order.cancel_status != "CANCELED",
+                order_not_canceled_filter(),
                 Order.date >= from_3m,
                 Order.date <= today,
             )

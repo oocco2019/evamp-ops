@@ -12,13 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.settings import OCStockMovementLine, OCSkuMapping
 from app.models.stock import LineItem, Order
+from app.services.order_filters import order_not_canceled_filter
 
 MIN_AVL_IN_STOCK = 5
 LOOKBACK_DAYS = 183  # ~6 months
 IN_STOCK_SAMPLE_CAP = 90
 MIN_IN_STOCK_FOR_CONFIDENCE = 7
 NOTE_TEXT = (
-    "Burn rate = linearly weighted avg of eBay sales over last 90 in-stock days (AVL >= 5). "
+    "Burn rate = linearly weighted avg of marketplace sales over last 90 in-stock days (AVL >= 5). "
     "Assumes no inbound restock."
 )
 
@@ -138,7 +139,7 @@ async def _ebay_units_by_order_date(
         .join(Order, Order.order_id == LineItem.order_id)
         .where(
             LineItem.sku.in_(line_item_skus),
-            Order.cancel_status != "CANCELED",
+            order_not_canceled_filter(),
             Order.date >= window_start,
             Order.date <= window_end,
         )
