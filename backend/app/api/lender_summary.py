@@ -135,6 +135,7 @@ def _process_order_for_lender(
         line_cost_usd,
         line_postage_usd,
         usd_to_gbp,
+        sales_channel=o.sales_channel,
     )
     if op is None:
         return None
