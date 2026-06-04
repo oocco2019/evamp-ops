@@ -1013,6 +1013,7 @@ async def get_analytics_monthly_profit(
             line_cost_usd,
             line_postage_usd,
             usd_to_gbp,
+            sales_channel=o.sales_channel,
         )
         if order_profit is None:
             continue
@@ -1065,11 +1066,17 @@ def _total_due_seller_gbp_amount(
     return (total_due_seller * Decimal(str(rate))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def _seller_due_excludes_tax(sales_channel: Optional[str]) -> bool:
+    return (sales_channel or "").strip().lower() == "shopify"
+
+
 def _uk_vat_gbp(
     country: Optional[str],
     tax_total: Optional[Decimal],
     price_gbp: Decimal,
     order_currency_to_gbp_rate: Decimal,
+    *,
+    sales_channel: Optional[str] = None,
 ) -> Decimal:
     """
     UK (ship-to GB): subtract VAT from gross profit. If eBay sends tax_total > 0, use that (converted to GBP).
@@ -1077,7 +1084,11 @@ def _uk_vat_gbp(
     If tax_total is missing or zero, assume order total is VAT-inclusive at UK_VAT_DEFAULT_RATE (default 20%).
     VAT element = price_gbp × rate / (1 + rate) — e.g. 20% VAT on a £129.99 gross ≈ £21.67, not 20% of £129.99.
     Non-UK: 0.
+
+    Shopify stores total_due_seller as tax-exclusive seller revenue, so subtracting VAT here would double-count tax.
     """
+    if _seller_due_excludes_tax(sales_channel):
+        return Decimal(0)
     is_uk = (country or "").strip().upper()[:2] == "GB"
     if not is_uk:
         return Decimal(0)
@@ -1101,11 +1112,13 @@ def _order_profit_gbp(
     line_cost_usd_total: Decimal,
     line_postage_usd_total: Decimal,
     usd_to_gbp: float,
+    sales_channel: Optional[str] = None,
 ) -> Optional[Decimal]:
     """
-    Profit (GBP) = Total Due Seller (GBP) - cost (GBP) - (if UK: VAT in GBP).
+    Profit (GBP) = Total Due Seller (GBP) - cost (GBP) - (if UK and not already tax-exclusive: VAT in GBP).
 
     UK: eBay tax_total if present; else VAT extracted from VAT-inclusive price at UK_VAT_DEFAULT_RATE (default 20%).
+    Shopify: total_due_seller is imported net of tax, so VAT is not subtracted again.
 
     Normal orders: cost = (landed+postage) USD converted to GBP.
 
@@ -1124,7 +1137,7 @@ def _order_profit_gbp(
         cost_gbp = (Decimal("2") * line_postage_usd_total) * usd_to_gbp_d
     else:
         cost_gbp = line_cost_usd_total * usd_to_gbp_d
-    vat_gbp = _uk_vat_gbp(country, tax_total, price_gbp, rate_d)
+    vat_gbp = _uk_vat_gbp(country, tax_total, price_gbp, rate_d, sales_channel=sales_channel)
     if td_gbp <= 0:
         vat_gbp = Decimal(0)
     return td_gbp - cost_gbp - vat_gbp
@@ -1213,6 +1226,7 @@ async def get_analytics_by_sku(
             line_cost_usd,
             line_postage_usd,
             usd_to_gbp,
+            sales_channel=o.sales_channel,
         )
         if order_profit is None:
             continue
@@ -1315,6 +1329,7 @@ async def get_analytics_by_country(
             line_cost_usd,
             line_postage_usd,
             usd_to_gbp,
+            sales_channel=o.sales_channel,
         )
         if order_profit is None:
             continue
@@ -1468,7 +1483,7 @@ async def get_analytics_order_details(
             order_cost_gbp = (Decimal("2") * line_postage_usd) * usd_to_gbp_d
         else:
             order_cost_gbp = line_cost_usd * usd_to_gbp_d
-        vat_gbp = _uk_vat_gbp(o.country, o.tax_total, price_gbp, rate_d)
+        vat_gbp = _uk_vat_gbp(o.country, o.tax_total, price_gbp, rate_d, sales_channel=o.sales_channel)
         if refund_mode:
             vat_gbp = Decimal(0)
 
@@ -1482,6 +1497,7 @@ async def get_analytics_order_details(
             line_cost_usd,
             line_postage_usd,
             usd_to_gbp,
+            sales_channel=o.sales_channel,
         )
         if order_profit is None:
             continue

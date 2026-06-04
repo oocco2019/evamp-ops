@@ -130,8 +130,8 @@ def parse_shopify_order_to_import(order: dict) -> dict:
     ship = _dec(order.get("total_shipping") or (order.get("total_shipping_price_set") or {}).get("shop_money", {}).get("amount"))
     disc = _dec(order.get("current_total_discounts")) or _dec(order.get("total_discounts"))
 
-    # "Seller revenue" proxy (same field names as eBay; profit code converts to GBP):
-    # Prefer order total less tax; falls back to subtotal + shipping.
+    # Seller revenue proxy stored in the shared total_due_seller field.
+    # Shopify values here are tax-exclusive; profit math must not subtract VAT again.
     if price_total is not None and tax_total is not None:
         payout = price_total - tax_total
     elif subtotal is not None and ship is not None:

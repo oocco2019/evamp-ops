@@ -63,6 +63,23 @@ def test_uk_positive_tax_total_uses_ebay_only():
     assert gross == Decimal("40.5")
 
 
+def test_shopify_uk_tax_exclusive_seller_due_does_not_subtract_vat_again():
+    gross = _order_profit_gbp(
+        total_due_seller=Decimal("100"),
+        total_due_seller_currency="GBP",
+        price_total=Decimal("120"),
+        tax_total=Decimal("20"),
+        order_currency="GBP",
+        country="GB",
+        line_cost_usd_total=Decimal("0"),
+        line_postage_usd_total=Decimal("0"),
+        usd_to_gbp=0.79,
+        sales_channel="shopify",
+    )
+    assert gross is not None
+    assert gross == Decimal("100")
+
+
 def test_refund_negative_payout_only_double_postage_not_landed():
     """total_due_seller <= 0: cost = 2 * postage_usd * usd_to_gbp, not full landed+postage."""
     line_cost_usd = Decimal("80")
