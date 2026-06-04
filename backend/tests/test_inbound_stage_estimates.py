@@ -3,6 +3,7 @@ import datetime
 from app.api.inventory_status import (
     _extract_inbound_ui_times,
     _inbound_status_is_canceled,
+    _movement_reason_code,
     _putaway_qty_transitioned,
     _should_set_arrived_at,
     _should_set_putaway_at,
@@ -196,4 +197,63 @@ def test_status_indicates_other_warehouse():
     assert _status_indicates_other_warehouse("Put away") is False
     assert _status_indicates_other_warehouse("Arrived") is False
     assert _status_indicates_other_warehouse("In transit") is False
+
+
+def test_movement_reason_code_parses_leading_code():
+    assert _movement_reason_code("PAC=Put Away Complete") == "PAC"
+    assert _movement_reason_code("PAC Put away") == "PAC"
+    assert _movement_reason_code("IOS") == "IOS"
+    assert _movement_reason_code("ios=inbound") == "IOS"
+    assert _movement_reason_code("OOF=Outbound Order Fulfiled") == "OOF"
+    assert _movement_reason_code("") is None
+    assert _movement_reason_code(None) is None
+    assert _movement_reason_code("a longer free-text reason") is None
+
+
+def test_extract_inbound_ui_times_uses_movement_arrival_for_old_order():
+    """Movement (IOS/PAC) times are real OC events: surface them even for old, ineligible orders."""
+    now = datetime.datetime(2026, 4, 4, 12, 0, 0)
+    fs = datetime.datetime(2025, 1, 1, 12, 0, 0)  # far before eligibility cutoff
+    mv_arrived = datetime.datetime(2025, 1, 5, 9, 30, 0)
+    mv_putaway = datetime.datetime(2025, 1, 6, 14, 15, 0)
+    raw = {"status": "Put away"}
+    create_s, putaway_s, arrived_s = _extract_inbound_ui_times(
+        raw,
+        inbound_at_db=fs,
+        putaway_at_db=None,
+        arrived_at_db=None,
+        status_from_row="Put away",
+        now_utc_naive=now,
+        movement_arrived_at=mv_arrived,
+        movement_putaway_at=mv_putaway,
+    )
+    assert create_s is not None
+    assert putaway_s == mv_putaway.strftime("%Y-%m-%d %H:%M:%S")
+    assert arrived_s == mv_arrived.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_extract_inbound_ui_times_movement_works_without_raw_payload():
+    """No OC detail payload, but movement events still populate Arrived/Putaway."""
+    mv_arrived = datetime.datetime(2025, 1, 5, 9, 30, 0)
+    mv_putaway = datetime.datetime(2025, 1, 6, 14, 15, 0)
+    create_s, putaway_s, arrived_s = _extract_inbound_ui_times(
+        None,
+        inbound_at_db=datetime.datetime(2025, 1, 1, 12, 0, 0),
+        movement_arrived_at=mv_arrived,
+        movement_putaway_at=mv_putaway,
+    )
+    assert create_s is not None
+    assert putaway_s == mv_putaway.strftime("%Y-%m-%d %H:%M:%S")
+    assert arrived_s == mv_arrived.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_extract_inbound_ui_times_raw_arrival_beats_movement():
+    """Explicit OC inbound-detail arrival field still wins over movement-derived time."""
+    raw = {"status": "Put away", "arrivedTime": "2025-07-01 08:00:00"}
+    _, _, arrived_s = _extract_inbound_ui_times(
+        raw,
+        inbound_at_db=datetime.datetime(2025, 5, 1, 12, 0, 0),
+        movement_arrived_at=datetime.datetime(2025, 1, 5, 9, 30, 0),
+    )
+    assert arrived_s == "2025-07-01 08:00:00"
 

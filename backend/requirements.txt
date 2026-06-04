@@ -27,3 +27,6 @@ cryptography==41.0.7
 
 # Background Tasks
 apscheduler==3.10.4
+
+# IANA timezone database (zoneinfo lookups like Europe/Vilnius on slim images)
+tzdata==2024.1

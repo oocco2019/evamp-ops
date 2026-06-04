@@ -54,6 +54,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 SYNC_META_INBOUND_LAST = "oc_inbound_last_sync_at"
+SYNC_META_INBOUND_LAST_FULL = "oc_inbound_last_full_sync_at"
 SYNC_META_INBOUND_STATUS_FILTER = "inventory_inbound_status_filter_excluded"
 
 def _inbound_status_is_canceled(status: Optional[str]) -> bool:
@@ -589,6 +590,72 @@ def _inbound_status_lower_for_ui(
     return ""
 
 
+# OC GetStockMovement reason codes for inbound stock entering the warehouse (positive AVL change).
+# IOS = inbound receipt; PAC = Put Away Complete. These timestamps are the warehouse events the
+# OC web portal surfaces as the order's arrival / put-away times.
+_INBOUND_MOVEMENT_REASON_CODES = frozenset({"IOS", "PAC"})
+_INBOUND_PUTAWAY_REASON_CODE = "PAC"
+
+
+def _movement_reason_code(reason: Optional[str]) -> Optional[str]:
+    """Leading 3-letter OC reason code, e.g. "PAC=Put Away Complete" / "PAC Put away" -> "PAC"."""
+    s = (reason or "").strip()
+    if not s:
+        return None
+    m = re.match(r"^([A-Za-z]{3})\s*=", s) or re.match(r"^([A-Za-z]{3})(?=\s|$|[=_-])", s)
+    return m.group(1).upper() if m else None
+
+
+async def _inbound_movement_times(
+    db: AsyncSession,
+    connection_id: int,
+    order_keys: set[str],
+) -> Dict[str, Dict[str, datetime]]:
+    """
+    Map inbound order id (lowercased OC/seller number) -> {"arrived": dt, "putaway": dt} derived from
+    cached OC GetStockMovement inbound lines (IOS/PAC). These are real warehouse event times (what the
+    OC web portal shows), unlike the partner inbound-detail endpoint which usually omits arrival times.
+
+    "arrived" = earliest inbound movement (IOS/PAC). "putaway" = earliest PAC (Put Away Complete).
+    """
+    if not order_keys:
+        return {}
+    stmt = select(
+        OCStockMovementLine.order_number,
+        OCStockMovementLine.reason,
+        OCStockMovementLine.update_time_utc,
+    ).where(
+        OCStockMovementLine.connection_id == connection_id,
+        func.lower(func.coalesce(OCStockMovementLine.order_number, "")).in_(order_keys),
+        OCStockMovementLine.update_time_utc.isnot(None),
+    )
+    result = await db.execute(stmt)
+    arrived: Dict[str, datetime] = {}
+    putaway: Dict[str, datetime] = {}
+    for order_number, reason, update_dt in result.all():
+        if update_dt is None:
+            continue
+        key = str(order_number or "").strip().lower()
+        if key not in order_keys:
+            continue
+        code = _movement_reason_code(reason)
+        if code not in _INBOUND_MOVEMENT_REASON_CODES:
+            continue
+        if key not in arrived or update_dt < arrived[key]:
+            arrived[key] = update_dt
+        if code == _INBOUND_PUTAWAY_REASON_CODE and (key not in putaway or update_dt < putaway[key]):
+            putaway[key] = update_dt
+    out: Dict[str, Dict[str, datetime]] = {}
+    for key in set(arrived) | set(putaway):
+        entry: Dict[str, datetime] = {}
+        if key in arrived:
+            entry["arrived"] = arrived[key]
+        if key in putaway:
+            entry["putaway"] = putaway[key]
+        out[key] = entry
+    return out
+
+
 def _extract_inbound_ui_times(
     raw: Optional[Dict[str, Any]],
     inbound_at_db: Optional[datetime],
@@ -597,12 +664,19 @@ def _extract_inbound_ui_times(
     *,
     status_from_row: Optional[str] = None,
     now_utc_naive: Optional[datetime] = None,
+    movement_arrived_at: Optional[datetime] = None,
+    movement_putaway_at: Optional[datetime] = None,
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Stable display times for the inbound table (YYYY-MM-DD HH:MM:SS, UTC from OC numeric / parsed strings).
 
     ``inbound_at_db`` is EvampOps first-seen time (``inbound_at`` or ``synced_at``) used for create time
     and for eligibility: first-seen on or after **yesterday UTC** may use DB estimates when OC omits times.
+
+    ``movement_arrived_at`` / ``movement_putaway_at`` are real OC GetStockMovement event times
+    (IOS/PAC inbound receipt + put-away) matched by inbound order number. These are the same warehouse
+    events the OC web portal shows, so they are authoritative and bypass the first-seen eligibility gate
+    (they apply to old orders too), ranking just below explicit OC inbound-detail arrival fields.
 
     When eligible: **arrived**-ish status → ``arrived_at`` estimate for Arrived column; **putaway**-ish →
     ``putaway_at`` for Putaway; **other** warehouse processing → synthetic **arrival** only
@@ -615,7 +689,8 @@ def _extract_inbound_ui_times(
         return dt.strftime("%Y-%m-%d %H:%M:%S")
 
     if not raw:
-        return (fmt(inbound_at_db), None, None)
+        # No OC detail payload, but movement events may still carry real warehouse times.
+        return (fmt(inbound_at_db), fmt(movement_putaway_at), fmt(movement_arrived_at or movement_putaway_at))
 
     flat = _flatten_oc_scalar_fields(raw)
     status_val = _inbound_status_lower_for_ui(raw, flat, status_from_row)
@@ -640,6 +715,10 @@ def _extract_inbound_ui_times(
                 if putaway_dt:
                     putaway_from_raw = True
                     break
+
+    # Real OC GetStockMovement put-away (PAC) time: authoritative, applies to old orders too.
+    if putaway_dt is None and movement_putaway_at is not None:
+        putaway_dt = movement_putaway_at
 
     # Persisted putaway estimate: only for putaway-indicating status and first-seen since yesterday (UTC).
     if putaway_dt is None and putaway_at_db is not None and eligible and _status_indicates_putaway(status_val):
@@ -680,6 +759,11 @@ def _extract_inbound_ui_times(
                     dt_candidates.append(dt)
             if dt_candidates:
                 arrived_dt = min(dt_candidates)
+
+    # Real OC GetStockMovement inbound receipt (IOS/PAC) time: the value the OC web portal shows.
+    # Authoritative real warehouse event, so it applies regardless of status/eligibility (old orders too).
+    if arrived_dt is None and movement_arrived_at is not None:
+        arrived_dt = movement_arrived_at
 
     # OC real putaway timestamp → arrival proxy for putaway statuses (not DB estimate).
     if arrived_dt is None and putaway_dt is not None and putaway_from_raw:
@@ -1614,7 +1698,11 @@ async def execute_oc_inbound_sync(db: AsyncSession, full: bool) -> InboundSyncRe
         )
         logger.info("OC inbound DB sync: fetched %d unique orders from API, upserting", len(rows))
         processed = await _upsert_inbound_rows(db, cid, rows)
-        await _set_sync_meta_value(db, SYNC_META_INBOUND_LAST, datetime.now(timezone.utc).isoformat())
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await _set_sync_meta_value(db, SYNC_META_INBOUND_LAST, now_iso)
+        if full:
+            # Marker for the daily catch-up scheduler so a completed full backfill satisfies the day's slot.
+            await _set_sync_meta_value(db, SYNC_META_INBOUND_LAST_FULL, now_iso)
         await db.commit()
         logger.info("OC inbound DB sync: committed %d rows", processed)
     except (OCConfigError, OCAPIError) as e:
@@ -1716,6 +1804,17 @@ async def list_oc_inbound_orders(
     )
     result = await db.execute(stmt)
     rows = result.scalars().all()
+
+    # Real arrival / put-away times from cached OC GetStockMovement (IOS/PAC), matched by inbound number.
+    # This is the data source behind the OC web portal's timestamps; the inbound-detail endpoint omits them.
+    order_keys: set[str] = set()
+    for r in rows:
+        if r.oc_inbound_number:
+            order_keys.add(r.oc_inbound_number.strip().lower())
+        if r.seller_inbound_number:
+            order_keys.add(r.seller_inbound_number.strip().lower())
+    movement_times = await _inbound_movement_times(db, cid, order_keys)
+
     payload: List[OCInboundOrderResponse] = []
     for r in rows:
         raw_parsed: Optional[Dict[str, Any]] = None
@@ -1725,6 +1824,13 @@ async def list_oc_inbound_orders(
                 raw_parsed = parsed if isinstance(parsed, dict) else None
             except (json.JSONDecodeError, TypeError):
                 raw_parsed = None
+        mv: Dict[str, datetime] = {}
+        for k in (r.oc_inbound_number, r.seller_inbound_number):
+            if k:
+                found = movement_times.get(k.strip().lower())
+                if found:
+                    mv = found
+                    break
         # Older rows may have inbound_at unset; fall back to synced_at so CREATE TIME is always populated.
         create_s, putaway_s, arrived_s = _extract_inbound_ui_times(
             raw_parsed,
@@ -1732,6 +1838,8 @@ async def list_oc_inbound_orders(
             putaway_at_db=r.putaway_at,
             arrived_at_db=r.arrived_at,
             status_from_row=r.status,
+            movement_arrived_at=mv.get("arrived"),
+            movement_putaway_at=mv.get("putaway"),
         )
         raw_obj = raw_parsed if include_raw else None
         payload.append(

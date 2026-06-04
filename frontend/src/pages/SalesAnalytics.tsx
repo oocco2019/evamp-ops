@@ -167,6 +167,11 @@ export default function SalesAnalytics() {
       profit: Number(r.profit_eur),
     })) ?? []
 
+  const monthlyProfitTotalEur = (monthlyProfitRows ?? []).reduce(
+    (sum, r) => sum + (Number.parseFloat(r.profit_eur) || 0),
+    0,
+  )
+
   const profitYearChoices = monthlyProfitYearsRes?.years ?? []
 
   useEffect(() => {
@@ -612,9 +617,13 @@ export default function SalesAnalytics() {
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
           <div>
             <h2 className="text-lg font-semibold text-gray-800">Profit by month</h2>
-            <p className="text-sm text-gray-500 mt-1">
-              EUR after profit tax — company-wide totals (not filtered by Country/SKU above). Uses GBP→EUR rate from
-              server config.
+            <p className="text-sm text-gray-700 mt-1 tabular-nums">
+              Total EUR after tax:{' '}
+              {loadingMonthlyProfit
+                ? '…'
+                : monthlyProfitChartData.length === 0
+                  ? '—'
+                  : `€${monthlyProfitTotalEur.toFixed(2)}`}
             </p>
           </div>
           <label className="flex items-center gap-2 text-sm text-gray-700 shrink-0">
