@@ -1112,17 +1112,34 @@ async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC sync failed: {e}") from e
 
-    await db.execute(delete(OCSkuMapping).where(OCSkuMapping.connection_id == connection.id))
-    await db.execute(delete(OCSkuInventory).where(OCSkuInventory.connection_id == connection.id))
-    synced = 0
+    valid_mapping_rows = []
     skipped = 0
-    inventory_rows = 0
     for r in rows:
         sku_code = (r.get("sku_code") or "").strip()
         mfskuid = (r.get("mfskuid") or "").strip()
         if not sku_code or not mfskuid:
             skipped += 1
             continue
+        valid_mapping_rows.append((r, sku_code, mfskuid))
+
+    valid_inventory_rows = [
+        inv for inv in inventory_rows_data if str(inv.get("mfskuid") or "").strip()
+    ]
+
+    if not valid_mapping_rows or not valid_inventory_rows:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "OC sync returned an empty SKU mapping or inventory snapshot; "
+                "preserving existing SKU/inventory data."
+            ),
+        )
+
+    await db.execute(delete(OCSkuMapping).where(OCSkuMapping.connection_id == connection.id))
+    await db.execute(delete(OCSkuInventory).where(OCSkuInventory.connection_id == connection.id))
+    synced = 0
+    inventory_rows = 0
+    for r, sku_code, mfskuid in valid_mapping_rows:
         db.add(
             OCSkuMapping(
                 connection_id=connection.id,
@@ -1135,7 +1152,7 @@ async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
             )
         )
         synced += 1
-    for inv in inventory_rows_data:
+    for inv in valid_inventory_rows:
         mf = str(inv.get("mfskuid") or "").strip()
         sr = str(inv.get("service_region") or connection.region or "UK").strip() or "UK"
         db.add(
