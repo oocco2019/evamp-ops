@@ -1112,6 +1112,39 @@ async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC sync failed: {e}") from e
 
+    if not rows or not inventory_rows_data:
+        empty_parts: List[str] = []
+        if not rows:
+            existing_mapping_result = await db.execute(
+                select(func.count())
+                .select_from(OCSkuMapping)
+                .where(OCSkuMapping.connection_id == connection.id)
+            )
+            if int(existing_mapping_result.scalar() or 0) > 0:
+                empty_parts.append("SKU mappings")
+        if not inventory_rows_data:
+            existing_inventory_result = await db.execute(
+                select(func.count())
+                .select_from(OCSkuInventory)
+                .where(OCSkuInventory.connection_id == connection.id)
+            )
+            if int(existing_inventory_result.scalar() or 0) > 0:
+                empty_parts.append("inventory rows")
+        if empty_parts:
+            logger.error(
+                "OC SKU sync returned empty %s for connection_id=%s; preserving existing rows.",
+                ", ".join(empty_parts),
+                connection.id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=(
+                    "OC SKU sync returned no "
+                    f"{' or '.join(empty_parts)}; preserving existing data. "
+                    "Retry later or inspect the OC response before forcing a replacement."
+                ),
+            )
+
     await db.execute(delete(OCSkuMapping).where(OCSkuMapping.connection_id == connection.id))
     await db.execute(delete(OCSkuInventory).where(OCSkuInventory.connection_id == connection.id))
     synced = 0

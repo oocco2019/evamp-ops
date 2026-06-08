@@ -1375,24 +1375,20 @@ async def oc_fetch_inbound_orders(
         start_time = _dt_to_oc_time(chunk_start)
         end_time = _dt_to_oc_time(chunk_end)
 
-        timestamp_ms = int(time.time() * 1000)
-        message_id = str(uuid4())
-
         # Pagination keys vary by tenant/version, so we try a few variants for the same chunk.
-        data_variants: List[Dict[str, Any]] = [
-            {"startTime": start_time, "endTime": end_time},
-            {"startTime": start_time, "endTime": end_time, "page": page, "limit": page_size},
-            {"startTime": start_time, "endTime": end_time, "pageNumber": page, "pageSize": page_size},
+        # Prefer paginated shapes first; a non-paginated successful response may be only the first
+        # default page, which would silently drop the rest of a busy 7-day inbound window.
+        data_variants: List[tuple[Dict[str, Any], Optional[str], Optional[str]]] = [
+            ({"startTime": start_time, "endTime": end_time, "page": page, "limit": page_size}, "page", "limit"),
+            (
+                {"startTime": start_time, "endTime": end_time, "pageNumber": page, "pageSize": page_size},
+                "pageNumber",
+                "pageSize",
+            ),
+            ({"startTime": start_time, "endTime": end_time}, None, None),
         ]
 
-        chunk_rows: List[Dict[str, Any]] = []
-        for data_variant in data_variants:
-            body_obj = {"messageId": message_id, "timestamp": timestamp_ms, "data": data_variant}
-            resp = await _call_oc(db, conn, "POST", endpoint, body_obj=body_obj)
-            rows = _extract_inbound_rows(resp)
-            if not rows:
-                continue
-
+        def _map_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             out: List[Dict[str, Any]] = []
             for r in rows:
                 if not isinstance(r, dict):
@@ -1433,9 +1429,62 @@ async def oc_fetch_inbound_orders(
                         "raw_payload": r,
                     }
                 )
+            return out
 
-            chunk_rows = out
-            break
+        def _row_key(row: Dict[str, Any]) -> str:
+            return (
+                f"{(row.get('oc_inbound_number') or '').strip().lower()}::"
+                f"{(row.get('seller_inbound_number') or '').strip().lower()}"
+            )
+
+        chunk_rows: List[Dict[str, Any]] = []
+        for template, page_key, size_key in data_variants:
+            variant_rows: List[Dict[str, Any]] = []
+            seen_variant_keys: set[str] = set()
+            page_no = max(int(page or 1), 1)
+
+            for _ in range(500):
+                data_variant = dict(template)
+                if page_key and size_key:
+                    data_variant[page_key] = page_no
+                    data_variant[size_key] = page_size
+
+                body_obj = {
+                    "messageId": str(uuid4()),
+                    "timestamp": int(time.time() * 1000),
+                    "data": data_variant,
+                }
+                resp = await _call_oc(db, conn, "POST", endpoint, body_obj=body_obj)
+                rows = _extract_inbound_rows(resp)
+                if not rows:
+                    break
+
+                mapped_rows = _map_rows(rows)
+                unique_page_rows: List[Dict[str, Any]] = []
+                for row in mapped_rows:
+                    k = _row_key(row)
+                    if k in seen_variant_keys:
+                        continue
+                    seen_variant_keys.add(k)
+                    unique_page_rows.append(row)
+
+                if not unique_page_rows:
+                    logger.warning(
+                        "OC inbound pagination returned duplicate page for chunk %s..%s page=%s; stopping variant.",
+                        start_time,
+                        end_time,
+                        page_no,
+                    )
+                    break
+
+                variant_rows.extend(unique_page_rows)
+                if not page_key or len(rows) < page_size:
+                    break
+                page_no += 1
+
+            if variant_rows:
+                chunk_rows = variant_rows
+                break
 
         await _merge_inbound_detail_into_rows(db, conn, start_time, end_time, chunk_rows)
         await _merge_inbound_detail_by_seller_numbers(db, conn, start_time, end_time, chunk_rows)
