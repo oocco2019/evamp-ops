@@ -218,7 +218,14 @@ class OCStockMovementLine(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("connection_id", "movement_id", name="uq_oc_stock_mov_conn_movement"),
+        UniqueConstraint(
+            "connection_id",
+            "movement_id",
+            "mfskuid",
+            "service_region",
+            "update_time_raw",
+            name="uq_oc_stock_mov_conn_movement_identity",
+        ),
     )
 
 
