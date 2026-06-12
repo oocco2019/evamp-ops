@@ -196,6 +196,16 @@ def _base_url(shop: str) -> str:
     return f"https://{s}"
 
 
+def _orders_page_params(page_info: Optional[str], first_params: dict, field_list: str) -> dict:
+    if page_info is None:
+        return first_params
+    return {
+        "limit": "250",
+        "page_info": page_info,
+        "fields": field_list,
+    }
+
+
 async def fetch_shopify_orders_paginated(
     shop_domain: str,
     access_token: str,
@@ -244,15 +254,7 @@ async def fetch_shopify_orders_paginated(
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         for _ in range(500):
-            if page_info is None:
-                p = first_params
-            else:
-                p = {
-                    "limit": "250",
-                    "page_info": page_info,
-                    "fields": field_list,
-                    "status": "any",
-                }
+            p = _orders_page_params(page_info, first_params, field_list)
             r = await client.get(url, headers=headers, params=p)
             r.raise_for_status()
             data = r.json() or {}

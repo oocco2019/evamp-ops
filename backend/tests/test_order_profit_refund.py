@@ -2,7 +2,12 @@
 
 from decimal import Decimal
 
-from app.api.stock import _order_profit_gbp, _uk_vat_gbp
+from app.api.stock import _apply_order_earnings_update, _order_profit_gbp, _uk_vat_gbp
+
+
+class _OrderStub:
+    total_due_seller = Decimal("42.00")
+    total_due_seller_currency = "GBP"
 
 
 def test_normal_order_full_cogs():
@@ -101,3 +106,23 @@ def test_refund_zero_payout_uses_postage_cost():
     assert gross is not None
     # cost = 2*10*1 = 20; UK VAT = 0 on refund clawback
     assert gross == Decimal("0") - Decimal("20")
+
+
+def test_backfill_order_earnings_preserves_existing_payout_without_numeric_value():
+    order = _OrderStub()
+
+    changed = _apply_order_earnings_update(order, None, "GBP")
+
+    assert changed is False
+    assert order.total_due_seller == Decimal("42.00")
+    assert order.total_due_seller_currency == "GBP"
+
+
+def test_backfill_order_earnings_updates_when_numeric_value_exists():
+    order = _OrderStub()
+
+    changed = _apply_order_earnings_update(order, Decimal("15.25"), "EUR")
+
+    assert changed is True
+    assert order.total_due_seller == Decimal("15.25")
+    assert order.total_due_seller_currency == "EUR"
