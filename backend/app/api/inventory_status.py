@@ -29,6 +29,7 @@ from app.models.settings import (
 from app.models.messages import SyncMetadata
 from app.models.stock import LineItem, Order
 from app.core.security import encryption_service
+from app.services.order_filters import order_not_canceled_condition
 from app.services.oc_stock_movement_store import (
     max_movement_update_time_utc,
     persist_oc_stock_movement_lines,
@@ -1216,7 +1217,7 @@ async def list_oc_inventory(
             .join(Order, Order.order_id == LineItem.order_id)
             .where(
                 LineItem.sku.in_(seller_skus),
-                Order.cancel_status != "CANCELED",
+                order_not_canceled_condition(),
                 Order.date >= from_3m,
                 Order.date <= today,
             )
