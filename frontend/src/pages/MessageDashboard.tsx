@@ -480,8 +480,11 @@ export default function MessageDashboard() {
 
   const handleSend = async () => {
     if (!selectedThread || (!replyContent.trim() && replyAttachments.length === 0)) return
-    const content = replyContent.trim()
-    const mediaToSend = replyAttachments.length > 0 ? replyAttachments : undefined
+    const originalReplyContent = replyContent
+    const originalDraft = _draft
+    const originalAttachments = replyAttachments
+    const content = originalReplyContent.trim()
+    const mediaToSend = originalAttachments.length > 0 ? originalAttachments : undefined
     setError(null)
     const optimisticMsg: MessageResp = {
       message_id: `pending-${Date.now()}`,
@@ -513,8 +516,10 @@ export default function MessageDashboard() {
       messagesAPI.refreshThread(selectedThread.thread_id).catch(() => {})
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Send failed')
-      setReplyContent(content)
-      loadThread(selectedThread.thread_id)
+      setReplyContent(originalReplyContent)
+      setDraft(originalDraft)
+      setReplyAttachments(originalAttachments)
+      loadThread(selectedThread.thread_id, { silent: true })
     } finally {
       setLoading(false)
     }
