@@ -343,6 +343,14 @@ class OCInboundOrderResponse(BaseModel):
         default=None,
         description="Display arrived time from OC raw (server-side). Blank if OC omits arrival timestamps.",
     )
+    custom_courier_url: Optional[str] = Field(
+        default=None,
+        description="User-entered tracking URL; not overwritten by OC sync.",
+    )
+    custom_tracking_number: Optional[str] = Field(
+        default=None,
+        description="User-entered tracking number; not overwritten by OC sync.",
+    )
     raw: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Full OrangeConnex row JSON from the last sync (only when include_raw=true).",
@@ -378,6 +386,104 @@ class InboundStatusFilterResponse(BaseModel):
 
 class InboundStatusFilterPut(BaseModel):
     excluded: List[str] = Field(default_factory=list)
+
+
+class InboundCustomCourierPut(BaseModel):
+    """Set or clear a user tracking URL for one inbound order (Courier column override)."""
+
+    oc_inbound_number: Optional[str] = Field(default=None, max_length=200)
+    seller_inbound_number: Optional[str] = Field(default=None, max_length=200)
+    url: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description="Full http(s) tracking URL, or null/empty to clear.",
+    )
+
+
+class InboundCustomCourierResponse(BaseModel):
+    oc_inbound_number: Optional[str] = None
+    seller_inbound_number: str = ""
+    custom_courier_url: Optional[str] = None
+
+
+class InboundCustomTrackingPut(BaseModel):
+    """Set or clear a user tracking number for one inbound order (Tracking # column override)."""
+
+    oc_inbound_number: Optional[str] = Field(default=None, max_length=200)
+    seller_inbound_number: Optional[str] = Field(default=None, max_length=200)
+    tracking_number: Optional[str] = Field(
+        default=None,
+        max_length=500,
+        description="Tracking number text, or null/empty to clear.",
+    )
+
+
+class InboundCustomTrackingResponse(BaseModel):
+    oc_inbound_number: Optional[str] = None
+    seller_inbound_number: str = ""
+    custom_tracking_number: Optional[str] = None
+
+
+def _normalize_custom_courier_url(url: Optional[str]) -> Optional[str]:
+    if url is None:
+        return None
+    s = str(url).strip()
+    if not s:
+        return None
+    low = s.lower()
+    if not (low.startswith("http://") or low.startswith("https://")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="URL must start with http:// or https://",
+        )
+    if len(s) > 2000:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="URL too long (max 2000 characters).")
+    return s
+
+
+def _normalize_custom_tracking_number(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    if len(s) > 500:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Tracking number too long (max 500 characters).",
+        )
+    return s
+
+
+async def _find_inbound_order_for_override(
+    db: AsyncSession,
+    connection_id: int,
+    *,
+    oc_inbound_number: Optional[str],
+    seller_inbound_number: Optional[str],
+) -> OCInboundOrder:
+    oc = (oc_inbound_number or "").strip()
+    seller = (seller_inbound_number or "").strip()
+    if not oc and not seller:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide oc_inbound_number and/or seller_inbound_number.",
+        )
+    filters = []
+    if oc:
+        filters.append(func.lower(OCInboundOrder.oc_inbound_number) == oc.lower())
+    if seller:
+        filters.append(func.lower(OCInboundOrder.seller_inbound_number) == seller.lower())
+    stmt = (
+        select(OCInboundOrder)
+        .where(OCInboundOrder.connection_id == connection_id, or_(*filters))
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbound order not found.")
+    return row
 
 
 # Earliest date for historic inbound status chart (inclusive, UTC).
@@ -1857,10 +1963,68 @@ async def list_oc_inbound_orders(
                 create_time=create_s,
                 putaway_time=putaway_s,
                 arrived_time=arrived_s,
+                custom_courier_url=r.custom_courier_url,
+                custom_tracking_number=r.custom_tracking_number,
                 raw=raw_obj,
             )
         )
     return payload
+
+
+@router.put("/inbound-orders/custom-courier", response_model=InboundCustomCourierResponse)
+async def put_inbound_custom_courier(
+    body: InboundCustomCourierPut,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Set or clear a user-entered tracking URL for the Courier column.
+    Stored on the inbound row and never overwritten by OC sync.
+    """
+    cid = await _active_oc_connection_id(db)
+    if not cid:
+        raise HTTPException(status_code=400, detail="No active OC connection configured.")
+    row = await _find_inbound_order_for_override(
+        db,
+        cid,
+        oc_inbound_number=body.oc_inbound_number,
+        seller_inbound_number=body.seller_inbound_number,
+    )
+    row.custom_courier_url = _normalize_custom_courier_url(body.url)
+    await db.commit()
+    await db.refresh(row)
+    return InboundCustomCourierResponse(
+        oc_inbound_number=row.oc_inbound_number,
+        seller_inbound_number=row.seller_inbound_number or "",
+        custom_courier_url=row.custom_courier_url,
+    )
+
+
+@router.put("/inbound-orders/custom-tracking", response_model=InboundCustomTrackingResponse)
+async def put_inbound_custom_tracking(
+    body: InboundCustomTrackingPut,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Set or clear a user-entered tracking number for the Tracking # column.
+    Stored on the inbound row and never overwritten by OC sync.
+    """
+    cid = await _active_oc_connection_id(db)
+    if not cid:
+        raise HTTPException(status_code=400, detail="No active OC connection configured.")
+    row = await _find_inbound_order_for_override(
+        db,
+        cid,
+        oc_inbound_number=body.oc_inbound_number,
+        seller_inbound_number=body.seller_inbound_number,
+    )
+    row.custom_tracking_number = _normalize_custom_tracking_number(body.tracking_number)
+    await db.commit()
+    await db.refresh(row)
+    return InboundCustomTrackingResponse(
+        oc_inbound_number=row.oc_inbound_number,
+        seller_inbound_number=row.seller_inbound_number or "",
+        custom_tracking_number=row.custom_tracking_number,
+    )
 
 
 @router.get("/inbound-orders/status-filter", response_model=InboundStatusFilterResponse)

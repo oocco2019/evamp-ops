@@ -490,6 +490,8 @@ def parse_orders_to_import(api_response: Dict[str, Any]) -> List[Dict[str, Any]]
             "sales_record_reference": sales_record_reference,
             "ebay_collect_and_remit_tax": ebay_collect_and_remit_tax,
             "line_items": line_items,
+            # Full raw eBay order object (incl. lineItems) for long-term recovery; see docs/DATA_RETENTION.md.
+            "raw_payload": o,
         })
     return result
 

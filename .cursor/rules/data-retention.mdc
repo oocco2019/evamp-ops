@@ -1,0 +1,45 @@
+---
+description: Permanent data-retention principle — persist everything received from external platforms; never prune
+alwaysApply: true
+---
+
+# Data retention — keep everything, forever
+
+EvampOps is the **long-term system of record** for data pulled from external platforms
+(eBay, Shopify, OrangeConnex). Those platforms purge data after a limited window (often
+1–2 years). The owner must be able to query this data **10+ years from now**. Treat every
+byte we receive as something we are responsible for keeping.
+
+## Rules for any new or changed sync/import
+
+1. **Persist to PostgreSQL, never memory-only.** Anything fetched from an external API that
+   has business value must be written to the DB. In-memory caches (e.g. the lender-summary
+   TTL cache) are allowed only for *derived* values that can be recomputed from persisted data.
+
+2. **Never prune, expire, or TTL-delete historical records.** No retention windows, no
+   "delete older than N days" jobs on source data. `oc_stock_movement_line` and `messages`
+   are append-only on purpose. If you add a cleanup job, it may only touch transient/stub rows
+   (e.g. `stub-%` threads), never real source data.
+
+3. **Store the raw payload, not just the parsed columns.** External schemas change and we
+   cannot re-fetch old data once the platform purges it. New ingestion paths should keep a
+   `raw_payload`/JSON column (or a dedicated raw-archive table) alongside normalized columns,
+   following the existing pattern in `oc_inbound_orders.raw_payload` and `oc_sku_mappings.raw_payload`.
+
+4. **Prefer append-only ledgers over overwrite-in-place** for anything that changes over time
+   (stock levels, statuses, prices). Overwriting loses history. The canonical example is
+   `oc_stock_movement_line` (one immutable row per movement); point-in-time stock is
+   reconstructed from it rather than from the overwritten `oc_sku_inventory` snapshot.
+
+5. **Sync frequently and from the earliest available point.** Source platforms expose only a
+   recent window, so a missed period is gone forever. When adding a lookback clamp, document
+   it and make the first backfill reach as far back as the API allows.
+
+6. **Migrations must not drop source data.** Dropping a table/column that holds received data
+   destroys history irreversibly in production. Get explicit owner agreement first, and prefer
+   keeping the data even if a feature stops reading it.
+
+## Before changing ingestion
+
+Read `docs/DATA_RETENTION.md` (full audit of what is/isn't durably stored and the known gaps).
+If a change would drop, overwrite, or fail to persist received data, stop and flag it.

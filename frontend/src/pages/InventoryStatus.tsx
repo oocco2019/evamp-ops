@@ -332,6 +332,208 @@ function ocInboundDetailUrl(ocInboundNumber: string): string | null {
   return `https://fulfillment-uk.orangeconnex.com/inbound/detail?orderNumber=${encodeURIComponent(order)}`
 }
 
+function InboundCourierCell({
+  row,
+  trackingPairs,
+  countryIso,
+  editing,
+  draft,
+  saving,
+  onStartEdit,
+  onDraftChange,
+  onSave,
+  onCancel,
+}: {
+  row: OCInboundOrderRow
+  trackingPairs: InboundTrackingPair[]
+  countryIso: string | null
+  editing: boolean
+  draft: string
+  saving: boolean
+  onStartEdit: (initial: string) => void
+  onDraftChange: (value: string) => void
+  onSave: () => void
+  onCancel: () => void
+}) {
+  const customUrl = row.custom_courier_url?.trim() || null
+
+  if (editing) {
+    return (
+      <input
+        type="url"
+        className="w-full min-w-[7rem] text-xs rounded border border-gray-300 px-1 py-0.5 bg-white"
+        value={draft}
+        onChange={(e) => onDraftChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            onSave()
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault()
+            onCancel()
+          }
+        }}
+        onBlur={() => onSave()}
+        autoFocus
+        placeholder="https://…"
+        disabled={saving}
+        title="Enter tracking URL; saved to server (not overwritten by OC sync). Escape to cancel."
+      />
+    )
+  }
+
+  if (customUrl) {
+    return (
+      <span className="inline-flex items-baseline gap-1 whitespace-nowrap">
+        <a
+          href={customUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-blue-600 hover:underline"
+          title={customUrl}
+        >
+          Custom
+        </a>
+        <button
+          type="button"
+          className="text-[10px] text-gray-400 hover:text-gray-600"
+          onClick={() => onStartEdit(customUrl)}
+          title="Edit custom tracking link"
+        >
+          edit
+        </button>
+      </span>
+    )
+  }
+
+  if (trackingPairs.length === 0) {
+    return (
+      <button
+        type="button"
+        className="text-gray-400 hover:text-blue-600 hover:underline"
+        onClick={() => onStartEdit('')}
+        title="Add custom tracking link (saved on server; not overwritten by OC sync)"
+      >
+        —
+      </button>
+    )
+  }
+
+  return (
+    <span className="inline-flex flex-wrap items-baseline gap-y-0.5">
+      {trackingPairs.map((p, i) => (
+        <span key={p.tracking} className="inline-flex items-baseline whitespace-nowrap">
+          <a
+            href={parcelsAppTrackingUrl(p.tracking, countryIso)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-600 hover:underline"
+            title={
+              countryIso
+                ? `Track on ParcelsApp (country hint: ${countryIso})`
+                : 'Track on ParcelsApp'
+            }
+          >
+            {p.carrier}
+          </a>
+          {i < trackingPairs.length - 1 ? (
+            <span className="text-gray-400" aria-hidden>
+              ,{' '}
+            </span>
+          ) : null}
+        </span>
+      ))}
+    </span>
+  )
+}
+
+function inboundOcTrackingDisplay(raw: OCInboundOrderRow['raw']): string {
+  const s = formatInboundTrackingNumbers(raw)
+  return s === '—' ? '' : s
+}
+
+function InboundTrackingNumberCell({
+  row,
+  ocTracking,
+  editing,
+  draft,
+  saving,
+  onStartEdit,
+  onDraftChange,
+  onSave,
+  onCancel,
+}: {
+  row: OCInboundOrderRow
+  ocTracking: string
+  editing: boolean
+  draft: string
+  saving: boolean
+  onStartEdit: (initial: string) => void
+  onDraftChange: (value: string) => void
+  onSave: () => void
+  onCancel: () => void
+}) {
+  const custom = row.custom_tracking_number?.trim() || null
+
+  if (editing) {
+    return (
+      <input
+        type="text"
+        className="w-full min-w-[7rem] text-xs font-mono rounded border border-gray-300 px-1 py-0.5 bg-white"
+        value={draft}
+        onChange={(e) => onDraftChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            onSave()
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault()
+            onCancel()
+          }
+        }}
+        onBlur={() => onSave()}
+        autoFocus
+        placeholder="Tracking number"
+        disabled={saving}
+        title="Enter tracking number; saved to server (not overwritten by OC sync). Escape to cancel."
+      />
+    )
+  }
+
+  if (custom) {
+    return (
+      <span className="inline-flex items-baseline gap-1 break-words">
+        <span className="font-mono">{custom}</span>
+        <button
+          type="button"
+          className="text-[10px] text-gray-400 hover:text-gray-600 shrink-0"
+          onClick={() => onStartEdit(custom)}
+          title="Edit tracking number"
+        >
+          edit
+        </button>
+      </span>
+    )
+  }
+
+  if (ocTracking) {
+    return <span className="font-mono break-words">{ocTracking}</span>
+  }
+
+  return (
+    <button
+      type="button"
+      className="text-gray-400 hover:text-blue-600 hover:underline font-mono"
+      onClick={() => onStartEdit('')}
+      title="Add tracking number (saved on server; not overwritten by OC sync)"
+    >
+      —
+    </button>
+  )
+}
+
 const ETA_OVERRIDE_STORAGE_KEY = 'evampops.inventoryStatus.inboundEtaOverrides'
 const CREATE_TIME_OVERRIDE_STORAGE_KEY = 'evampops.inventoryStatus.inboundCreateOverrides'
 
@@ -645,6 +847,10 @@ export default function InventoryStatus() {
   const [createTimeOverrides, setCreateTimeOverrides] = useState<Record<string, string>>(
     () => loadCreateTimeOverrides()
   )
+  const [courierEditKey, setCourierEditKey] = useState<string | null>(null)
+  const [courierDraft, setCourierDraft] = useState('')
+  const [trackingEditKey, setTrackingEditKey] = useState<string | null>(null)
+  const [trackingDraft, setTrackingDraft] = useState('')
   const [inboundSort, setInboundSort] = useState<{ key: InboundSortKey; dir: 'asc' | 'desc' }>(loadInboundSort)
   const [skuCountFilterMin5, setSkuCountFilterMin5] = useState<boolean>(loadSku5Filter)
   const [statusExcluded, setStatusExcluded] = useState<Set<string>>(() => loadStatusExcludedLocal())
@@ -695,6 +901,82 @@ export default function InventoryStatus() {
     onSuccess: (data) => {
       qc.setQueryData(['inventory-status', 'inbound-status-filter'], data)
       lastSavedExcludedRef.current = JSON.stringify([...data.excluded].sort())
+    },
+  })
+
+  const saveCustomCourierMutation = useMutation({
+    mutationFn: (args: { row: OCInboundOrderRow; url: string | null }) =>
+      inventoryStatusAPI
+        .putInboundCustomCourier({
+          oc_inbound_number: args.row.oc_inbound_number,
+          seller_inbound_number: args.row.seller_inbound_number,
+          url: args.url,
+        })
+        .then((r) => r.data),
+    onSuccess: (data) => {
+      qc.setQueryData<OCInboundOrderRow[]>(
+        ['inventory-status', 'inbound-orders', 6, 'full'],
+        (prev) =>
+          prev?.map((row) => {
+            const oc = data.oc_inbound_number?.trim()
+            const seller = data.seller_inbound_number?.trim()
+            const matchOc = oc && row.oc_inbound_number?.trim() === oc
+            const matchSeller = seller && row.seller_inbound_number?.trim() === seller
+            if (matchOc || matchSeller) {
+              return { ...row, custom_courier_url: data.custom_courier_url }
+            }
+            return row
+          }) ?? prev
+      )
+      setCourierEditKey(null)
+      setCourierDraft('')
+    },
+    onError: (err: unknown) => {
+      const msg =
+        err && typeof err === 'object' && 'response' in err
+          ? String((err as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? 'Save failed')
+          : err instanceof Error
+            ? err.message
+            : 'Save failed'
+      setError(msg)
+    },
+  })
+
+  const saveCustomTrackingMutation = useMutation({
+    mutationFn: (args: { row: OCInboundOrderRow; tracking_number: string | null }) =>
+      inventoryStatusAPI
+        .putInboundCustomTracking({
+          oc_inbound_number: args.row.oc_inbound_number,
+          seller_inbound_number: args.row.seller_inbound_number,
+          tracking_number: args.tracking_number,
+        })
+        .then((r) => r.data),
+    onSuccess: (data) => {
+      qc.setQueryData<OCInboundOrderRow[]>(
+        ['inventory-status', 'inbound-orders', 6, 'full'],
+        (prev) =>
+          prev?.map((row) => {
+            const oc = data.oc_inbound_number?.trim()
+            const seller = data.seller_inbound_number?.trim()
+            const matchOc = oc && row.oc_inbound_number?.trim() === oc
+            const matchSeller = seller && row.seller_inbound_number?.trim() === seller
+            if (matchOc || matchSeller) {
+              return { ...row, custom_tracking_number: data.custom_tracking_number }
+            }
+            return row
+          }) ?? prev
+      )
+      setTrackingEditKey(null)
+      setTrackingDraft('')
+    },
+    onError: (err: unknown) => {
+      const msg =
+        err && typeof err === 'object' && 'response' in err
+          ? String((err as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? 'Save failed')
+          : err instanceof Error
+            ? err.message
+            : 'Save failed'
+      setError(msg)
     },
   })
 
@@ -1074,6 +1356,46 @@ export default function InventoryStatus() {
     })
   }
 
+  const startCourierEdit = (rowKey: string, initial: string) => {
+    setCourierEditKey(rowKey)
+    setCourierDraft(initial)
+  }
+
+  const cancelCourierEdit = () => {
+    setCourierEditKey(null)
+    setCourierDraft('')
+  }
+
+  const saveCourierEdit = (row: OCInboundOrderRow, rowKey: string, initial: string) => {
+    if (courierEditKey !== rowKey) return
+    const trimmed = courierDraft.trim()
+    if (trimmed === initial.trim()) {
+      cancelCourierEdit()
+      return
+    }
+    saveCustomCourierMutation.mutate({ row, url: trimmed || null })
+  }
+
+  const startTrackingEdit = (rowKey: string, initial: string) => {
+    setTrackingEditKey(rowKey)
+    setTrackingDraft(initial)
+  }
+
+  const cancelTrackingEdit = () => {
+    setTrackingEditKey(null)
+    setTrackingDraft('')
+  }
+
+  const saveTrackingEdit = (row: OCInboundOrderRow, rowKey: string, initial: string) => {
+    if (trackingEditKey !== rowKey) return
+    const trimmed = trackingDraft.trim()
+    if (trimmed === initial.trim()) {
+      cancelTrackingEdit()
+      return
+    }
+    saveCustomTrackingMutation.mutate({ row, tracking_number: trimmed || null })
+  }
+
   return (
     <div className="px-4 py-6 sm:px-0">
       <h1 className="text-3xl font-bold text-gray-900 mb-2">Inventory status</h1>
@@ -1328,12 +1650,15 @@ export default function InventoryStatus() {
           same cache as above (last ~6 months by date). Create / putaway / arrived are parsed from that cache on the
           server. The <span className="font-mono text-xs">CREATE TIME</span> column is the first-seen sync timestamp
           in EvampOps; you can edit it (same date input style as ETA), and edited values stay local (not overwritten
-          by later syncs). <strong>Tracking #</strong> comes from OC <span className="font-mono text-xs">trackingList</span>.
+          by later syncs). <strong>Tracking #</strong> comes from OC <span className="font-mono text-xs">trackingList</span>
+          when available; click <strong>—</strong> to add your own (saved on the server, not overwritten by OC sync).
           <strong> ETA</strong> (after SKU list) defaults to <strong>effective</strong> create date (first-seen or your
           edited CREATE TIME, when shown) + 3 months; edit ETA to override—overrides are saved in this browser (green
           background). When you have not overridden ETA, it recalculates if create or server dates change.{' '}
-          <strong>Courier</strong> links open <span className="font-mono text-xs">parcelsapp.com</span> with the tracking
-          number (country hint from region / warehouse when available). <strong>Order time (d)</strong> is whole days
+          <strong>Courier</strong> uses OC carrier links when available; click <strong>—</strong> to add a custom
+          tracking URL (saved on the server, not overwritten by OC sync)—shown as <strong>Custom</strong>. Otherwise
+          links open <span className="font-mono text-xs">parcelsapp.com</span> with the tracking number (country hint
+          from region / warehouse when available). <strong>Order time (d)</strong> is whole days
           from effective create to <strong>arrived</strong> when the API includes an arrival time; otherwise &mdash;.{' '}
           <strong>ETA Δ (d)</strong> is whole days from effective ETA to arrived (arrived &minus; ETA: negative if
           arrived sooner, positive if later). Run{' '}
@@ -1553,6 +1878,7 @@ export default function InventoryStatus() {
                   const etaInputValue = etaOverride ?? defaultEtaYmd
                   const etaIsEdited = etaOverride !== undefined
                   const trackingPairs = getInboundTrackingPairs(row.raw)
+                  const ocTracking = inboundOcTrackingDisplay(row.raw)
                   const countryIso = inferInboundCountryIso(row.region, row.warehouse_code)
                   const ocInboundNo = row.oc_inbound_number?.trim()
                   const ocDetailHref = ocInboundNo ? ocInboundDetailUrl(ocInboundNo) : null
@@ -1623,40 +1949,43 @@ export default function InventoryStatus() {
                       />
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-800 align-top max-w-[9rem]">
-                      {trackingPairs.length === 0 ? (
-                        '—'
-                      ) : (
-                        <span className="inline-flex flex-wrap items-baseline gap-y-0.5">
-                          {trackingPairs.map((p, i) => (
-                            <span
-                              key={p.tracking}
-                              className="inline-flex items-baseline whitespace-nowrap"
-                            >
-                              <a
-                                href={parcelsAppTrackingUrl(p.tracking, countryIso)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-blue-600 hover:underline"
-                                title={
-                                  countryIso
-                                    ? `Track on ParcelsApp (country hint: ${countryIso})`
-                                    : 'Track on ParcelsApp'
-                                }
-                              >
-                                {p.carrier}
-                              </a>
-                              {i < trackingPairs.length - 1 ? (
-                                <span className="text-gray-400" aria-hidden>
-                                  ,{' '}
-                                </span>
-                              ) : null}
-                            </span>
-                          ))}
-                        </span>
-                      )}
+                      <InboundCourierCell
+                        row={row}
+                        trackingPairs={trackingPairs}
+                        countryIso={countryIso}
+                        editing={courierEditKey === rowKey}
+                        draft={courierDraft}
+                        saving={saveCustomCourierMutation.isPending}
+                        onStartEdit={(initial) => startCourierEdit(rowKey, initial)}
+                        onDraftChange={setCourierDraft}
+                        onSave={() =>
+                          saveCourierEdit(
+                            row,
+                            rowKey,
+                            row.custom_courier_url?.trim() ?? ''
+                          )
+                        }
+                        onCancel={cancelCourierEdit}
+                      />
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-800 align-top max-w-[11rem] break-words">
-                      {formatInboundTrackingNumbers(row.raw)}
+                      <InboundTrackingNumberCell
+                        row={row}
+                        ocTracking={ocTracking}
+                        editing={trackingEditKey === rowKey}
+                        draft={trackingDraft}
+                        saving={saveCustomTrackingMutation.isPending}
+                        onStartEdit={(initial) => startTrackingEdit(rowKey, initial)}
+                        onDraftChange={setTrackingDraft}
+                        onSave={() =>
+                          saveTrackingEdit(
+                            row,
+                            rowKey,
+                            row.custom_tracking_number?.trim() ?? ''
+                          )
+                        }
+                        onCancel={cancelTrackingEdit}
+                      />
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-800 whitespace-nowrap font-mono tabular-nums">
                       {formatOrderTimeDaysEffective(effectiveCreateYmd, arrivedDisplay)}

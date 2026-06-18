@@ -245,6 +245,10 @@ class OCInboundOrder(Base):
     # based on the first OC sync where the order status indicates those stages.
     putaway_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     arrived_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # User-entered tracking URL when OC has no courier link (e.g. China supplier link). Never overwritten by OC sync.
+    custom_courier_url: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)
+    # User-entered tracking number when OC trackingList is empty. Never overwritten by OC sync.
+    custom_tracking_number: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     raw_payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 

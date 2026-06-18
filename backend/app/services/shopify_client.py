@@ -165,6 +165,8 @@ def parse_shopify_order_to_import(order: dict) -> dict:
         "sales_record_reference": str(order.get("name") or "")[:100] or None,
         "ebay_collect_and_remit_tax": None,
         "line_items": line_items,
+        # Full raw Shopify order object (incl. line_items) for long-term recovery; see docs/DATA_RETENTION.md.
+        "raw_payload": order,
     }
 
 

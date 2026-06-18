@@ -64,6 +64,14 @@ class Order(Base):
         JSON, nullable=True,
         comment="List of {fee_type, transaction_memo, amount} from Finances API",
     )
+    raw_payload: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True,
+        comment=(
+            "Full raw marketplace order object as received (eBay Fulfillment order / Shopify order, "
+            "including line items). Kept for long-term recovery since platforms purge orders; see "
+            "docs/DATA_RETENTION.md."
+        ),
+    )
 
     # Relationship to line items
     line_items: Mapped[List["LineItem"]] = relationship(

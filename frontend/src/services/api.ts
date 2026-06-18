@@ -241,6 +241,10 @@ export interface OCInboundOrderRow {
   create_time?: string | null
   putaway_time?: string | null
   arrived_time?: string | null
+  /** User-entered tracking URL; not overwritten by OC sync. Shown as "Custom" in Courier column. */
+  custom_courier_url?: string | null
+  /** User-entered tracking number; not overwritten by OC sync. Shown in Tracking # column. */
+  custom_tracking_number?: string | null
   /** Present when list was requested with include_raw=true: full OC row JSON from sync. */
   raw?: Record<string, unknown> | null
 }
@@ -1107,6 +1111,25 @@ export const inventoryStatusAPI = {
     api.get<InboundStatusFilter>('/api/inventory-status/inbound-orders/status-filter'),
   putInboundStatusFilter: (data: { excluded: string[] }) =>
     api.put<InboundStatusFilter>('/api/inventory-status/inbound-orders/status-filter', data),
+  putInboundCustomCourier: (data: {
+    oc_inbound_number?: string | null
+    seller_inbound_number?: string | null
+    url: string | null
+  }) =>
+    api.put<{ oc_inbound_number: string | null; seller_inbound_number: string; custom_courier_url: string | null }>(
+      '/api/inventory-status/inbound-orders/custom-courier',
+      data
+    ),
+  putInboundCustomTracking: (data: {
+    oc_inbound_number?: string | null
+    seller_inbound_number?: string | null
+    tracking_number: string | null
+  }) =>
+    api.put<{
+      oc_inbound_number: string | null
+      seller_inbound_number: string
+      custom_tracking_number: string | null
+    }>('/api/inventory-status/inbound-orders/custom-tracking', data),
   /** One cached inbound by OC number; includes full raw_oc_payload and computed times. */
   lookupInboundOrder: (ocInboundNumber: string) =>
     api.get<InboundOrderLookup>('/api/inventory-status/inbound-orders/lookup', {

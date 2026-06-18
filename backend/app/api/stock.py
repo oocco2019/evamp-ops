@@ -70,6 +70,7 @@ def _parsed_order_to_orm_payload(od: dict) -> dict:
         "order_payment_status": od.get("order_payment_status"),
         "sales_record_reference": od.get("sales_record_reference"),
         "ebay_collect_and_remit_tax": od.get("ebay_collect_and_remit_tax"),
+        "raw_payload": od.get("raw_payload"),
     }
 
 
