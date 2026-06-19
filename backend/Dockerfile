@@ -10,6 +10,10 @@ RUN apt-get update && apt-get install -y \
 
 # Copy requirements and install dependencies
 COPY requirements.txt .
+# PyTorch CPU: 2.4.1+cpu has no aarch64 wheel; 2.6.0+cpu is the earliest +cpu on arm64
+RUN pip install --no-cache-dir \
+    torch==2.6.0+cpu \
+    --index-url https://download.pytorch.org/whl/cpu
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code

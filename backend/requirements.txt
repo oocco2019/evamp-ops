@@ -30,3 +30,10 @@ apscheduler==3.10.4
 
 # IANA timezone database (zoneinfo lookups like Europe/Vilnius on slim images)
 tzdata==2024.1
+
+# Local message translation (OPUS-MT de→en, lazy-loaded)
+# torch CPU is installed in Dockerfile (aarch64 has no 2.4.1+cpu wheel)
+langdetect==1.0.9
+sentencepiece==0.2.0
+sacremoses==0.1.1
+transformers==4.44.2

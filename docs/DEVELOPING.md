@@ -39,7 +39,7 @@ Docker Compose passes `DATABASE_URL` and `ENCRYPTION_KEY` into the backend conta
 
 1. **Settings > API Credentials** – add the API key for your provider (Anthropic or OpenAI). The app expects key name `api_key`; the UI sets this when you pick a provider.
 2. **Settings > AI Models** – add a model and set it as default.
-3. **Customer Service** – open a thread and use “Draft reply”.
+3. **Customer Service** – open a thread and use “Draft reply” or **DE** (AI-composed German reply).
 
 The backend image must have `anthropic>=0.25.0` (and the rest of `backend/requirements.txt`). If you had an older image, rebuild so the container gets the right SDK:
 
@@ -47,6 +47,12 @@ The backend image must have `anthropic>=0.25.0` (and the rest of `backend/requir
 make build
 make up
 ```
+
+## Message translation (German)
+
+Inbound German messages get English subtitles via local OPUS-MT (not LLM). Sync and send paths translate automatically; **Translate Thread** backfills a single thread. For historical messages already in the DB, run the one-off backfill once — see [MESSAGE_TRANSLATION.md](MESSAGE_TRANSLATION.md).
+
+After adding translation deps, rebuild the backend image (`docker compose build backend`); PyTorch is pinned in the Dockerfile for arm64 compatibility.
 
 ## Why not run the backend with `./venv/bin/uvicorn` on the host?
 
@@ -84,6 +90,7 @@ Some features have **behavior docs** and **tests** that lock in how they work. B
 | Area | Doc | Tests |
 |------|-----|--------|
 | Message attachments (thread API, media URLs, blobs) | [MESSAGE_ATTACHMENTS.md](MESSAGE_ATTACHMENTS.md) | — |
+| Message translation (local de→en, backfill, DE compose) | [MESSAGE_TRANSLATION.md](MESSAGE_TRANSLATION.md) | `backend/tests/test_local_translation.py` |
 | Voice instructions (AI instructions textarea while recording) | [VOICE_INSTRUCTIONS.md](VOICE_INSTRUCTIONS.md) | `frontend/src/utils/voiceInstructionsDisplay.test.ts` |
 
 **Rule:** When editing code covered by a behavior doc, read the doc first. Do not re-introduce pitfalls that the doc warns against. After your change, run `npm run test` (in `frontend/`) so the voice display test still passes; add tests for other areas when you touch them.
@@ -97,3 +104,4 @@ Some features have **behavior docs** and **tests** that lock in how they work. B
 | “Field required” for DATABASE_URL / ENCRYPTION_KEY | Backend is not running in Docker with the project’s `.env`. Use `make up` or fix local `.env` and ensure the running process loads it. |
 | “AsyncAnthropic object has no attribute 'messages'” | Backend image was built with an old `anthropic` version. Run `make build` then `make up` so the backend image includes `anthropic>=0.25.0`. |
 | Dockerfile build fails on `chmod +x /app/start.sh` | Use the current Dockerfile (chmod is done as root before switching to `appuser`). Pull latest and rebuild. |
+| `No matching distribution found for torch==2.4.1+cpu` | Fixed in current Dockerfile (uses `2.6.0+cpu` on arm64). Rebuild backend image. |

@@ -114,6 +114,17 @@ class DraftRequest(BaseModel):
     procedure: Optional[str] = Field(None, description="Procedure name to apply (e.g., 'proof_of_fault')")
 
 
+class DraftGermanRequest(BaseModel):
+    """Compose reply in German using the same AI stack as draft."""
+    seed_text: Optional[str] = Field(
+        None,
+        max_length=8000,
+        description="Current English draft to adapt into natural German; optional.",
+    )
+    extra_instructions: Optional[str] = Field(None, max_length=2000)
+    procedure: Optional[str] = Field(None, description="Procedure name to apply")
+
+
 class DraftResponse(BaseModel):
     draft: str
 
@@ -589,6 +600,119 @@ PROCEDURE TO FOLLOW ({procedure.display_name}):
     return DraftResponse(draft=draft)
 
 
+@router.post("/threads/{thread_id}/draft-german", response_model=DraftResponse)
+async def draft_reply_german(
+    thread_id: str,
+    body: DraftGermanRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a German reply using the same AI model/instructions as draft (replaces English draft)."""
+    ai = AIService(db)
+    result = await db.execute(
+        select(MessageThread)
+        .where(MessageThread.thread_id == thread_id)
+        .options(selectinload(MessageThread.messages))
+    )
+    thread = result.scalar_one_or_none()
+    if not thread:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    msgs = sorted(thread.messages, key=lambda m: m.ebay_created_at)
+    thread_history = [
+        {"role": m.sender_type, "content": (m.subject or "") + "\n" + (m.content or "")}
+        for m in msgs
+    ]
+
+    global_result = await db.execute(select(AIInstruction).where(AIInstruction.type == "global"))
+    global_instructions = " ".join(i.instructions for i in global_result.scalars().all() if i.instructions)
+    sku_instructions = ""
+    if thread.sku:
+        sku_result = await db.execute(
+            select(AIInstruction).where(
+                AIInstruction.type == "sku",
+                AIInstruction.sku_code == thread.sku,
+            )
+        )
+        sku_row = sku_result.scalar_one_or_none()
+        if sku_row and sku_row.instructions:
+            sku_instructions = sku_row.instructions
+
+    style_profile_text = ""
+    style_result = await db.execute(
+        select(StyleProfile)
+        .where(StyleProfile.is_approved == True)
+        .order_by(StyleProfile.created_at.desc())
+        .limit(1)
+    )
+    style_profile = style_result.scalar_one_or_none()
+    if style_profile and style_profile.style_summary:
+        style_profile_text = f"""
+COMMUNICATION STYLE (mimic this exactly):
+{style_profile.style_summary}
+
+Greeting style: {style_profile.greeting_patterns or 'Use appropriate greeting'}
+Closing style: {style_profile.closing_patterns or 'Use appropriate sign-off'}
+Tone: {style_profile.tone_description or 'Professional and friendly'}
+"""
+
+    procedure_text = ""
+    if body.procedure:
+        proc_result = await db.execute(select(Procedure).where(Procedure.name == body.procedure))
+        procedure = proc_result.scalar_one_or_none()
+        if procedure:
+            procedure_text = f"""
+PROCEDURE TO FOLLOW ({procedure.display_name}):
+{procedure.steps}
+"""
+
+    seed = (body.seed_text or "").strip()
+    if seed:
+        prompt = (
+            "Write the customer reply entirely in German (Deutsch). "
+            "Adapt the following draft into natural, polite German — output German only, no English:\n\n"
+            f"{seed}"
+        )
+    else:
+        prompt = (
+            "Draft a reply to this customer entirely in German (Deutsch). "
+            "The customer writes in German. Output German only, no English."
+        )
+
+    if style_profile_text:
+        prompt += f"\n\n{style_profile_text}"
+    if procedure_text:
+        prompt += f"\n\n{procedure_text}"
+    if body.extra_instructions:
+        prompt += f"\n\nAdditional instructions: {body.extra_instructions}"
+    if not style_profile_text:
+        prompt += "\n\nBe professional, helpful, and concise."
+
+    context = {
+        "thread_history": thread_history,
+        "global_instructions": global_instructions or "",
+        "sku_instructions": sku_instructions,
+    }
+    try:
+        draft = await ai.generate_message(prompt, context)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except httpx.HTTPStatusError as e:
+        logger.warning("AI provider error: %s %s", e.response.status_code, e.response.text[:200])
+        detail = "AI provider error"
+        try:
+            body_json = e.response.json()
+            detail = body_json.get("error", {}).get("message") or body_json.get("message") or str(e)
+        except Exception:
+            detail = e.response.text[:200] if e.response.text else str(e)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"AI provider error: {detail}")
+    except Exception as e:
+        logger.exception("German draft generation failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate German draft: {e!s}",
+        )
+    return DraftResponse(draft=draft)
+
+
 @router.post("/threads/{thread_id}/send", response_model=SendResponse)
 async def send_reply(
     thread_id: str,
@@ -722,6 +846,10 @@ async def send_reply(
     await db.commit()
     if sent_media:
         await _store_message_media_blobs(db, ebay_message_id, sent_media)
+    if content and content.strip():
+        from app.services.local_translation import schedule_translate_message_ids
+
+        schedule_translate_message_ids([ebay_message_id])
     return SendResponse(success=True, message=f"Message sent. ID: {ebay_message_id}")
 
 
@@ -983,13 +1111,11 @@ async def translate_thread_messages(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Translate all non-English messages in a thread and persist to DB.
+    Translate all German messages in a thread and persist to DB (local OPUS-MT).
     Only translates messages that don't already have translated_content.
-    Returns the detected language and count of newly translated messages.
     """
-    from app.services.ai_service import AIService
-    ai = AIService(db)
-    
+    from app.services.local_translation import get_local_translation_service
+
     result = await db.execute(
         select(MessageThread)
         .where(MessageThread.thread_id == thread_id)
@@ -998,44 +1124,32 @@ async def translate_thread_messages(
     thread = result.scalar_one_or_none()
     if not thread:
         raise HTTPException(status_code=404, detail="Thread not found")
-    
+
     detected_lang = "en"
     translated_count = 0
-    
+    svc = get_local_translation_service()
+
     try:
         for msg in thread.messages:
-            # Skip very short messages
-            if len(msg.content.strip()) < 5:
-                continue
-            
-            # Skip if already translated
             if msg.translated_content:
-                # Use existing detected language if available
                 if msg.detected_language and msg.detected_language != "en":
                     detected_lang = msg.detected_language
                 continue
-            
-            # Detect language
-            lang = await ai.detect_language(msg.content[:500])
-            msg.detected_language = lang
-            
-            if lang != "en":
-                detected_lang = lang
-                # Translate to English
-                result = await ai.translate(msg.content, lang, "en")
-                msg.translated_content = result.get("translated", "")
+            if await svc.translate_message_row(msg):
                 translated_count += 1
-        
+                if msg.detected_language and msg.detected_language != "en":
+                    detected_lang = msg.detected_language
+
         await db.commit()
-        
+
     except Exception as e:
         await db.rollback()
         logger.exception("Thread translation failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Translation failed: {e!s}"
+            detail=f"Translation failed: {e!s}",
         )
-    
+
     return TranslateThreadResponse(
         translated_count=translated_count,
         detected_language=detected_lang,
@@ -1974,6 +2088,9 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
         ebay_threads_synced,
         ebay_messages_synced,
     )
+    from app.services.local_translation import schedule_translation_backfill
+
+    schedule_translation_backfill()
     if interrupted:
         msg = f"Stopped after safe checkpoint: {threads_synced} thread(s), {messages_synced} message(s) (full backfill starting)."
     elif threads_synced or messages_synced:

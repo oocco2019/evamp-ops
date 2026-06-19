@@ -763,6 +763,14 @@ export const messagesAPI = {
     api.post<{ draft: string }>(`/api/messages/threads/${threadId}/draft`, {
       extra_instructions: extra_instructions || undefined,
     }),
+  draftGerman: (
+    threadId: string,
+    data?: { seed_text?: string; extra_instructions?: string }
+  ) =>
+    api.post<{ draft: string }>(`/api/messages/threads/${threadId}/draft-german`, {
+      seed_text: data?.seed_text || undefined,
+      extra_instructions: data?.extra_instructions || undefined,
+    }),
   sendReply: (threadId: string, content: string, draftContent?: string, messageMedia?: MessageMediaItem[]) =>
     api.post<{ success: boolean; message: string }>(
       `/api/messages/threads/${threadId}/send`,

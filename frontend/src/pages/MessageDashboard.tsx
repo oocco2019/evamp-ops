@@ -105,8 +105,7 @@ export default function MessageDashboard() {
   const [selectedEmailTemplate, setSelectedEmailTemplate] = useState<number | null>(null)
   const [showTranslation, setShowTranslation] = useState(false)
   const [translating, setTranslating] = useState(false)
-  const [replyTranslation, setReplyTranslation] = useState<{ translated: string; backTranslated: string } | null>(null)
-  const [translatingReply, setTranslatingReply] = useState(false)
+  const [composingDe, setComposingDe] = useState(false)
   const [detectedLang, setDetectedLang] = useState<string>('en')
   /** Count of in-flight client sync requests; full backfill can start while quick sync runs (backend preempt). */
   const syncInflightRef = useRef(0)
@@ -279,7 +278,6 @@ export default function MessageDashboard() {
         setError(null)
         setDraft('')
         setReplyContent('')
-        setReplyTranslation(null)
       }
       try {
         const res = await messagesAPI.getThread(threadId)
@@ -507,10 +505,12 @@ export default function MessageDashboard() {
     setLoading(true)
     try {
       await messagesAPI.sendReply(selectedThread.thread_id, content, _draft ? _draft : undefined, mediaToSend)
-      loadThread(selectedThread.thread_id)
+      const threadId = selectedThread.thread_id
+      loadThread(threadId)
       loadThreads()
       loadFlaggedCount()
-      messagesAPI.refreshThread(selectedThread.thread_id).catch(() => {})
+      messagesAPI.refreshThread(threadId).catch(() => {})
+      window.setTimeout(() => loadThread(threadId, { silent: true }), 4000)
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Send failed')
       setReplyContent(content)
@@ -664,6 +664,25 @@ export default function MessageDashboard() {
     window.open(mailto)
   }
 
+  const handleComposeGerman = async () => {
+    if (!selectedThread || composingDe) return
+    setComposingDe(true)
+    setError(null)
+    try {
+      const res = await messagesAPI.draftGerman(selectedThread.thread_id, {
+        seed_text: replyContent.trim() || undefined,
+        extra_instructions: aiPromptInstructions.trim() || undefined,
+      })
+      setReplyContent(res.data.draft)
+      setDraft('')
+    } catch (e: unknown) {
+      const ax = e as { response?: { data?: { detail?: string } } }
+      setError(ax.response?.data?.detail || (e instanceof Error ? e.message : 'German compose failed'))
+    } finally {
+      setComposingDe(false)
+    }
+  }
+
   const handleTranslateThread = async () => {
     if (!selectedThread || translating) return
     setTranslating(true)
@@ -683,29 +702,6 @@ export default function MessageDashboard() {
     } finally {
       setTranslating(false)
     }
-  }
-
-  const handleTranslateReply = async () => {
-    if (!replyContent.trim() || translatingReply || detectedLang === 'en') return
-    setTranslatingReply(true)
-    setError(null)
-    try {
-      const res = await messagesAPI.translate(replyContent, 'en', detectedLang)
-      setReplyTranslation({
-        translated: res.data.translated,
-        backTranslated: res.data.back_translated,
-      })
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Translation failed')
-    } finally {
-      setTranslatingReply(false)
-    }
-  }
-
-  const handleSendTranslated = async () => {
-    if (!replyTranslation || !selectedThread) return
-    setReplyContent(replyTranslation.translated)
-    setReplyTranslation(null)
   }
 
   return (
@@ -1088,54 +1084,8 @@ export default function MessageDashboard() {
                     className="w-full resize-none rounded border border-gray-300 px-3 py-2 text-sm focus:ring-0 focus:outline-none"
                   />
                 </div>
-                {/* Translation for sending */}
-                {detectedLang !== 'en' && replyContent.trim() && (
-                  <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-medium text-purple-700">
-                        Translate reply to {detectedLang.toUpperCase()} before sending
-                      </span>
-                      <button
-                        type="button"
-                        onClick={handleTranslateReply}
-                        disabled={translatingReply}
-                        className="px-2 py-1 text-xs bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50"
-                      >
-                        {translatingReply ? 'Translating...' : 'Translate for Sending'}
-                      </button>
-                    </div>
-                    {replyTranslation && (
-                      <div className="space-y-2 text-sm">
-                        <div>
-                          <p className="text-xs text-purple-600 font-medium">Translated ({detectedLang.toUpperCase()}):</p>
-                          <p className="text-gray-800 bg-white p-2 rounded border">{replyTranslation.translated}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-purple-600 font-medium">Back-translation (for verification):</p>
-                          <p className="text-gray-600 bg-white p-2 rounded border">{replyTranslation.backTranslated}</p>
-                        </div>
-                        <div className="flex gap-2">
-                          <button
-                            type="button"
-                            onClick={handleSendTranslated}
-                            className="px-3 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700"
-                          >
-                            Use translated version
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setReplyTranslation(null)}
-                            className="px-3 py-1 text-xs bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
 
-                {/* Row above reply box: Attach + Send (same position as old Generate draft row). */}
+                {/* Row above reply box: Attach + DE + Send */}
                 <div className="flex items-center gap-2 mb-2">
                   <button
                     type="button"
@@ -1153,6 +1103,16 @@ export default function MessageDashboard() {
                     ) : (
                       <ImageAttachmentIcon className="w-5 h-5" />
                     )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleComposeGerman}
+                    disabled={composingDe || loading}
+                    className="h-10 px-3 flex-shrink-0 rounded-full bg-gray-100 text-gray-800 hover:bg-gray-200 disabled:opacity-50 flex items-center justify-center text-xs font-semibold tracking-wide"
+                    title="Compose reply in German using AI (replaces draft text)"
+                    aria-label="Compose in German"
+                  >
+                    {composingDe ? '…' : 'DE'}
                   </button>
                   <button
                     type="button"
