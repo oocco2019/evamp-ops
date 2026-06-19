@@ -123,6 +123,7 @@ def parse_shopify_order_to_import(order: dict) -> dict:
     created = order.get("created_at")
     last_mod = _parse_ts_to_naive_utc(order.get("updated_at")) or _parse_ts_to_naive_utc(created) or datetime.utcnow()
     ccy = (order.get("currency") or "GBP").strip().upper()[:3] or "GBP"
+    country = _country(order)
 
     price_total = _dec(order.get("current_total_price")) or _dec(order.get("total_price"))
     subtotal = _dec(order.get("current_subtotal_price")) or _dec(order.get("subtotal_price"))
@@ -130,9 +131,11 @@ def parse_shopify_order_to_import(order: dict) -> dict:
     ship = _dec(order.get("total_shipping") or (order.get("total_shipping_price_set") or {}).get("shop_money", {}).get("amount"))
     disc = _dec(order.get("current_total_discounts")) or _dec(order.get("total_discounts"))
 
-    # "Seller revenue" proxy (same field names as eBay; profit code converts to GBP):
-    # Prefer order total less tax; falls back to subtotal + shipping.
-    if price_total is not None and tax_total is not None:
+    # "Seller revenue" proxy (same field names as eBay; profit code converts to GBP).
+    # GB profit subtracts VAT downstream, so keep Shopify GB totals VAT-inclusive here.
+    if country == "GB" and price_total is not None:
+        payout = price_total
+    elif price_total is not None and tax_total is not None:
         payout = price_total - tax_total
     elif subtotal is not None and ship is not None:
         payout = subtotal + ship - (disc or Decimal(0))
@@ -146,7 +149,7 @@ def parse_shopify_order_to_import(order: dict) -> dict:
     return {
         "ebay_order_id": oid,
         "date": _date_from_shopify(created),
-        "country": _country(order),
+        "country": country,
         "last_modified": last_mod,
         "cancel_status": _cancel_status(order),
         "buyer_username": str(buyer)[:255] if buyer else None,

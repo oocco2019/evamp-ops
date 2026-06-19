@@ -140,7 +140,7 @@ All **“profit”** figures in **by-SKU**, **by-country**, and the **Order deta
 
 - **eBay:** Initial import can use **Fulfillment**-style data. A separate **backfill** endpoint can refresh **payout** (and ad-fee metadata) from **eBay Finances** so “money in” is closer to **net to seller** after platform fees, where the API allows.
 
-- **Shopify:** At import, payout is a **defined proxy** (e.g. order total minus tax, with fallbacks) so the same **td_gbp** pipeline runs. **Shopify** and **eBay** orders are distinguished by **sales channel** in the database.
+- **Shopify:** At import, payout is a **defined proxy** so the same **td_gbp** pipeline runs. For **GB** Shopify orders it stays VAT-inclusive because the shared UK profit path subtracts VAT downstream; for non-GB orders it prefers order total minus tax, with fallbacks. **Shopify** and **eBay** orders are distinguished by **sales channel** in the database.
 
 ### 2.10 Historical fixes the logic was designed to handle (transparency)
 
