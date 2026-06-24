@@ -20,6 +20,7 @@ export function buildDailyStockLevelsFromHistory(
   rawPoints: Array<{ recorded_at: string; available: number; in_transit: number }>,
   fromIso: string,
   toIso: string,
+  opening: { available?: number; in_transit?: number } = {},
 ): Array<{ period: string; available: number; in_transit: number }> {
   const start = parseISODateLocal(fromIso)
   const end = parseISODateLocal(toIso)
@@ -31,10 +32,12 @@ export function buildDailyStockLevelsFromHistory(
 
   const out: Array<{ period: string; available: number; in_transit: number }> = []
   const cur = new Date(start.getTime())
+  const openingAvailable = opening.available ?? 0
+  const openingInTransit = opening.in_transit ?? 0
   while (cur <= end) {
     const dayEnd = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), 23, 59, 59, 999).getTime()
-    let lastA = 0
-    let lastT = 0
+    let lastA = openingAvailable
+    let lastT = openingInTransit
     for (let i = 0; i < sorted.length; i++) {
       const t = new Date(sorted[i].recorded_at).getTime()
       if (t <= dayEnd) {

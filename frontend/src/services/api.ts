@@ -169,6 +169,8 @@ export interface InventoryHistorySeries {
   points: InventoryHistoryPoint[]
   from_date: string
   to_date: string
+  opening_available: number
+  opening_in_transit: number
   mfskuid_count: number
   scope: string
   note?: string | null
