@@ -872,6 +872,13 @@ async def _fetch_snapshot_rows(
                 "timestamp": int(time.time() * 1000),
             }
             resp = await _call_oc(db, conn, "POST", "/openapi/3pp/inventory/v2/snapshot", body_obj=body)
+            if not _oc_vendor_inventory_ok(resp):
+                msg = resp.get("message") or "OC stock snapshot request failed"
+                errs = resp.get("errors")
+                if isinstance(errs, list) and errs:
+                    first = errs[0] if isinstance(errs[0], dict) else {}
+                    msg = str(first.get("message") or msg)
+                raise OCAPIError(f"StockSnapshot: {msg}")
             data = resp.get("data") if isinstance(resp, dict) else {}
             rows = []
             if isinstance(data, dict):
