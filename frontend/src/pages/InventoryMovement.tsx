@@ -11,7 +11,7 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from 'recharts'
-import { inventoryStatusAPI } from '../services/api'
+import { inventoryStatusAPI, type StockForecastRow } from '../services/api'
 import { buildDailyStockLevelsFromHistory } from '../utils/inventoryHistoryFormat'
 
 const formatLocalDate = (d: Date): string => {
@@ -45,6 +45,89 @@ function daysCoverTextClass(doc: number | null | undefined): string {
   if (doc <= 30) return 'text-amber-800 font-medium'
   return 'text-emerald-800 font-medium'
 }
+
+function reorderUrgencyClass(daysUntil: number | null | undefined): string {
+  if (daysUntil == null || Number.isNaN(daysUntil)) return 'text-slate-700'
+  if (daysUntil <= 0) return 'text-red-700 font-medium'
+  if (daysUntil <= 30) return 'text-amber-800 font-medium'
+  return 'text-slate-800'
+}
+
+const FORECAST_SORT_STORAGE_KEY = 'inventoryMovement.forecastSort'
+
+type ForecastSortKey =
+  | 'sku_name'
+  | 'current_available'
+  | 'ordered_total'
+  | 'burn_rate_per_day'
+  | 'ordered_days_of_cover'
+  | 'days_until_reorder'
+
+function loadForecastSort(): { key: ForecastSortKey; dir: 'asc' | 'desc' } {
+  try {
+    const raw = localStorage.getItem(FORECAST_SORT_STORAGE_KEY)
+    if (raw) {
+      const parsed = JSON.parse(raw) as { key?: string; dir?: string }
+      const key = parsed?.key
+      const dir = parsed?.dir
+      if (
+        (key === 'sku_name' ||
+          key === 'current_available' ||
+          key === 'ordered_total' ||
+          key === 'burn_rate_per_day' ||
+          key === 'ordered_days_of_cover' ||
+          key === 'days_until_reorder') &&
+        (dir === 'asc' || dir === 'desc')
+      ) {
+        return { key, dir }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { key: 'ordered_days_of_cover', dir: 'asc' }
+}
+
+function compareNullableNumber(
+  a: number | null | undefined,
+  b: number | null | undefined,
+  mult: number,
+): number {
+  const na = a == null || Number.isNaN(a)
+  const nb = b == null || Number.isNaN(b)
+  if (na && nb) return 0
+  if (na) return 1
+  if (nb) return -1
+  return mult * (a - b)
+}
+
+function sortForecastRows(
+  rows: StockForecastRow[],
+  sort: { key: ForecastSortKey; dir: 'asc' | 'desc' },
+): StockForecastRow[] {
+  const mult = sort.dir === 'asc' ? 1 : -1
+  return [...rows].sort((a, b) => {
+    switch (sort.key) {
+      case 'sku_name':
+        return mult * (a.sku_name || a.seller_skuid).localeCompare(b.sku_name || b.seller_skuid)
+      case 'current_available':
+        return compareNullableNumber(a.current_available, b.current_available, mult)
+      case 'ordered_total':
+        return compareNullableNumber(a.ordered_total, b.ordered_total, mult)
+      case 'burn_rate_per_day':
+        return compareNullableNumber(a.burn_rate_per_day, b.burn_rate_per_day, mult)
+      case 'ordered_days_of_cover':
+        return compareNullableNumber(a.ordered_days_of_cover, b.ordered_days_of_cover, mult)
+      case 'days_until_reorder':
+        return compareNullableNumber(a.days_until_reorder, b.days_until_reorder, mult)
+      default:
+        return 0
+    }
+  })
+}
+
+const forecastSortHeaderClass =
+  'font-medium cursor-pointer hover:text-gray-900 select-none'
 
 /** Inclusive last N calendar days (same as Sales Analytics). */
 const lastNDaysFrom = (n: number) => offsetDaysFromToday(n - 1)
@@ -100,6 +183,7 @@ export default function InventoryMovement() {
   const [to, setTo] = useState(() => todayIso())
   /** `all` = every mapped seller SKU (aggregated). Otherwise OC seller SKU id. */
   const [skuSelect, setSkuSelect] = useState<string>('all')
+  const [forecastSort, setForecastSort] = useState(loadForecastSort)
 
   const applyPeriodPreset = (preset: PeriodPreset) => {
     const today = todayIso()
@@ -164,9 +248,42 @@ export default function InventoryMovement() {
   })
 
   const stockForecastQuery = useQuery({
-    queryKey: ['stock-forecast'],
-    queryFn: async () => (await inventoryStatusAPI.getStockForecast()).data,
+    queryKey: ['stock-forecast', from, to],
+    queryFn: async () => (await inventoryStatusAPI.getStockForecast({ from, to })).data,
   })
+
+  const handleForecastSort = (key: ForecastSortKey) => {
+    setForecastSort((prev) => {
+      const defaultDesc = key === 'burn_rate_per_day' || key === 'current_available' || key === 'ordered_total'
+      const next = {
+        key,
+        dir:
+          prev.key === key
+            ? prev.dir === 'asc'
+              ? 'desc'
+              : 'asc'
+            : key === 'sku_name'
+              ? 'asc'
+              : key === 'days_until_reorder'
+                ? 'asc'
+                : defaultDesc
+                ? 'desc'
+                : 'asc',
+      } as { key: ForecastSortKey; dir: 'asc' | 'desc' }
+      try {
+        localStorage.setItem(FORECAST_SORT_STORAGE_KEY, JSON.stringify(next))
+      } catch {
+        // ignore
+      }
+      return next
+    })
+  }
+
+  const sortedForecasts = useMemo(() => {
+    const rows = stockForecastQuery.data?.forecasts
+    if (!rows?.length) return []
+    return sortForecastRows(rows, forecastSort)
+  }, [stockForecastQuery.data?.forecasts, forecastSort])
 
   type SyncStockMovementMode = { mode: 'incremental' } | { mode: 'range' }
 
@@ -405,48 +522,96 @@ export default function InventoryMovement() {
         <div className="mb-6 rounded-lg border border-slate-200 bg-white overflow-hidden shadow-sm">
           <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
             <h2 className="text-lg font-semibold text-slate-800">Stock run-out forecast</h2>
+            {stockForecastQuery.data.note && (
+              <p className="text-xs text-slate-600 mt-1">{stockForecastQuery.data.note}</p>
+            )}
           </div>
           <div className="overflow-x-auto max-h-[28rem] overflow-y-auto">
             <table className="min-w-full text-sm text-left">
-              <caption className="sr-only">Stock run-out by mapping, shortest cover first</caption>
+              <caption className="sr-only">Stock run-out by mapping; click column headers to sort</caption>
               <thead>
                 <tr className="text-gray-600 border-b border-gray-200 bg-white">
-                  <th className="py-2 pl-4 pr-3 font-medium">SKU</th>
-                  <th className="py-2 pr-3 font-medium">Region</th>
-                  <th className="py-2 pr-3 font-medium text-right">Available</th>
-                  <th className="py-2 pr-3 font-medium text-right">Burn rate/day</th>
-                  <th className="py-2 pr-3 font-medium text-right">Days of cover</th>
-                  <th className="py-2 pr-3 font-medium">Est. run-out</th>
-                  <th className="py-2 pr-4 font-medium">Confidence</th>
+                  <th
+                    className={`py-2 pl-4 pr-3 text-left ${forecastSortHeaderClass}`}
+                    onClick={() => handleForecastSort('sku_name')}
+                  >
+                    SKU {forecastSort.key === 'sku_name' && (forecastSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className={`py-2 pr-3 text-right ${forecastSortHeaderClass}`}
+                    onClick={() => handleForecastSort('current_available')}
+                  >
+                    Available{' '}
+                    {forecastSort.key === 'current_available' && (forecastSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className={`py-2 pr-3 text-right ${forecastSortHeaderClass}`}
+                    onClick={() => handleForecastSort('ordered_total')}
+                  >
+                    Ordered {forecastSort.key === 'ordered_total' && (forecastSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className={`py-2 pr-3 text-right ${forecastSortHeaderClass}`}
+                    onClick={() => handleForecastSort('burn_rate_per_day')}
+                  >
+                    Burn rate/day{' '}
+                    {forecastSort.key === 'burn_rate_per_day' && (forecastSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className={`py-2 pr-3 ${forecastSortHeaderClass}`}
+                    onClick={() => handleForecastSort('ordered_days_of_cover')}
+                  >
+                    Ordered run-out{' '}
+                    {forecastSort.key === 'ordered_days_of_cover' && (forecastSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className={`py-2 pr-4 ${forecastSortHeaderClass}`}
+                    onClick={() => handleForecastSort('days_until_reorder')}
+                  >
+                    Reorder {forecastSort.key === 'days_until_reorder' && (forecastSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
                 </tr>
               </thead>
               <tbody>
-                {stockForecastQuery.data.forecasts.map((f) => (
+                {sortedForecasts.map((f, idx) => (
                   <tr
-                    key={`${f.seller_skuid}-${f.mfskuid}-${f.service_region}`}
+                    key={`${f.seller_skuid}-${f.mfskuid}-${idx}`}
                     className="border-b border-gray-50 hover:bg-slate-50/80"
                   >
                     <td className="py-2 pl-4 pr-3 font-mono text-xs">{f.sku_name || f.seller_skuid}</td>
-                    <td className="py-2 pr-3">{f.service_region}</td>
                     <td className="py-2 pr-3 text-right tabular-nums">{f.current_available}</td>
+                    <td className="py-2 pr-3 text-right tabular-nums">{f.ordered_total}</td>
                     <td className="py-2 pr-3 text-right tabular-nums">
                       {f.burn_rate_per_day != null ? f.burn_rate_per_day.toFixed(2) : '—'}
                     </td>
                     <td
-                      className={`py-2 pr-3 text-right tabular-nums ${daysCoverTextClass(f.days_of_cover)}`}
+                      className={`py-2 pr-3 ${daysCoverTextClass(f.ordered_days_of_cover)}`}
                     >
-                      {f.days_of_cover != null ? f.days_of_cover.toFixed(1) : '—'}
-                    </td>
-                    <td className="py-2 pr-3">
-                      {f.estimated_oos_date ? formatOosDayLabel(f.estimated_oos_date) : '—'}
-                    </td>
-                    <td className="py-2 pr-4 text-xs text-slate-700">
-                      {f.confidence === 'normal' ? (
-                        'normal'
+                      {f.ordered_days_of_cover != null && f.ordered_estimated_oos_date ? (
+                        <>
+                          {f.ordered_days_of_cover.toFixed(1)} days
+                          <span className="text-slate-500"> · </span>
+                          {formatOosDayLabel(f.ordered_estimated_oos_date)}
+                        </>
                       ) : (
-                        <span className="inline-block rounded-full bg-slate-200 px-2 py-0.5 font-medium text-slate-800">
-                          {f.confidence}
-                        </span>
+                        '—'
+                      )}
+                    </td>
+                    <td className={`py-2 pr-4 ${reorderUrgencyClass(f.days_until_reorder)}`}>
+                      {f.reorder_quantity != null && f.reorder_by_date ? (
+                        <>
+                          {f.days_until_reorder != null && f.days_until_reorder <= 0 ? (
+                            <>
+                              <span className="uppercase text-xs tracking-wide">Order now</span>
+                              <span className="text-slate-500"> · </span>
+                            </>
+                          ) : null}
+                          {f.reorder_quantity.toLocaleString()} units
+                          <span className="text-slate-500"> · </span>
+                          {formatOosDayLabel(f.reorder_by_date)}
+                        </>
+                      ) : (
+                        '—'
                       )}
                     </td>
                   </tr>

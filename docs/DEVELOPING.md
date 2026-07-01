@@ -91,6 +91,7 @@ Some features have **behavior docs** and **tests** that lock in how they work. B
 |------|-----|--------|
 | Message attachments (thread API, media URLs, blobs) | [MESSAGE_ATTACHMENTS.md](MESSAGE_ATTACHMENTS.md) | — |
 | Message translation (local de→en, backfill, DE compose) | [MESSAGE_TRANSLATION.md](MESSAGE_TRANSLATION.md) | `backend/tests/test_local_translation.py` |
+| Stock run-out forecast (burn rate, ordered run-out) | [STOCK_FORECAST.md](STOCK_FORECAST.md) | `backend/tests/test_stock_forecast.py` |
 | Voice instructions (AI instructions textarea while recording) | [VOICE_INSTRUCTIONS.md](VOICE_INSTRUCTIONS.md) | `frontend/src/utils/voiceInstructionsDisplay.test.ts` |
 
 **Rule:** When editing code covered by a behavior doc, read the doc first. Do not re-introduce pitfalls that the doc warns against. After your change, run `npm run test` (in `frontend/`) so the voice display test still passes; add tests for other areas when you touch them.

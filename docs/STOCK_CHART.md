@@ -15,6 +15,7 @@ This document describes how **Stock level by day** and **Stored movement lines**
 | **Daily table** under the chart | Same daily series as the chart: local calendar day, forward-filled **available**. |
 | **KPI tiles** | Current stock from **`GET /inventory-status/inventory`** (last OC snapshot pull), filtered by SKU when not All. |
 | **Stored movement lines** | Raw rows from PostgreSQL **`oc_stock_movement_line`** (same date/SKU filters as the chart queries). |
+| **Stock run-out forecast** | Per mapped SKU: burn rate from eBay sales, **Ordered** (available + in transit), projected run-out. Uses the same **From / To** filter. See [`STOCK_FORECAST.md`](./STOCK_FORECAST.md). |
 
 The chart does **not** call OrangeConnex live. It reads **only** what is already in **`oc_stock_movement_line`**.
 

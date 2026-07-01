@@ -1,7 +1,7 @@
 """Unit tests for stock run-out forecast helpers."""
 from datetime import date, datetime, time as dt_time
 
-from app.services.stock_forecast import forward_fill_daily_avl, weighted_burn_rate
+from app.services.stock_forecast import average_burn_rate, forward_fill_daily_avl, forecast_note, _cover_and_oos, _reorder_plan
 
 
 def test_forward_fill_daily_avl_resets_each_day_like_chart():
@@ -24,12 +24,40 @@ def test_forward_fill_empty_points_zero():
     assert out[d0] == 0 and out[d1] == 0
 
 
-def test_weighted_burn_rate_linear_weights():
-    """Oldest day weight 1, newest weight n."""
-    assert weighted_burn_rate([2.0, 2.0, 2.0]) == 2.0
-    # [1,2,3] -> (1*1 + 2*2 + 3*3) / (1+2+3) = 14/6
-    assert abs(weighted_burn_rate([1.0, 2.0, 3.0]) - 14.0 / 6.0) < 1e-9
+def test_average_burn_rate_simple_mean():
+    assert average_burn_rate([2.0, 2.0, 2.0]) == 2.0
+    assert average_burn_rate([1.0, 2.0, 3.0]) == 2.0
 
 
-def test_weighted_burn_rate_empty():
-    assert weighted_burn_rate([]) == 0.0
+def test_average_burn_rate_empty():
+    assert average_burn_rate([]) == 0.0
+
+
+def test_forecast_note_mentions_avl_threshold():
+    note = forecast_note(date(2026, 1, 1), date(2026, 6, 30))
+    assert "AVL >= 7" in note
+    assert "2026-01-01" in note
+
+
+def test_cover_and_oos_ordered_total():
+    doc, oos = _cover_and_oos(100, 2.0, date(2026, 6, 1))
+    assert doc == 50.0
+    assert oos == "2026-07-21"
+
+    assert _cover_and_oos(0, 2.0, date(2026, 6, 1)) == (None, None)
+    assert _cover_and_oos(10, 0.0, date(2026, 6, 1)) == (None, None)
+
+
+def test_reorder_plan_three_month_lead():
+    # Run-out 1 Dec → reorder 2 Sep; 2 units/day × 90 days = 180 units
+    qty, reorder_by, days_until = _reorder_plan("2026-12-01", 2.0, date(2026, 6, 1), lead_days=90)
+    assert qty == 180
+    assert reorder_by == "2026-09-02"
+    assert days_until == 93.0
+
+    overdue_qty, overdue_by, overdue_days = _reorder_plan(
+        "2026-08-01", 1.0, date(2026, 6, 1), lead_days=90
+    )
+    assert overdue_qty == 90
+    assert overdue_by == "2026-05-03"
+    assert overdue_days < 0

@@ -145,13 +145,17 @@ class StockForecastRowResponse(BaseModel):
     seller_skuid: str
     mfskuid: str
     sku_name: str
-    service_region: str
     current_available: int
+    current_in_transit: int
+    current_received: int
+    ordered_total: int
     burn_rate_per_day: Optional[float] = None
     in_stock_days_used: int
-    days_of_cover: Optional[float] = None
-    estimated_oos_date: Optional[str] = None
-    confidence: str
+    ordered_days_of_cover: Optional[float] = None
+    ordered_estimated_oos_date: Optional[str] = None
+    reorder_quantity: Optional[int] = None
+    reorder_by_date: Optional[str] = None
+    days_until_reorder: Optional[float] = None
     total_sales_in_window: Optional[int] = None
 
 
@@ -159,6 +163,8 @@ class StockForecastBundleResponse(BaseModel):
     forecasts: List[StockForecastRowResponse]
     generated_at: str
     note: str
+    from_date: str
+    to_date: str
 
 
 class OCSkuInventoryResponse(BaseModel):
@@ -1510,18 +1516,29 @@ async def list_inventory_history(
 
 
 @router.get("/stock-forecast", response_model=StockForecastBundleResponse)
-async def get_stock_forecast(db: AsyncSession = Depends(get_db)):
+async def get_stock_forecast(
+    db: AsyncSession = Depends(get_db),
+    from_date: Optional[date] = Query(None, alias="from"),
+    to_date: Optional[date] = Query(None, alias="to"),
+):
     """
-    Linear-weighted burn (last 90 in-stock days, AVL >= 5) vs current AVL; one row per OC SKU mapping.
+    Average eBay burn over in-stock days (AVL >= 7) in the selected date range; one row per OC SKU mapping.
+    Uses the same from/to filter as the stock chart on Inventory Movement.
     """
     cid = await _active_oc_connection_id(db)
     if not cid:
         raise HTTPException(status_code=400, detail="No active OC connection configured.")
-    raw = await build_stock_forecast_payload(db, cid)
+    eff_to = to_date or date.today()
+    eff_from = from_date or (eff_to - timedelta(days=180))
+    if eff_from > eff_to:
+        raise HTTPException(status_code=400, detail="'from' must be on or before 'to'.")
+    raw = await build_stock_forecast_payload(db, cid, eff_from, eff_to)
     return StockForecastBundleResponse(
         forecasts=[StockForecastRowResponse(**r) for r in raw["forecasts"]],
         generated_at=raw["generated_at"],
         note=raw["note"],
+        from_date=raw["from_date"],
+        to_date=raw["to_date"],
     )
 
 

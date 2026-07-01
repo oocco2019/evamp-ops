@@ -174,18 +174,22 @@ export interface InventoryHistorySeries {
   note?: string | null
 }
 
-/** GET /api/inventory-status/stock-forecast — weighted burn over last 90 in-stock days; all mapped SKUs. */
+/** GET /api/inventory-status/stock-forecast — avg burn over in-stock days in selected period. */
 export interface StockForecastRow {
   seller_skuid: string
   mfskuid: string
   sku_name: string
-  service_region: string
   current_available: number
+  current_in_transit: number
+  current_received: number
+  ordered_total: number
   burn_rate_per_day: number | null
   in_stock_days_used: number
-  days_of_cover: number | null
-  estimated_oos_date: string | null
-  confidence: string
+  ordered_days_of_cover: number | null
+  ordered_estimated_oos_date: string | null
+  reorder_quantity: number | null
+  reorder_by_date: string | null
+  days_until_reorder: number | null
   total_sales_in_window: number | null
 }
 
@@ -193,6 +197,8 @@ export interface StockForecastBundle {
   forecasts: StockForecastRow[]
   generated_at: string
   note: string
+  from_date: string
+  to_date: string
 }
 
 /** GET /api/inventory-status/debug-raw — StockSnapshot v2 + SKU query verbatim. */
@@ -1043,8 +1049,11 @@ export const inventoryStatusAPI = {
         ...(params.service_region ? { service_region: params.service_region } : {}),
       },
     }),
-  /** Linear-weighted run-out forecast for all OC mappings (no query params). */
-  getStockForecast: () => api.get<StockForecastBundle>('/api/inventory-status/stock-forecast'),
+  /** Run-out forecast for all OC mappings; uses same from/to as the page filter. */
+  getStockForecast: (params: { from: string; to: string }) =>
+    api.get<StockForecastBundle>('/api/inventory-status/stock-forecast', {
+      params: { from: params.from, to: params.to },
+    }),
   /** Stored movement lines (GET); fill with syncStockMovementFromOc first. */
   listStockMovement: (params: {
     from?: string

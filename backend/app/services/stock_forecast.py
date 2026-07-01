@@ -1,5 +1,5 @@
 """
-Stock run-out forecast: linearly weighted eBay sales over the last 90 in-stock days (AVL >= 5).
+Stock run-out forecast: average eBay sales over in-stock days (AVL >= 7) in the selected period.
 """
 from __future__ import annotations
 
@@ -10,34 +10,28 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.settings import OCStockMovementLine, OCSkuMapping
+from app.models.settings import OCStockMovementLine, OCSkuInventory, OCSkuMapping
 from app.models.stock import LineItem, Order
 
-MIN_AVL_IN_STOCK = 5
-LOOKBACK_DAYS = 183  # ~6 months
-IN_STOCK_SAMPLE_CAP = 90
-MIN_IN_STOCK_FOR_CONFIDENCE = 7
-NOTE_TEXT = (
-    "Burn rate = linearly weighted avg of eBay sales over last 90 in-stock days (AVL >= 5). "
-    "Assumes no inbound restock."
-)
+MIN_AVL_IN_STOCK = 7
+REORDER_LEAD_TIME_DAYS = 90  # supplier delivery ~3 months after order
+NOTE_SUFFIX = "Assumes no inbound restock."
 
 
-def weighted_burn_rate(daily_sales: List[float]) -> float:
-    """
-    daily_sales[0] = oldest in-stock day, daily_sales[-1] = most recent.
-    Linear weights: oldest gets 1, most recent gets len(daily_sales).
-    """
-    n = len(daily_sales)
-    if n == 0:
+def average_burn_rate(daily_sales: List[float]) -> float:
+    """Simple mean units/day over the in-stock sample days."""
+    if not daily_sales:
         return 0.0
-    weight_sum = 0.0
-    value_sum = 0.0
-    for i, sales in enumerate(daily_sales):
-        w = float(i + 1)
-        value_sum += float(sales) * w
-        weight_sum += w
-    return value_sum / weight_sum if weight_sum > 0 else 0.0
+    return sum(float(s) for s in daily_sales) / len(daily_sales)
+
+
+def forecast_note(window_start: date, window_end: date) -> str:
+    return (
+        f"Burn rate = average eBay units/day over in-stock days (AVL >= {MIN_AVL_IN_STOCK}) "
+        f"from {window_start.isoformat()} to {window_end.isoformat()}. "
+        f"Ordered = available + in transit + received (OC snapshot); ordered run-out = ordered ÷ burn rate; "
+        f"reorder = order {REORDER_LEAD_TIME_DAYS} days before run-out (qty ≈ burn × {REORDER_LEAD_TIME_DAYS} days). {NOTE_SUFFIX}"
+    )
 
 
 def forward_fill_daily_avl(
@@ -74,6 +68,70 @@ def _daterange(a: date, b: date) -> List[date]:
     return out
 
 
+def _cover_and_oos(total: int, burn: float, today: date) -> Tuple[Optional[float], Optional[str]]:
+    if burn <= 0 or total <= 0:
+        return None, None
+    doc = total / burn
+    oos = (today + timedelta(days=int(math.ceil(doc)))).isoformat()
+    return round(doc, 4), oos
+
+
+def _reorder_plan(
+    oos_iso: Optional[str],
+    burn: float,
+    today: date,
+    lead_days: int = REORDER_LEAD_TIME_DAYS,
+) -> Tuple[Optional[int], Optional[str], Optional[float]]:
+    """
+    JIT reorder: place order lead_days before run-out; qty covers sales over the lead window.
+    Returns (quantity, reorder_by_date ISO, days_until_reorder from today).
+    """
+    if not oos_iso or burn <= 0:
+        return None, None, None
+    oos_d = date.fromisoformat(oos_iso)
+    reorder_d = oos_d - timedelta(days=lead_days)
+    qty = int(math.ceil(burn * lead_days))
+    days_until = float((reorder_d - today).days)
+    return qty, reorder_d.isoformat(), days_until
+
+
+def _forecast_row(
+    *,
+    seller_skuid: str,
+    mfskuid: str,
+    sku_name: str,
+    current_available: int = 0,
+    current_in_transit: int = 0,
+    current_received: int = 0,
+    ordered_total: int = 0,
+    burn_rate_per_day: Optional[float] = None,
+    in_stock_days_used: int = 0,
+    ordered_days_of_cover: Optional[float] = None,
+    ordered_estimated_oos_date: Optional[str] = None,
+    reorder_quantity: Optional[int] = None,
+    reorder_by_date: Optional[str] = None,
+    days_until_reorder: Optional[float] = None,
+    total_sales_in_window: Optional[int] = None,
+) -> dict:
+    return {
+        "seller_skuid": seller_skuid,
+        "mfskuid": mfskuid,
+        "sku_name": sku_name,
+        "current_available": current_available,
+        "current_in_transit": current_in_transit,
+        "current_received": current_received,
+        "ordered_total": ordered_total,
+        "burn_rate_per_day": burn_rate_per_day,
+        "in_stock_days_used": in_stock_days_used,
+        "ordered_days_of_cover": ordered_days_of_cover,
+        "ordered_estimated_oos_date": ordered_estimated_oos_date,
+        "reorder_quantity": reorder_quantity,
+        "reorder_by_date": reorder_by_date,
+        "days_until_reorder": days_until_reorder,
+        "total_sales_in_window": total_sales_in_window,
+    }
+
+
 async def _latest_avl_actual_count(
     db: AsyncSession,
     connection_id: int,
@@ -100,6 +158,29 @@ async def _latest_avl_actual_count(
     if row is None or row[0] is None:
         return None
     return int(row[0])
+
+
+async def _latest_pipeline_counts(
+    db: AsyncSession,
+    connection_id: int,
+    mfskuid: str,
+    service_region: Optional[str],
+) -> Tuple[int, int]:
+    """In-transit and received quantities from the latest OC StockSnapshot pull."""
+    filters = [
+        OCSkuInventory.connection_id == connection_id,
+        func.lower(OCSkuInventory.mfskuid) == mfskuid.strip().lower(),
+    ]
+    if service_region is not None and str(service_region).strip():
+        filters.append(OCSkuInventory.service_region == str(service_region).strip())
+    stmt = select(OCSkuInventory.in_transit, OCSkuInventory.received).where(*filters).limit(1)
+    r = await db.execute(stmt)
+    row = r.first()
+    if row is None:
+        return 0, 0
+    in_transit = max(0, int(row[0] or 0))
+    received = max(0, int(row[1] or 0))
+    return in_transit, received
 
 
 async def _line_item_skus_for_mapping(
@@ -152,58 +233,44 @@ async def _forecast_for_mapping_row(
     db: AsyncSession,
     connection_id: int,
     mapping: OCSkuMapping,
+    window_start: date,
+    window_end: date,
 ) -> dict:
     from app.api.inventory_status import list_inventory_history
 
     seller_skuid = (mapping.seller_skuid or "").strip()
     mfskuid = (mapping.mfskuid or "").strip()
     sku_name = (mapping.sku_code or "").strip() or seller_skuid
-    region_raw = mapping.service_region
-    service_region = (region_raw or "").strip() or "—"
-
-    base = {
-        "seller_skuid": seller_skuid,
-        "mfskuid": mfskuid,
-        "sku_name": sku_name,
-        "service_region": service_region,
-    }
+    region_filter = (mapping.service_region or "").strip() or None
 
     if not mfskuid or not seller_skuid:
-        return {
-            **base,
-            "current_available": 0,
-            "burn_rate_per_day": None,
-            "in_stock_days_used": 0,
-            "days_of_cover": None,
-            "estimated_oos_date": None,
-            "confidence": "insufficient_data",
-            "total_sales_in_window": None,
-        }
+        return _forecast_row(seller_skuid=seller_skuid, mfskuid=mfskuid, sku_name=sku_name)
 
-    region_filter = (region_raw or "").strip() or None
-
-    latest = await _latest_avl_actual_count(db, connection_id, mfskuid, region_filter)
-    if latest is None or latest <= 0:
-        return {
-            **base,
-            "current_available": 0 if latest is None else max(0, latest),
-            "burn_rate_per_day": None,
-            "in_stock_days_used": 0,
-            "days_of_cover": None,
-            "estimated_oos_date": None,
-            "confidence": "already_oos",
-            "total_sales_in_window": None,
-        }
-
-    current_avl = latest
     today = date.today()
-    window_start = today - timedelta(days=LOOKBACK_DAYS)
-    ext_from = window_start - timedelta(days=120)
+    latest_avl = await _latest_avl_actual_count(db, connection_id, mfskuid, region_filter)
+    current_avl = max(0, latest_avl) if latest_avl is not None else 0
+    current_in_transit, current_received = await _latest_pipeline_counts(
+        db, connection_id, mfskuid, region_filter
+    )
+    ordered_total = current_avl + current_in_transit + current_received
+
+    stock_fields = dict(
+        seller_skuid=seller_skuid,
+        mfskuid=mfskuid,
+        sku_name=sku_name,
+        current_available=current_avl,
+        current_in_transit=current_in_transit,
+        current_received=current_received,
+        ordered_total=ordered_total,
+    )
+
+    if ordered_total <= 0:
+        return _forecast_row(**stock_fields)
 
     hist = await list_inventory_history(
         db=db,
-        from_date=ext_from,
-        to_date=today,
+        from_date=window_start - timedelta(days=120),
+        to_date=window_end,
         seller_skuid=None,
         sku_code=None,
         mfskuid=mfskuid,
@@ -216,77 +283,68 @@ async def _forecast_for_mapping_row(
             ts = ts.replace(tzinfo=None)
         raw_pts.append((ts, int(p.available or 0)))
 
-    daily = forward_fill_daily_avl(raw_pts, window_start, today)
-    in_stock_days_ordered = [d for d in _daterange(window_start, today) if daily.get(d, 0) >= MIN_AVL_IN_STOCK]
-    newest_90 = in_stock_days_ordered[-IN_STOCK_SAMPLE_CAP:]
-    n = len(newest_90)
+    daily = forward_fill_daily_avl(raw_pts, window_start, window_end)
+    in_stock_days = [
+        d for d in _daterange(window_start, window_end) if daily.get(d, 0) >= MIN_AVL_IN_STOCK
+    ]
 
     line_skus = await _line_item_skus_for_mapping(db, connection_id, seller_skuid)
-    sales_by_date = await _ebay_units_by_order_date(db, line_skus, window_start, today)
+    sales_by_date = await _ebay_units_by_order_date(db, line_skus, window_start, window_end)
     total_sales_in_window = int(sum(sales_by_date.values()))
-
-    daily_sales = [float(sales_by_date.get(d, 0)) for d in newest_90]
-    burn = weighted_burn_rate(daily_sales)
-    in_stock_days_used = n
+    daily_sales = [float(sales_by_date.get(d, 0)) for d in in_stock_days]
+    burn = average_burn_rate(daily_sales)
 
     if burn <= 0:
-        return {
-            **base,
-            "current_available": current_avl,
-            "burn_rate_per_day": None,
-            "in_stock_days_used": in_stock_days_used,
-            "days_of_cover": None,
-            "estimated_oos_date": None,
-            "confidence": "no_sales",
-            "total_sales_in_window": total_sales_in_window,
-        }
+        return _forecast_row(
+            **stock_fields,
+            in_stock_days_used=len(in_stock_days),
+            total_sales_in_window=total_sales_in_window,
+        )
 
-    doc = current_avl / burn
-    oos_dt = today + timedelta(days=int(math.ceil(doc)))
-    oos = oos_dt.isoformat()
-
-    if in_stock_days_used < MIN_IN_STOCK_FOR_CONFIDENCE:
-        confidence = "insufficient_data"
-    elif in_stock_days_used < 30:
-        confidence = "low"
-    else:
-        confidence = "normal"
-
-    return {
-        **base,
-        "current_available": current_avl,
-        "burn_rate_per_day": round(burn, 4),
-        "in_stock_days_used": in_stock_days_used,
-        "days_of_cover": round(doc, 4),
-        "estimated_oos_date": oos,
-        "confidence": confidence,
-        "total_sales_in_window": total_sales_in_window,
-    }
+    ordered_doc, ordered_oos = _cover_and_oos(ordered_total, burn, today)
+    reorder_qty, reorder_by, days_until_reorder = _reorder_plan(ordered_oos, burn, today)
+    return _forecast_row(
+        **stock_fields,
+        burn_rate_per_day=round(burn, 4),
+        in_stock_days_used=len(in_stock_days),
+        ordered_days_of_cover=ordered_doc,
+        ordered_estimated_oos_date=ordered_oos,
+        reorder_quantity=reorder_qty,
+        reorder_by_date=reorder_by,
+        days_until_reorder=days_until_reorder,
+        total_sales_in_window=total_sales_in_window,
+    )
 
 
-async def build_stock_forecast_payload(db: AsyncSession, connection_id: int) -> dict:
+async def build_stock_forecast_payload(
+    db: AsyncSession,
+    connection_id: int,
+    window_start: date,
+    window_end: date,
+) -> dict:
     mr = await db.execute(
         select(OCSkuMapping)
         .where(OCSkuMapping.connection_id == connection_id)
         .order_by(OCSkuMapping.seller_skuid.asc(), OCSkuMapping.mfskuid.asc())
     )
     mappings = list(mr.scalars().all())
-    rows: List[dict] = []
-    for m in mappings:
-        rows.append(await _forecast_for_mapping_row(db, connection_id, m))
+    rows = [
+        await _forecast_for_mapping_row(db, connection_id, m, window_start, window_end)
+        for m in mappings
+    ]
 
-    def sort_key(x: dict) -> Tuple[int, float]:
-        doc = x.get("days_of_cover")
-        if doc is None:
-            return (1, float("inf"))
-        return (0, float(doc))
-
-    rows.sort(key=sort_key)
+    rows.sort(
+        key=lambda x: (
+            1 if x.get("ordered_days_of_cover") is None else 0,
+            float(x["ordered_days_of_cover"]) if x.get("ordered_days_of_cover") is not None else float("inf"),
+        )
+    )
 
     now = datetime.now(timezone.utc)
-    generated_at = now.isoformat().replace("+00:00", "Z")
     return {
         "forecasts": rows,
-        "generated_at": generated_at,
-        "note": NOTE_TEXT,
+        "generated_at": now.isoformat().replace("+00:00", "Z"),
+        "note": forecast_note(window_start, window_end),
+        "from_date": window_start.isoformat(),
+        "to_date": window_end.isoformat(),
     }
