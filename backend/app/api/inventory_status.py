@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import case, delete, func, or_, select
+from sqlalchemy import and_, case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -482,7 +482,7 @@ async def _find_inbound_order_for_override(
         filters.append(func.lower(OCInboundOrder.seller_inbound_number) == seller.lower())
     stmt = (
         select(OCInboundOrder)
-        .where(OCInboundOrder.connection_id == connection_id, or_(*filters))
+        .where(OCInboundOrder.connection_id == connection_id, and_(*filters))
         .limit(1)
     )
     result = await db.execute(stmt)

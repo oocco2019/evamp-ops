@@ -10,9 +10,9 @@ How the **Stock run-out forecast** table on **Stock & movement** (`InventoryMove
 
 | Column | Meaning |
 |--------|---------|
-| **SKU** | `sku_code` from OC mapping, else seller SKU id |
-| **Available** | Latest **AVL** `actual_count` from `oc_stock_movement_line` |
-| **Ordered** | Available + **in transit** + **received** from `oc_sku_inventory` (last OC snapshot pull) |
+| **SKU** | `sku_code` from OC mapping, else seller SKU id. Rows are aggregated per seller SKU. |
+| **Available** | Latest **AVL** `actual_count` from `oc_stock_movement_line`, summed once per mapped MFSKUID/region |
+| **Ordered** | Available + **in transit** + **received** from `oc_sku_inventory` (last OC snapshot pull), summed across mapped MFSKUID/regions |
 | **Burn rate/day** | Average eBay units sold per in-stock day in the selected period (see below) |
 | **Ordered run-out** | `ordered ÷ burn rate` as days, plus calendar date (colour: red &lt; 14d, amber ≤ 30d, green &gt; 30d) |
 | **Reorder** | Suggested order qty and **order-by date** (90-day supplier lead time before run-out). Overdue rows show **Order now** in red. Sortable. |
