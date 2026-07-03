@@ -1,7 +1,10 @@
+import asyncio
 import datetime
+from types import SimpleNamespace
 
 from app.api.inventory_status import (
     _extract_inbound_ui_times,
+    _find_inbound_order_for_override,
     _inbound_status_is_canceled,
     _movement_reason_code,
     _putaway_qty_transitioned,
@@ -13,11 +16,44 @@ from app.api.inventory_status import (
 )
 
 
+class _FakeInboundOverrideResult:
+    def scalar_one_or_none(self):
+        return SimpleNamespace(id=1)
+
+
+class _FakeInboundOverrideDb:
+    def __init__(self):
+        self.statement = None
+
+    async def execute(self, statement):
+        self.statement = statement
+        return _FakeInboundOverrideResult()
+
+
 def test_inbound_status_is_canceled():
     assert _inbound_status_is_canceled("Canceled") is True
     assert _inbound_status_is_canceled("Cancelled") is True
     assert _inbound_status_is_canceled("Put away") is False
     assert _inbound_status_is_canceled(None) is False
+
+
+def test_find_inbound_order_override_requires_both_identifiers_on_same_row():
+    db = _FakeInboundOverrideDb()
+
+    asyncio.run(
+        _find_inbound_order_for_override(
+            db,
+            7,
+            oc_inbound_number="OC-2",
+            seller_inbound_number="SUPPLIER-REF",
+        )
+    )
+
+    where_sql = str(db.statement.whereclause.compile(compile_kwargs={"literal_binds": True}))
+    assert "oc_inbound_orders.connection_id = 7" in where_sql
+    assert "lower(oc_inbound_orders.oc_inbound_number) = 'oc-2'" in where_sql
+    assert "lower(oc_inbound_orders.seller_inbound_number) = 'supplier-ref'" in where_sql
+    assert " OR " not in where_sql
 
 
 def test_status_indicates_putaway():

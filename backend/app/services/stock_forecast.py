@@ -4,8 +4,9 @@ Stock run-out forecast: average eBay sales over in-stock days (AVL >= 7) in the 
 from __future__ import annotations
 
 import math
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone, time as dt_time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -132,52 +133,56 @@ def _forecast_row(
     }
 
 
-async def _latest_avl_actual_count(
+def _unique_nonempty(values: Sequence[object]) -> List[str]:
+    return sorted({str(v).strip() for v in values if str(v or "").strip()}, key=lambda x: x.lower())
+
+
+async def _latest_avl_actual_total(
     db: AsyncSession,
     connection_id: int,
-    mfskuid: str,
-    service_region: Optional[str],
-) -> Optional[int]:
+    mfskuids: Sequence[str],
+) -> int:
+    """Sum the latest AVL actual_count once per MFSKUID/region."""
+    mf_list = [x.lower() for x in _unique_nonempty(mfskuids)]
+    if not mf_list:
+        return 0
     mov = OCStockMovementLine
     event_t = func.coalesce(mov.update_time_utc, mov.created_at)
+    ac = func.coalesce(mov.actual_count, 0)
+    rn = func.row_number().over(
+        partition_by=(func.lower(mov.mfskuid), func.lower(mov.service_region)),
+        order_by=event_t.desc(),
+    ).label("rn")
     filters = [
         mov.connection_id == connection_id,
-        func.lower(mov.mfskuid) == mfskuid.strip().lower(),
+        func.lower(mov.mfskuid).in_(mf_list),
         func.upper(mov.inventory_status) == "AVL",
     ]
-    if service_region is not None and str(service_region).strip():
-        filters.append(mov.service_region == str(service_region).strip())
-    stmt = (
-        select(mov.actual_count)
-        .where(*filters)
-        .order_by(event_t.desc())
-        .limit(1)
-    )
+    latest_sq = select(ac.label("actual_count"), rn).where(*filters).subquery()
+    stmt = select(func.coalesce(func.sum(latest_sq.c.actual_count), 0)).where(latest_sq.c.rn == 1)
     r = await db.execute(stmt)
-    row = r.first()
-    if row is None or row[0] is None:
-        return None
-    return int(row[0])
+    return max(0, int(r.scalar_one() or 0))
 
 
-async def _latest_pipeline_counts(
+async def _latest_pipeline_counts_total(
     db: AsyncSession,
     connection_id: int,
-    mfskuid: str,
-    service_region: Optional[str],
+    mfskuids: Sequence[str],
 ) -> Tuple[int, int]:
-    """In-transit and received quantities from the latest OC StockSnapshot pull."""
+    """Sum in-transit and received quantities from the latest OC StockSnapshot pull."""
+    mf_list = [x.lower() for x in _unique_nonempty(mfskuids)]
+    if not mf_list:
+        return 0, 0
     filters = [
         OCSkuInventory.connection_id == connection_id,
-        func.lower(OCSkuInventory.mfskuid) == mfskuid.strip().lower(),
+        func.lower(OCSkuInventory.mfskuid).in_(mf_list),
     ]
-    if service_region is not None and str(service_region).strip():
-        filters.append(OCSkuInventory.service_region == str(service_region).strip())
-    stmt = select(OCSkuInventory.in_transit, OCSkuInventory.received).where(*filters).limit(1)
+    stmt = select(
+        func.coalesce(func.sum(OCSkuInventory.in_transit), 0),
+        func.coalesce(func.sum(OCSkuInventory.received), 0),
+    ).where(*filters)
     r = await db.execute(stmt)
-    row = r.first()
-    if row is None:
-        return 0, 0
+    row = r.one()
     in_transit = max(0, int(row[0] or 0))
     received = max(0, int(row[1] or 0))
     return in_transit, received
@@ -229,29 +234,53 @@ async def _ebay_units_by_order_date(
     return {row[0]: int(row[1] or 0) for row in r.all()}
 
 
-async def _forecast_for_mapping_row(
+def _display_sku_name(mappings: Sequence[OCSkuMapping], seller_skuid: str) -> str:
+    sku_names = _unique_nonempty([m.sku_code for m in mappings])
+    if not sku_names:
+        return seller_skuid
+    if len(sku_names) == 1:
+        return sku_names[0]
+    return ", ".join(sku_names)
+
+
+def _mapping_groups_for_forecast(mappings: Sequence[OCSkuMapping]) -> List[List[OCSkuMapping]]:
+    """Forecast at seller-SKU grain so multi-region mappings do not duplicate sales."""
+    by_seller: dict[str, List[OCSkuMapping]] = defaultdict(list)
+    no_seller: List[List[OCSkuMapping]] = []
+    for mapping in mappings:
+        seller = (mapping.seller_skuid or "").strip()
+        if seller:
+            by_seller[seller.lower()].append(mapping)
+        else:
+            no_seller.append([mapping])
+    grouped = [
+        sorted(items, key=lambda m: ((m.mfskuid or "").lower(), (m.service_region or "").lower()))
+        for _, items in sorted(by_seller.items(), key=lambda kv: kv[0])
+    ]
+    return grouped + no_seller
+
+
+async def _forecast_for_mapping_group(
     db: AsyncSession,
     connection_id: int,
-    mapping: OCSkuMapping,
+    mappings: Sequence[OCSkuMapping],
     window_start: date,
     window_end: date,
 ) -> dict:
     from app.api.inventory_status import list_inventory_history
 
-    seller_skuid = (mapping.seller_skuid or "").strip()
-    mfskuid = (mapping.mfskuid or "").strip()
-    sku_name = (mapping.sku_code or "").strip() or seller_skuid
-    region_filter = (mapping.service_region or "").strip() or None
+    first = mappings[0] if mappings else None
+    seller_skuid = (first.seller_skuid or "").strip() if first is not None else ""
+    mfskuids = _unique_nonempty([m.mfskuid for m in mappings])
+    mfskuid = ",".join(mfskuids)
+    sku_name = _display_sku_name(mappings, seller_skuid)
 
-    if not mfskuid or not seller_skuid:
+    if not mfskuids or not seller_skuid:
         return _forecast_row(seller_skuid=seller_skuid, mfskuid=mfskuid, sku_name=sku_name)
 
     today = date.today()
-    latest_avl = await _latest_avl_actual_count(db, connection_id, mfskuid, region_filter)
-    current_avl = max(0, latest_avl) if latest_avl is not None else 0
-    current_in_transit, current_received = await _latest_pipeline_counts(
-        db, connection_id, mfskuid, region_filter
-    )
+    current_avl = await _latest_avl_actual_total(db, connection_id, mfskuids)
+    current_in_transit, current_received = await _latest_pipeline_counts_total(db, connection_id, mfskuids)
     ordered_total = current_avl + current_in_transit + current_received
 
     stock_fields = dict(
@@ -271,10 +300,10 @@ async def _forecast_for_mapping_row(
         db=db,
         from_date=window_start - timedelta(days=120),
         to_date=window_end,
-        seller_skuid=None,
+        seller_skuid=seller_skuid,
         sku_code=None,
-        mfskuid=mfskuid,
-        service_region=region_filter,
+        mfskuid=None,
+        service_region=None,
     )
     raw_pts: List[Tuple[datetime, int]] = []
     for p in hist.points:
@@ -329,8 +358,8 @@ async def build_stock_forecast_payload(
     )
     mappings = list(mr.scalars().all())
     rows = [
-        await _forecast_for_mapping_row(db, connection_id, m, window_start, window_end)
-        for m in mappings
+        await _forecast_for_mapping_group(db, connection_id, group, window_start, window_end)
+        for group in _mapping_groups_for_forecast(mappings)
     ]
 
     rows.sort(
