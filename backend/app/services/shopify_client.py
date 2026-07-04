@@ -217,19 +217,9 @@ async def fetch_shopify_orders_paginated(
         "X-Shopify-Access-Token": access_token.strip(),
         "Content-Type": "application/json",
     }
-    field_list = (
-        "id,name,email,created_at,updated_at,cancelled_at,closed_at,"
-        "currency,financial_status,fulfillment_status,"
-        "subtotal_price,current_subtotal_price,total_line_items_price,"
-        "current_total_price,total_price,total_tax,current_total_tax,total_shipping,total_shipping_price_set,"
-        "total_discounts,current_total_discounts,shipping_address,billing_address,"
-        "line_items,order_number"
-    )
-
     first_params: dict = {
         "status": "any",
         "limit": "250",
-        "fields": field_list,
     }
     if updated_at_min:
         s = updated_at_min.replace(tzinfo=timezone.utc) if updated_at_min.tzinfo is None else updated_at_min
@@ -252,7 +242,6 @@ async def fetch_shopify_orders_paginated(
                 p = {
                     "limit": "250",
                     "page_info": page_info,
-                    "fields": field_list,
                     "status": "any",
                 }
             r = await client.get(url, headers=headers, params=p)
