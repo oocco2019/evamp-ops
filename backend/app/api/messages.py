@@ -300,30 +300,41 @@ async def _get_thread_impl(
         raise HTTPException(status_code=404, detail="Thread not found")
     msgs = sorted(thread.messages, key=lambda m: m.ebay_created_at or datetime.min.replace(tzinfo=None))
     msg_ids = [m.message_id for m in msgs]
-    blob_result = await db.execute(
-        select(MessageMediaBlob.message_id, MessageMediaBlob.media_index).where(
-            MessageMediaBlob.message_id.in_(msg_ids)
-        )
-    )
-    stored_set = {(row[0], row[1]) for row in blob_result.all()}
+    blob_result = await db.execute(select(MessageMediaBlob).where(MessageMediaBlob.message_id.in_(msg_ids)))
+    stored_by_message: dict[str, list[MessageMediaBlob]] = {}
+    for blob in blob_result.scalars().all():
+        stored_by_message.setdefault(blob.message_id, []).append(blob)
+    for blobs in stored_by_message.values():
+        blobs.sort(key=lambda b: b.media_index)
+    stored_set = {
+        (blob.message_id, blob.media_index)
+        for blobs in stored_by_message.values()
+        for blob in blobs
+    }
 
     def build_media_items(m: Message) -> Optional[List[MessageMediaItem]]:
         if not m.media:
-            return None
+            blobs = stored_by_message.get(m.message_id) or []
+            if not blobs:
+                return None
+            return [
+                MessageMediaItem(
+                    mediaName=blob.media_name or "",
+                    mediaType=_normalize_media_type(blob.media_type),
+                    mediaUrl=_media_url_for_response(m.message_id, blob.media_index),
+                )
+                for blob in blobs
+            ]
         out = []
         for i, x in enumerate(m.media):
             url = (x.get("mediaUrl") or x.get("mediaURL") or "").strip() if isinstance(x, dict) else None
             if (m.message_id, i) in stored_set:
                 url = _media_url_for_response(m.message_id, i)
             if isinstance(x, dict):
-                raw_type = (x.get("mediaType") or x.get("type") or "FILE")
-                raw_type = str(raw_type).strip().upper()
-                if raw_type not in ("IMAGE", "DOC", "PDF", "TXT"):
-                    raw_type = "FILE"
                 out.append(
                     MessageMediaItem(
                         mediaName=x.get("mediaName") or "",
-                        mediaType=raw_type,
+                        mediaType=_normalize_media_type(x.get("mediaType") or x.get("type")),
                         mediaUrl=url,
                     )
                 )
@@ -953,7 +964,7 @@ async def refresh_thread_messages(
         if existing:
             existing.is_read = bool(m.get("readStatus", False))
             media_list = _normalize_message_media(m.get("messageMedia") or [])
-            existing.media = media_list if media_list else None
+            _apply_synced_message_media(existing, media_list)
             existing.sender_type = sender_type
             existing.sender_username = display_username
             if media_list:
@@ -1213,6 +1224,19 @@ def _normalize_message_media(raw: List[Any]) -> List[dict]:
         url = (x.get("mediaUrl") or x.get("mediaURL") or "").strip()
         out.append({"mediaName": name, "mediaType": mtype, "mediaUrl": url or None})
     return out
+
+
+def _normalize_media_type(raw_type: Any) -> str:
+    media_type = str(raw_type or "FILE").strip().upper()
+    if media_type not in ("IMAGE", "DOC", "PDF", "TXT"):
+        return "FILE"
+    return media_type
+
+
+def _apply_synced_message_media(existing: Message, media_list: List[dict]) -> None:
+    """Preserve retained attachment metadata when eBay later omits messageMedia."""
+    if media_list:
+        existing.media = media_list
 
 
 def _ebay_image_full_size_url(url: str) -> str:
@@ -1559,7 +1583,7 @@ async def _sync_from_members_full(
                     if existing:
                         existing.is_read = bool(m.get("readStatus", False))
                         media_list = _normalize_message_media(m.get("messageMedia") or [])
-                        existing.media = media_list if media_list else None
+                        _apply_synced_message_media(existing, media_list)
                         existing.sender_type = sender_type
                         existing.sender_username = display_username
                         if media_list:
@@ -1791,7 +1815,7 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                         if existing:
                             existing.is_read = bool(m.get("readStatus", False))
                             media_list = _normalize_message_media(m.get("messageMedia") or [])
-                            existing.media = media_list if media_list else None
+                            _apply_synced_message_media(existing, media_list)
                             existing.sender_type = sender_type
                             existing.sender_username = display_username
                             if media_list:
@@ -1956,7 +1980,7 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
                             if existing:
                                 existing.is_read = bool(m.get("readStatus", False))
                                 media_list = _normalize_message_media(m.get("messageMedia") or [])
-                                existing.media = media_list if media_list else None
+                                _apply_synced_message_media(existing, media_list)
                                 if media_list:
                                     ebay_page_messages_with_media.append((msg_id, media_list))
                                 continue
