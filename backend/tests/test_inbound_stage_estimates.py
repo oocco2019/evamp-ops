@@ -1,9 +1,11 @@
 import datetime
+from types import SimpleNamespace
 
 from app.api.inventory_status import (
     _extract_inbound_ui_times,
     _inbound_status_is_canceled,
     _movement_reason_code,
+    _resolve_unambiguous_inbound_match,
     _putaway_qty_transitioned,
     _should_set_arrived_at,
     _should_set_putaway_at,
@@ -256,4 +258,33 @@ def test_extract_inbound_ui_times_raw_arrival_beats_movement():
         movement_arrived_at=datetime.datetime(2025, 1, 5, 9, 30, 0),
     )
     assert arrived_s == "2025-07-01 08:00:00"
+
+
+def test_resolve_unambiguous_inbound_match_accepts_same_row_from_both_identifiers():
+    row = SimpleNamespace(id=123)
+
+    match, ambiguous = _resolve_unambiguous_inbound_match([row], [row])
+
+    assert match is row
+    assert ambiguous is False
+
+
+def test_resolve_unambiguous_inbound_match_rejects_conflicting_identifier_rows():
+    oc_row = SimpleNamespace(id=123)
+    seller_row = SimpleNamespace(id=456)
+
+    match, ambiguous = _resolve_unambiguous_inbound_match([oc_row], [seller_row])
+
+    assert match is None
+    assert ambiguous is True
+
+
+def test_resolve_unambiguous_inbound_match_rejects_duplicate_single_identifier_rows():
+    row_a = SimpleNamespace(id=123)
+    row_b = SimpleNamespace(id=456)
+
+    match, ambiguous = _resolve_unambiguous_inbound_match([row_a, row_b], [])
+
+    assert match is None
+    assert ambiguous is True
 

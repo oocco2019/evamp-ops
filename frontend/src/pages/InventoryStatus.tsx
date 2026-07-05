@@ -8,6 +8,7 @@ import {
   type OCSkuInventoryRow,
   type OCSkuMapping,
 } from '../services/api'
+import { inboundIdentifiersMatch, shouldCancelEmptyOverrideBlur } from '../utils/inboundIdentity'
 
 function inboundGetCi(obj: Record<string, unknown>, ...names: string[]): unknown {
   const lower = Object.fromEntries(Object.entries(obj).map(([k, v]) => [k.toLowerCase(), v]))
@@ -342,6 +343,7 @@ function InboundCourierCell({
   onStartEdit,
   onDraftChange,
   onSave,
+  onBlur,
   onCancel,
 }: {
   row: OCInboundOrderRow
@@ -353,6 +355,7 @@ function InboundCourierCell({
   onStartEdit: (initial: string) => void
   onDraftChange: (value: string) => void
   onSave: () => void
+  onBlur: () => void
   onCancel: () => void
 }) {
   const customUrl = row.custom_courier_url?.trim() || null
@@ -374,7 +377,7 @@ function InboundCourierCell({
             onCancel()
           }
         }}
-        onBlur={() => onSave()}
+        onBlur={onBlur}
         autoFocus
         placeholder="https://…"
         disabled={saving}
@@ -462,6 +465,7 @@ function InboundTrackingNumberCell({
   onStartEdit,
   onDraftChange,
   onSave,
+  onBlur,
   onCancel,
 }: {
   row: OCInboundOrderRow
@@ -472,6 +476,7 @@ function InboundTrackingNumberCell({
   onStartEdit: (initial: string) => void
   onDraftChange: (value: string) => void
   onSave: () => void
+  onBlur: () => void
   onCancel: () => void
 }) {
   const custom = row.custom_tracking_number?.trim() || null
@@ -493,7 +498,7 @@ function InboundTrackingNumberCell({
             onCancel()
           }
         }}
-        onBlur={() => onSave()}
+        onBlur={onBlur}
         autoFocus
         placeholder="Tracking number"
         disabled={saving}
@@ -918,11 +923,7 @@ export default function InventoryStatus() {
         ['inventory-status', 'inbound-orders', 6, 'full'],
         (prev) =>
           prev?.map((row) => {
-            const oc = data.oc_inbound_number?.trim()
-            const seller = data.seller_inbound_number?.trim()
-            const matchOc = oc && row.oc_inbound_number?.trim() === oc
-            const matchSeller = seller && row.seller_inbound_number?.trim() === seller
-            if (matchOc || matchSeller) {
+            if (inboundIdentifiersMatch(row, data)) {
               return { ...row, custom_courier_url: data.custom_courier_url }
             }
             return row
@@ -956,11 +957,7 @@ export default function InventoryStatus() {
         ['inventory-status', 'inbound-orders', 6, 'full'],
         (prev) =>
           prev?.map((row) => {
-            const oc = data.oc_inbound_number?.trim()
-            const seller = data.seller_inbound_number?.trim()
-            const matchOc = oc && row.oc_inbound_number?.trim() === oc
-            const matchSeller = seller && row.seller_inbound_number?.trim() === seller
-            if (matchOc || matchSeller) {
+            if (inboundIdentifiersMatch(row, data)) {
               return { ...row, custom_tracking_number: data.custom_tracking_number }
             }
             return row
@@ -1376,6 +1373,14 @@ export default function InventoryStatus() {
     saveCustomCourierMutation.mutate({ row, url: trimmed || null })
   }
 
+  const blurCourierEdit = (row: OCInboundOrderRow, rowKey: string, initial: string) => {
+    if (shouldCancelEmptyOverrideBlur(courierDraft, initial)) {
+      cancelCourierEdit()
+      return
+    }
+    saveCourierEdit(row, rowKey, initial)
+  }
+
   const startTrackingEdit = (rowKey: string, initial: string) => {
     setTrackingEditKey(rowKey)
     setTrackingDraft(initial)
@@ -1394,6 +1399,14 @@ export default function InventoryStatus() {
       return
     }
     saveCustomTrackingMutation.mutate({ row, tracking_number: trimmed || null })
+  }
+
+  const blurTrackingEdit = (row: OCInboundOrderRow, rowKey: string, initial: string) => {
+    if (shouldCancelEmptyOverrideBlur(trackingDraft, initial)) {
+      cancelTrackingEdit()
+      return
+    }
+    saveTrackingEdit(row, rowKey, initial)
   }
 
   return (
@@ -1965,6 +1978,13 @@ export default function InventoryStatus() {
                             row.custom_courier_url?.trim() ?? ''
                           )
                         }
+                        onBlur={() =>
+                          blurCourierEdit(
+                            row,
+                            rowKey,
+                            row.custom_courier_url?.trim() ?? ''
+                          )
+                        }
                         onCancel={cancelCourierEdit}
                       />
                     </td>
@@ -1979,6 +1999,13 @@ export default function InventoryStatus() {
                         onDraftChange={setTrackingDraft}
                         onSave={() =>
                           saveTrackingEdit(
+                            row,
+                            rowKey,
+                            row.custom_tracking_number?.trim() ?? ''
+                          )
+                        }
+                        onBlur={() =>
+                          blurTrackingEdit(
                             row,
                             rowKey,
                             row.custom_tracking_number?.trim() ?? ''
