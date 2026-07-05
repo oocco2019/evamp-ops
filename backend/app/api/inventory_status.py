@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import case, delete, func, or_, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -475,20 +475,122 @@ async def _find_inbound_order_for_override(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Provide oc_inbound_number and/or seller_inbound_number.",
         )
-    filters = []
+    rows = await _query_inbound_orders_by_identifiers(
+        db,
+        connection_id,
+        oc_inbound_number=oc or None,
+        seller_inbound_number=seller or None,
+    )
+    row, ambiguous = _single_inbound_match(rows)
+    if ambiguous:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Inbound identifiers match multiple cached orders; run inbound sync before saving overrides.",
+        )
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbound order not found.")
+    return row
+
+
+async def _query_inbound_orders_by_identifiers(
+    db: AsyncSession,
+    connection_id: int,
+    *,
+    oc_inbound_number: Optional[str] = None,
+    seller_inbound_number: Optional[str] = None,
+    limit: int = 2,
+) -> List[OCInboundOrder]:
+    """Fetch inbound rows matching all supplied identifiers."""
+    filters = [OCInboundOrder.connection_id == connection_id]
+    oc = (oc_inbound_number or "").strip()
+    seller = (seller_inbound_number or "").strip()
     if oc:
         filters.append(func.lower(OCInboundOrder.oc_inbound_number) == oc.lower())
     if seller:
         filters.append(func.lower(OCInboundOrder.seller_inbound_number) == seller.lower())
-    stmt = (
-        select(OCInboundOrder)
-        .where(OCInboundOrder.connection_id == connection_id, or_(*filters))
-        .limit(1)
-    )
+    if len(filters) == 1:
+        return []
+    stmt = select(OCInboundOrder).where(*filters).order_by(OCInboundOrder.id.asc()).limit(limit)
     result = await db.execute(stmt)
-    row = result.scalar_one_or_none()
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbound order not found.")
+    return list(result.scalars().all())
+
+
+def _single_inbound_match(rows: List[OCInboundOrder]) -> Tuple[Optional[OCInboundOrder], bool]:
+    if len(rows) > 1:
+        return None, True
+    if rows:
+        return rows[0], False
+    return None, False
+
+
+def _inbound_row_identity(row: OCInboundOrder) -> int:
+    row_id = getattr(row, "id", None)
+    return int(row_id) if row_id is not None else id(row)
+
+
+def _resolve_unambiguous_inbound_match(
+    oc_matches: List[OCInboundOrder],
+    seller_matches: List[OCInboundOrder],
+) -> Tuple[Optional[OCInboundOrder], bool]:
+    if len(oc_matches) > 1 or len(seller_matches) > 1:
+        return None, True
+    if oc_matches and seller_matches:
+        if _inbound_row_identity(oc_matches[0]) == _inbound_row_identity(seller_matches[0]):
+            return oc_matches[0], False
+        return None, True
+    if oc_matches:
+        return oc_matches[0], False
+    if seller_matches:
+        return seller_matches[0], False
+    return None, False
+
+
+async def _find_existing_inbound_for_upsert(
+    db: AsyncSession,
+    connection_id: int,
+    *,
+    oc_inbound_number: Optional[str],
+    seller_inbound_number: Optional[str],
+) -> Optional[OCInboundOrder]:
+    oc = (oc_inbound_number or "").strip()
+    seller = (seller_inbound_number or "").strip()
+    if not oc and not seller:
+        return None
+
+    if oc and seller:
+        exact_rows = await _query_inbound_orders_by_identifiers(
+            db,
+            connection_id,
+            oc_inbound_number=oc,
+            seller_inbound_number=seller,
+        )
+        exact, exact_ambiguous = _single_inbound_match(exact_rows)
+        if exact or exact_ambiguous:
+            if exact_ambiguous:
+                logger.warning(
+                    "Ambiguous inbound fallback match for oc=%s seller=%s: multiple exact matches",
+                    oc,
+                    seller,
+                )
+            return exact
+
+    oc_rows = (
+        await _query_inbound_orders_by_identifiers(db, connection_id, oc_inbound_number=oc)
+        if oc
+        else []
+    )
+    seller_rows = (
+        await _query_inbound_orders_by_identifiers(db, connection_id, seller_inbound_number=seller)
+        if seller
+        else []
+    )
+    row, ambiguous = _resolve_unambiguous_inbound_match(oc_rows, seller_rows)
+    if ambiguous:
+        logger.warning(
+            "Ambiguous inbound fallback match for oc=%s seller=%s; inserting/updating by dedup only",
+            oc or None,
+            seller or None,
+        )
     return row
 
 
@@ -981,21 +1083,12 @@ async def _upsert_inbound_rows(db: AsyncSession, connection_id: int, rows: List[
         # (e.g. no OC number yet), then become populated later. In that case dedup_key changes;
         # match by stable identifiers so we update the same row instead of creating duplicates.
         if existing is None and (oc or seller):
-            filters = []
-            if oc:
-                filters.append(func.lower(OCInboundOrder.oc_inbound_number) == str(oc).strip().lower())
-            if seller:
-                filters.append(
-                    func.lower(OCInboundOrder.seller_inbound_number) == str(seller).strip().lower()
-                )
-            if filters:
-                existing_r = await db.execute(
-                    select(OCInboundOrder).where(
-                        OCInboundOrder.connection_id == connection_id,
-                        or_(*filters),
-                    )
-                )
-                existing = existing_r.scalar_one_or_none()
+            existing = await _find_existing_inbound_for_upsert(
+                db,
+                connection_id,
+                oc_inbound_number=oc,
+                seller_inbound_number=seller,
+            )
         if existing:
             prev_putaway_qty = int(existing.put_away_qty or 0)
             prev_status_lower = str(existing.status or "").lower()
