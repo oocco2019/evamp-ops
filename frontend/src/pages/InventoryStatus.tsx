@@ -643,6 +643,25 @@ function inboundRowStableKey(row: OCInboundOrderRow, idx: number): string {
   return `idx:${idx}`
 }
 
+function trimInboundIdentity(value: string | null | undefined): string | null {
+  const s = value?.trim()
+  return s ? s : null
+}
+
+function inboundIdentityMatches(
+  row: OCInboundOrderRow,
+  identity: { oc_inbound_number?: string | null; seller_inbound_number?: string | null }
+): boolean {
+  const oc = trimInboundIdentity(identity.oc_inbound_number)
+  const seller = trimInboundIdentity(identity.seller_inbound_number)
+  if (!oc && !seller) return false
+  const rowOc = trimInboundIdentity(row.oc_inbound_number)
+  const rowSeller = trimInboundIdentity(row.seller_inbound_number)
+  if (oc && seller) return rowOc === oc && rowSeller === seller
+  if (oc) return rowOc === oc
+  return rowSeller === seller
+}
+
 function normalizeInboundStatus(row: OCInboundOrderRow): string {
   const s = row.status?.trim()
   return s || '—'
@@ -918,11 +937,7 @@ export default function InventoryStatus() {
         ['inventory-status', 'inbound-orders', 6, 'full'],
         (prev) =>
           prev?.map((row) => {
-            const oc = data.oc_inbound_number?.trim()
-            const seller = data.seller_inbound_number?.trim()
-            const matchOc = oc && row.oc_inbound_number?.trim() === oc
-            const matchSeller = seller && row.seller_inbound_number?.trim() === seller
-            if (matchOc || matchSeller) {
+            if (inboundIdentityMatches(row, data)) {
               return { ...row, custom_courier_url: data.custom_courier_url }
             }
             return row
@@ -956,11 +971,7 @@ export default function InventoryStatus() {
         ['inventory-status', 'inbound-orders', 6, 'full'],
         (prev) =>
           prev?.map((row) => {
-            const oc = data.oc_inbound_number?.trim()
-            const seller = data.seller_inbound_number?.trim()
-            const matchOc = oc && row.oc_inbound_number?.trim() === oc
-            const matchSeller = seller && row.seller_inbound_number?.trim() === seller
-            if (matchOc || matchSeller) {
+            if (inboundIdentityMatches(row, data)) {
               return { ...row, custom_tracking_number: data.custom_tracking_number }
             }
             return row
