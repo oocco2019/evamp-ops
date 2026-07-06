@@ -482,7 +482,7 @@ async def _find_inbound_order_for_override(
         filters.append(func.lower(OCInboundOrder.seller_inbound_number) == seller.lower())
     stmt = (
         select(OCInboundOrder)
-        .where(OCInboundOrder.connection_id == connection_id, or_(*filters))
+        .where(OCInboundOrder.connection_id == connection_id, *filters)
         .limit(1)
     )
     result = await db.execute(stmt)
