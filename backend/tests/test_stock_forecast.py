@@ -1,7 +1,39 @@
 """Unit tests for stock run-out forecast helpers."""
+import asyncio
 from datetime import date, datetime, time as dt_time
 
-from app.services.stock_forecast import average_burn_rate, forward_fill_daily_avl, forecast_note, _cover_and_oos, _reorder_plan
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from app.models.settings import OCConnection, OCSkuInventory, OCStockMovementLine
+from app.services.stock_forecast import (
+    _cover_and_oos,
+    _latest_avl_actual_count,
+    _latest_pipeline_counts,
+    _reorder_plan,
+    average_burn_rate,
+    forecast_note,
+    forward_fill_daily_avl,
+)
+
+
+class SyncExecuteDb:
+    def __init__(self, engine):
+        self.session = Session(engine)
+
+    async def execute(self, stmt):
+        return self.session.execute(stmt)
+
+    def close(self):
+        self.session.close()
+
+
+def _stock_tables_engine():
+    engine = create_engine("sqlite:///:memory:")
+    OCConnection.__table__.create(engine)
+    OCSkuInventory.__table__.create(engine)
+    OCStockMovementLine.__table__.create(engine)
+    return engine
 
 
 def test_forward_fill_daily_avl_resets_each_day_like_chart():
@@ -48,6 +80,13 @@ def test_cover_and_oos_ordered_total():
     assert _cover_and_oos(10, 0.0, date(2026, 6, 1)) == (None, None)
 
 
+def test_cover_and_oos_does_not_overflow_for_slow_movers():
+    doc, oos = _cover_and_oos(20_000, 1 / 180, date(2026, 6, 1))
+
+    assert doc == 3_600_000.0
+    assert oos is None
+
+
 def test_reorder_plan_three_month_lead():
     # Run-out 1 Dec → reorder 2 Sep; 2 units/day × 90 days = 180 units
     qty, reorder_by, days_until = _reorder_plan("2026-12-01", 2.0, date(2026, 6, 1), lead_days=90)
@@ -61,3 +100,97 @@ def test_reorder_plan_three_month_lead():
     assert overdue_qty == 90
     assert overdue_by == "2026-05-03"
     assert overdue_days < 0
+
+
+def test_latest_pipeline_counts_sum_all_regions_without_region_filter():
+    engine = _stock_tables_engine()
+    with Session(engine) as session:
+        session.add_all(
+            [
+                OCSkuInventory(
+                    connection_id=1,
+                    mfskuid="MF1",
+                    service_region="UK",
+                    available=10,
+                    in_transit=3,
+                    received=5,
+                ),
+                OCSkuInventory(
+                    connection_id=1,
+                    mfskuid="MF1",
+                    service_region="US-South",
+                    available=4,
+                    in_transit=7,
+                    received=11,
+                ),
+            ]
+        )
+        session.commit()
+
+    db = SyncExecuteDb(engine)
+    try:
+        assert asyncio.run(_latest_pipeline_counts(db, 1, "mf1", None)) == (10, 16)
+        assert asyncio.run(_latest_pipeline_counts(db, 1, "mf1", "UK")) == (3, 5)
+    finally:
+        db.close()
+
+
+def test_latest_avl_actual_count_sums_latest_per_region_without_region_filter():
+    engine = _stock_tables_engine()
+    with Session(engine) as session:
+        session.add_all(
+            [
+                OCStockMovementLine(
+                    connection_id=1,
+                    mfskuid="MF1",
+                    service_region="UK",
+                    inventory_status="AVL",
+                    movement_id="uk-old",
+                    quantity=0,
+                    actual_count=10,
+                    update_time_raw="2026-06-01T10:00:00Z",
+                    update_time_utc=datetime(2026, 6, 1, 10, 0, 0),
+                ),
+                OCStockMovementLine(
+                    connection_id=1,
+                    mfskuid="MF1",
+                    service_region="UK",
+                    inventory_status="AVL",
+                    movement_id="uk-new",
+                    quantity=0,
+                    actual_count=8,
+                    update_time_raw="2026-06-02T10:00:00Z",
+                    update_time_utc=datetime(2026, 6, 2, 10, 0, 0),
+                ),
+                OCStockMovementLine(
+                    connection_id=1,
+                    mfskuid="MF1",
+                    service_region="US-South",
+                    inventory_status="AVL",
+                    movement_id="us-new",
+                    quantity=0,
+                    actual_count=4,
+                    update_time_raw="2026-06-02T11:00:00Z",
+                    update_time_utc=datetime(2026, 6, 2, 11, 0, 0),
+                ),
+                OCStockMovementLine(
+                    connection_id=1,
+                    mfskuid="MF1",
+                    service_region="UK",
+                    inventory_status="INTRAN",
+                    movement_id="ignored-status",
+                    quantity=0,
+                    actual_count=99,
+                    update_time_raw="2026-06-03T10:00:00Z",
+                    update_time_utc=datetime(2026, 6, 3, 10, 0, 0),
+                ),
+            ]
+        )
+        session.commit()
+
+    db = SyncExecuteDb(engine)
+    try:
+        assert asyncio.run(_latest_avl_actual_count(db, 1, "mf1", None)) == 12
+        assert asyncio.run(_latest_avl_actual_count(db, 1, "mf1", "UK")) == 8
+    finally:
+        db.close()

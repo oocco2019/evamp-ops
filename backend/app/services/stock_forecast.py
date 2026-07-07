@@ -72,7 +72,10 @@ def _cover_and_oos(total: int, burn: float, today: date) -> Tuple[Optional[float
     if burn <= 0 or total <= 0:
         return None, None
     doc = total / burn
-    oos = (today + timedelta(days=int(math.ceil(doc)))).isoformat()
+    days_until_oos = int(math.ceil(doc))
+    if days_until_oos > (date.max - today).days:
+        return round(doc, 4), None
+    oos = (today + timedelta(days=days_until_oos)).isoformat()
     return round(doc, 4), oos
 
 
@@ -147,12 +150,30 @@ async def _latest_avl_actual_count(
     ]
     if service_region is not None and str(service_region).strip():
         filters.append(mov.service_region == str(service_region).strip())
-    stmt = (
-        select(mov.actual_count)
-        .where(*filters)
-        .order_by(event_t.desc())
-        .limit(1)
+
+        stmt = (
+            select(mov.actual_count)
+            .where(*filters)
+            .order_by(event_t.desc(), mov.id.desc())
+            .limit(1)
+        )
+        r = await db.execute(stmt)
+        row = r.first()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+
+    rn = (
+        func.row_number()
+        .over(partition_by=mov.service_region, order_by=(event_t.desc(), mov.id.desc()))
+        .label("rn")
     )
+    latest_by_region = (
+        select(mov.service_region, func.coalesce(mov.actual_count, 0).label("actual_count"), rn)
+        .where(*filters)
+        .subquery()
+    )
+    stmt = select(func.sum(latest_by_region.c.actual_count)).where(latest_by_region.c.rn == 1)
     r = await db.execute(stmt)
     row = r.first()
     if row is None or row[0] is None:
@@ -173,7 +194,10 @@ async def _latest_pipeline_counts(
     ]
     if service_region is not None and str(service_region).strip():
         filters.append(OCSkuInventory.service_region == str(service_region).strip())
-    stmt = select(OCSkuInventory.in_transit, OCSkuInventory.received).where(*filters).limit(1)
+    stmt = select(
+        func.coalesce(func.sum(OCSkuInventory.in_transit), 0),
+        func.coalesce(func.sum(OCSkuInventory.received), 0),
+    ).where(*filters)
     r = await db.execute(stmt)
     row = r.first()
     if row is None:
