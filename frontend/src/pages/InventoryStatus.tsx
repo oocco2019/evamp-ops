@@ -8,6 +8,7 @@ import {
   type OCSkuInventoryRow,
   type OCSkuMapping,
 } from '../services/api'
+import { matchesInboundOverrideIdentity } from '../utils/inboundOverrideMatch'
 
 function inboundGetCi(obj: Record<string, unknown>, ...names: string[]): unknown {
   const lower = Object.fromEntries(Object.entries(obj).map(([k, v]) => [k.toLowerCase(), v]))
@@ -851,6 +852,8 @@ export default function InventoryStatus() {
   const [courierDraft, setCourierDraft] = useState('')
   const [trackingEditKey, setTrackingEditKey] = useState<string | null>(null)
   const [trackingDraft, setTrackingDraft] = useState('')
+  const courierCancelPendingRef = useRef(false)
+  const trackingCancelPendingRef = useRef(false)
   const [inboundSort, setInboundSort] = useState<{ key: InboundSortKey; dir: 'asc' | 'desc' }>(loadInboundSort)
   const [skuCountFilterMin5, setSkuCountFilterMin5] = useState<boolean>(loadSku5Filter)
   const [statusExcluded, setStatusExcluded] = useState<Set<string>>(() => loadStatusExcludedLocal())
@@ -918,11 +921,7 @@ export default function InventoryStatus() {
         ['inventory-status', 'inbound-orders', 6, 'full'],
         (prev) =>
           prev?.map((row) => {
-            const oc = data.oc_inbound_number?.trim()
-            const seller = data.seller_inbound_number?.trim()
-            const matchOc = oc && row.oc_inbound_number?.trim() === oc
-            const matchSeller = seller && row.seller_inbound_number?.trim() === seller
-            if (matchOc || matchSeller) {
+            if (matchesInboundOverrideIdentity(row, data)) {
               return { ...row, custom_courier_url: data.custom_courier_url }
             }
             return row
@@ -956,11 +955,7 @@ export default function InventoryStatus() {
         ['inventory-status', 'inbound-orders', 6, 'full'],
         (prev) =>
           prev?.map((row) => {
-            const oc = data.oc_inbound_number?.trim()
-            const seller = data.seller_inbound_number?.trim()
-            const matchOc = oc && row.oc_inbound_number?.trim() === oc
-            const matchSeller = seller && row.seller_inbound_number?.trim() === seller
-            if (matchOc || matchSeller) {
+            if (matchesInboundOverrideIdentity(row, data)) {
               return { ...row, custom_tracking_number: data.custom_tracking_number }
             }
             return row
@@ -1357,16 +1352,22 @@ export default function InventoryStatus() {
   }
 
   const startCourierEdit = (rowKey: string, initial: string) => {
+    courierCancelPendingRef.current = false
     setCourierEditKey(rowKey)
     setCourierDraft(initial)
   }
 
   const cancelCourierEdit = () => {
+    courierCancelPendingRef.current = true
     setCourierEditKey(null)
     setCourierDraft('')
   }
 
   const saveCourierEdit = (row: OCInboundOrderRow, rowKey: string, initial: string) => {
+    if (courierCancelPendingRef.current) {
+      courierCancelPendingRef.current = false
+      return
+    }
     if (courierEditKey !== rowKey) return
     const trimmed = courierDraft.trim()
     if (trimmed === initial.trim()) {
@@ -1377,16 +1378,22 @@ export default function InventoryStatus() {
   }
 
   const startTrackingEdit = (rowKey: string, initial: string) => {
+    trackingCancelPendingRef.current = false
     setTrackingEditKey(rowKey)
     setTrackingDraft(initial)
   }
 
   const cancelTrackingEdit = () => {
+    trackingCancelPendingRef.current = true
     setTrackingEditKey(null)
     setTrackingDraft('')
   }
 
   const saveTrackingEdit = (row: OCInboundOrderRow, rowKey: string, initial: string) => {
+    if (trackingCancelPendingRef.current) {
+      trackingCancelPendingRef.current = false
+      return
+    }
     if (trackingEditKey !== rowKey) return
     const trimmed = trackingDraft.trim()
     if (trimmed === initial.trim()) {

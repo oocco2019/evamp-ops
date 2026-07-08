@@ -475,21 +475,26 @@ async def _find_inbound_order_for_override(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Provide oc_inbound_number and/or seller_inbound_number.",
         )
-    filters = []
+    filters = [OCInboundOrder.connection_id == connection_id]
     if oc:
         filters.append(func.lower(OCInboundOrder.oc_inbound_number) == oc.lower())
     if seller:
         filters.append(func.lower(OCInboundOrder.seller_inbound_number) == seller.lower())
     stmt = (
         select(OCInboundOrder)
-        .where(OCInboundOrder.connection_id == connection_id, or_(*filters))
-        .limit(1)
+        .where(*filters)
+        .limit(2)
     )
     result = await db.execute(stmt)
-    row = result.scalar_one_or_none()
-    if not row:
+    rows = list(result.scalars().all())
+    if not rows:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbound order not found.")
-    return row
+    if len(rows) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Inbound order match is ambiguous; provide both OC and seller inbound numbers.",
+        )
+    return rows[0]
 
 
 # Earliest date for historic inbound status chart (inclusive, UTC).
@@ -1328,7 +1333,7 @@ async def list_oc_inventory(
             .join(Order, Order.order_id == LineItem.order_id)
             .where(
                 LineItem.sku.in_(seller_skus),
-                Order.cancel_status != "CANCELED",
+                or_(Order.cancel_status.is_(None), Order.cancel_status != "CANCELED"),
                 Order.date >= from_3m,
                 Order.date <= today,
             )
