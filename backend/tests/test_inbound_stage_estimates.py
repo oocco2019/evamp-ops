@@ -2,6 +2,7 @@ import datetime
 
 from app.api.inventory_status import (
     _extract_inbound_ui_times,
+    _inbound_identifier_match_filter,
     _inbound_status_is_canceled,
     _movement_reason_code,
     _putaway_qty_transitioned,
@@ -11,6 +12,30 @@ from app.api.inventory_status import (
     _status_indicates_other_warehouse,
     _status_indicates_putaway,
 )
+
+
+def test_inbound_identifier_match_requires_both_ids_when_both_provided():
+    predicate = _inbound_identifier_match_filter(
+        oc_inbound_number="OC-123",
+        seller_inbound_number="PO-456",
+    )
+
+    compiled = str(predicate.compile(compile_kwargs={"literal_binds": True}))
+    assert " AND " in compiled
+    assert " OR " not in compiled
+    assert "oc-123" in compiled
+    assert "po-456" in compiled
+
+
+def test_inbound_identifier_match_allows_single_identifier_lookup():
+    predicate = _inbound_identifier_match_filter(
+        oc_inbound_number="OC-123",
+        seller_inbound_number="",
+    )
+
+    compiled = str(predicate.compile(compile_kwargs={"literal_binds": True}))
+    assert "oc-123" in compiled
+    assert "seller_inbound_number" not in compiled
 
 
 def test_inbound_status_is_canceled():

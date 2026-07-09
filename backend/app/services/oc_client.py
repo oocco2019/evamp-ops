@@ -101,12 +101,16 @@ def _inbound_row_has_sku_list(raw: Any) -> bool:
 def _merge_inbound_list_and_detail(list_raw: Dict[str, Any], detail: Dict[str, Any]) -> Dict[str, Any]:
     """
     Merge detail into the list-query row. Detail wins on conflicts, except: do not overwrite a
-    non-null list value with None from detail (some tenants omit timestamps in detail or send null).
+    non-null value with None or a non-empty collection with an empty one from detail.
     """
     out = dict(list_raw)
     for k, v in detail.items():
         if v is None and k in out and out[k] is not None:
             continue
+        if isinstance(v, (list, dict)) and len(v) == 0 and k in out:
+            existing = out[k]
+            if isinstance(existing, (list, dict)) and len(existing) > 0:
+                continue
         out[k] = v
     return out
 

@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import case, delete, func, or_, select
+from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -461,6 +461,37 @@ def _normalize_custom_tracking_number(value: Optional[str]) -> Optional[str]:
     return s
 
 
+def _inbound_identifier_conditions(
+    *,
+    oc_inbound_number: Optional[str],
+    seller_inbound_number: Optional[str],
+):
+    oc = (oc_inbound_number or "").strip()
+    seller = (seller_inbound_number or "").strip()
+    conditions = []
+    if oc:
+        conditions.append(func.lower(OCInboundOrder.oc_inbound_number) == oc.lower())
+    if seller:
+        conditions.append(func.lower(OCInboundOrder.seller_inbound_number) == seller.lower())
+    return conditions
+
+
+def _inbound_identifier_match_filter(
+    *,
+    oc_inbound_number: Optional[str],
+    seller_inbound_number: Optional[str],
+):
+    conditions = _inbound_identifier_conditions(
+        oc_inbound_number=oc_inbound_number,
+        seller_inbound_number=seller_inbound_number,
+    )
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return and_(*conditions)
+
+
 async def _find_inbound_order_for_override(
     db: AsyncSession,
     connection_id: int,
@@ -475,14 +506,13 @@ async def _find_inbound_order_for_override(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Provide oc_inbound_number and/or seller_inbound_number.",
         )
-    filters = []
-    if oc:
-        filters.append(func.lower(OCInboundOrder.oc_inbound_number) == oc.lower())
-    if seller:
-        filters.append(func.lower(OCInboundOrder.seller_inbound_number) == seller.lower())
+    match_filter = _inbound_identifier_match_filter(
+        oc_inbound_number=oc,
+        seller_inbound_number=seller,
+    )
     stmt = (
         select(OCInboundOrder)
-        .where(OCInboundOrder.connection_id == connection_id, or_(*filters))
+        .where(OCInboundOrder.connection_id == connection_id, match_filter)
         .limit(1)
     )
     result = await db.execute(stmt)
@@ -981,21 +1011,42 @@ async def _upsert_inbound_rows(db: AsyncSession, connection_id: int, rows: List[
         # (e.g. no OC number yet), then become populated later. In that case dedup_key changes;
         # match by stable identifiers so we update the same row instead of creating duplicates.
         if existing is None and (oc or seller):
-            filters = []
-            if oc:
-                filters.append(func.lower(OCInboundOrder.oc_inbound_number) == str(oc).strip().lower())
-            if seller:
-                filters.append(
-                    func.lower(OCInboundOrder.seller_inbound_number) == str(seller).strip().lower()
-                )
-            if filters:
+            match_filter = _inbound_identifier_match_filter(
+                oc_inbound_number=str(oc or ""),
+                seller_inbound_number=seller,
+            )
+            if match_filter is not None:
                 existing_r = await db.execute(
                     select(OCInboundOrder).where(
                         OCInboundOrder.connection_id == connection_id,
-                        or_(*filters),
+                        match_filter,
                     )
                 )
                 existing = existing_r.scalar_one_or_none()
+
+            if existing is None and oc and seller:
+                loose_conditions = _inbound_identifier_conditions(
+                    oc_inbound_number=str(oc),
+                    seller_inbound_number=seller,
+                )
+                loose_r = await db.execute(
+                    select(OCInboundOrder)
+                    .where(
+                        OCInboundOrder.connection_id == connection_id,
+                        or_(*loose_conditions),
+                    )
+                    .limit(2)
+                )
+                loose_matches = loose_r.scalars().all()
+                if len(loose_matches) == 1:
+                    existing = loose_matches[0]
+                elif len(loose_matches) > 1:
+                    logger.warning(
+                        "Skipping ambiguous inbound fallback match for oc=%s seller=%s: %s rows matched",
+                        oc,
+                        seller,
+                        len(loose_matches),
+                    )
         if existing:
             prev_putaway_qty = int(existing.put_away_qty or 0)
             prev_status_lower = str(existing.status or "").lower()
