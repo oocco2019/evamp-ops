@@ -41,6 +41,7 @@ If there are no sales in the sample, burn rate is blank (`—`) and ordered run-
 - **Ordered** = current available + in transit + received (still forecasts run-out when available is 0 but inbound/received stock exists).
 - **Days of cover** = `ordered_total / burn_rate_per_day`
 - **Est. date** = today + `ceil(days of cover)` calendar days
+- If ordered stock is **0** but historical in-stock sales produce a burn rate, days of cover is **0** and the SKU is treated as already at run-out so reorder guidance shows **Order now**.
 
 **Assumption:** no further inbound restock after today (in-transit and received are counted once in **Ordered**, not double-counted when they become available).
 

@@ -7,7 +7,7 @@ import math
 from datetime import date, datetime, timedelta, timezone, time as dt_time
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.settings import OCStockMovementLine, OCSkuInventory, OCSkuMapping
@@ -69,7 +69,7 @@ def _daterange(a: date, b: date) -> List[date]:
 
 
 def _cover_and_oos(total: int, burn: float, today: date) -> Tuple[Optional[float], Optional[str]]:
-    if burn <= 0 or total <= 0:
+    if burn <= 0 or total < 0:
         return None, None
     doc = total / burn
     oos = (today + timedelta(days=int(math.ceil(doc)))).isoformat()
@@ -219,7 +219,7 @@ async def _ebay_units_by_order_date(
         .join(Order, Order.order_id == LineItem.order_id)
         .where(
             LineItem.sku.in_(line_item_skus),
-            Order.cancel_status != "CANCELED",
+            or_(Order.cancel_status.is_(None), Order.cancel_status != "CANCELED"),
             Order.date >= window_start,
             Order.date <= window_end,
         )
@@ -263,9 +263,6 @@ async def _forecast_for_mapping_row(
         current_received=current_received,
         ordered_total=ordered_total,
     )
-
-    if ordered_total <= 0:
-        return _forecast_row(**stock_fields)
 
     hist = await list_inventory_history(
         db=db,
