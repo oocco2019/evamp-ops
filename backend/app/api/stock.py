@@ -74,6 +74,12 @@ def _parsed_order_to_orm_payload(od: dict) -> dict:
     }
 
 
+def _retain_fetched_order_raw_payload(order: Order, raw: Optional[dict]) -> None:
+    """Keep getOrder fallback JSON when older rows predate raw-payload retention."""
+    if raw and order.raw_payload is None:
+        order.raw_payload = raw
+
+
 # === eBay OAuth ===
 
 class AuthUrlResponse(BaseModel):
@@ -749,6 +755,7 @@ async def backfill_order_earnings(
             if val is None:
                 raw = await fetch_order_by_id(access_token, o.ebay_order_id)
                 if raw:
+                    _retain_fetched_order_raw_payload(o, raw)
                     ps = raw.get("paymentSummary") or {}
                     val, cc = _parse_total_due_seller(ps.get("totalDueSeller"))
             if val is not None or cc is not None:

@@ -5,6 +5,7 @@ keep the complete payload (including line items) in orders.raw_payload.
 """
 from app.services.ebay_client import parse_orders_to_import
 from app.services.shopify_client import parse_shopify_order_to_import
+from app.api.stock import _retain_fetched_order_raw_payload
 
 
 def test_ebay_parse_retains_full_raw_order_object():
@@ -42,3 +43,27 @@ def test_shopify_parse_retains_full_raw_order_object():
     parsed = parse_shopify_order_to_import(raw_order)
     assert parsed["raw_payload"] == raw_order
     assert parsed["raw_payload"]["an_unmapped_field"] == "keepme"
+
+
+def test_get_order_fallback_retains_raw_payload_when_missing():
+    order = type("OrderStub", (), {"raw_payload": None})()
+    raw_order = {
+        "orderId": "12-34567-89012",
+        "paymentSummary": {"totalDueSeller": {"value": "19.99", "currency": "GBP"}},
+        "lineItems": [{"lineItemId": "L1", "sku": "SKU-A", "quantity": 1}],
+        "unmapped_field": {"keep": True},
+    }
+
+    _retain_fetched_order_raw_payload(order, raw_order)
+
+    assert order.raw_payload == raw_order
+    assert order.raw_payload["unmapped_field"] == {"keep": True}
+
+
+def test_get_order_fallback_does_not_overwrite_existing_raw_payload():
+    existing = {"orderId": "existing"}
+    order = type("OrderStub", (), {"raw_payload": existing})()
+
+    _retain_fetched_order_raw_payload(order, {"orderId": "new"})
+
+    assert order.raw_payload == existing
