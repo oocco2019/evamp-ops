@@ -3,7 +3,12 @@
 See docs/DATA_RETENTION.md and .cursor/rules/data-retention.mdc. Platforms purge orders, so we
 keep the complete payload (including line items) in orders.raw_payload.
 """
+from datetime import datetime, timezone
+
+import pytest
+
 from app.services.ebay_client import parse_orders_to_import
+from app.services import shopify_client
 from app.services.shopify_client import parse_shopify_order_to_import
 
 
@@ -42,3 +47,43 @@ def test_shopify_parse_retains_full_raw_order_object():
     parsed = parse_shopify_order_to_import(raw_order)
     assert parsed["raw_payload"] == raw_order
     assert parsed["raw_payload"]["an_unmapped_field"] == "keepme"
+
+
+@pytest.mark.asyncio
+async def test_shopify_fetch_does_not_filter_fields(monkeypatch):
+    sent_params = []
+
+    class DummyResponse:
+        headers = {}
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"orders": [{"id": 5550001112223, "an_unmapped_field": "keepme"}]}
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, *, headers, params):
+            sent_params.append(dict(params))
+            return DummyResponse()
+
+    monkeypatch.setattr(shopify_client.httpx, "AsyncClient", DummyClient)
+
+    orders = await shopify_client.fetch_shopify_orders_paginated(
+        "example-shop",
+        "token",
+        created_at_min=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert orders == [{"id": 5550001112223, "an_unmapped_field": "keepme"}]
+    assert sent_params
+    assert "fields" not in sent_params[0]

@@ -475,21 +475,82 @@ async def _find_inbound_order_for_override(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Provide oc_inbound_number and/or seller_inbound_number.",
         )
+
+    row, ambiguous = await _find_inbound_order_by_identifiers(
+        db,
+        connection_id,
+        oc_inbound_number=oc,
+        seller_inbound_number=seller,
+        allow_loose_when_both=False,
+    )
+    if ambiguous:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Inbound order identifiers match multiple rows.",
+        )
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbound order not found.")
+    return row
+
+
+async def _find_inbound_order_by_identifiers(
+    db: AsyncSession,
+    connection_id: int,
+    *,
+    oc_inbound_number: Optional[str],
+    seller_inbound_number: Optional[str],
+    allow_loose_when_both: bool,
+) -> tuple[Optional[OCInboundOrder], bool]:
+    """
+    Return a single inbound row matched by identifiers.
+
+    If both identifiers are supplied, prefer an exact same-row match. Sync may then
+    fall back to a single loose match so rows first seen without an OC number can be
+    upgraded later. Ambiguous loose matches are intentionally ignored instead of
+    picking an arbitrary row and corrupting another inbound order's overrides/data.
+    """
+    oc = (oc_inbound_number or "").strip()
+    seller = (seller_inbound_number or "").strip()
+
+    if oc and seller:
+        exact_result = await db.execute(
+            select(OCInboundOrder)
+            .where(
+                OCInboundOrder.connection_id == connection_id,
+                func.lower(OCInboundOrder.oc_inbound_number) == oc.lower(),
+                func.lower(OCInboundOrder.seller_inbound_number) == seller.lower(),
+            )
+            .order_by(OCInboundOrder.id.asc())
+            .limit(2)
+        )
+        exact_matches = exact_result.scalars().all()
+        if len(exact_matches) == 1:
+            return exact_matches[0], False
+        if len(exact_matches) > 1:
+            return None, True
+        if not allow_loose_when_both:
+            return None, False
+
     filters = []
     if oc:
         filters.append(func.lower(OCInboundOrder.oc_inbound_number) == oc.lower())
     if seller:
         filters.append(func.lower(OCInboundOrder.seller_inbound_number) == seller.lower())
-    stmt = (
+    if not filters:
+        return None, False
+
+    result = await db.execute(
         select(OCInboundOrder)
         .where(OCInboundOrder.connection_id == connection_id, or_(*filters))
-        .limit(1)
+        .order_by(OCInboundOrder.id.asc())
+        .limit(2)
     )
-    result = await db.execute(stmt)
-    row = result.scalar_one_or_none()
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inbound order not found.")
-    return row
+    matches = result.scalars().all()
+    if len(matches) == 1:
+        return matches[0], False
+    if len(matches) > 1:
+        return None, True
+    return None, False
 
 
 # Earliest date for historic inbound status chart (inclusive, UTC).
@@ -979,23 +1040,22 @@ async def _upsert_inbound_rows(db: AsyncSession, connection_id: int, rows: List[
 
         # Fallback matching: inbound identifiers can arrive incomplete in earlier syncs
         # (e.g. no OC number yet), then become populated later. In that case dedup_key changes;
-        # match by stable identifiers so we update the same row instead of creating duplicates.
+        # update a single matching row, but never pick arbitrarily when identifiers are ambiguous.
         if existing is None and (oc or seller):
-            filters = []
-            if oc:
-                filters.append(func.lower(OCInboundOrder.oc_inbound_number) == str(oc).strip().lower())
-            if seller:
-                filters.append(
-                    func.lower(OCInboundOrder.seller_inbound_number) == str(seller).strip().lower()
+            existing, ambiguous = await _find_inbound_order_by_identifiers(
+                db,
+                connection_id,
+                oc_inbound_number=str(oc or ""),
+                seller_inbound_number=seller,
+                allow_loose_when_both=True,
+            )
+            if ambiguous:
+                logger.warning(
+                    "OC inbound sync skipped ambiguous fallback match connection_id=%s oc_inbound_number=%s seller_inbound_number=%s",
+                    connection_id,
+                    oc,
+                    seller,
                 )
-            if filters:
-                existing_r = await db.execute(
-                    select(OCInboundOrder).where(
-                        OCInboundOrder.connection_id == connection_id,
-                        or_(*filters),
-                    )
-                )
-                existing = existing_r.scalar_one_or_none()
         if existing:
             prev_putaway_qty = int(existing.put_away_qty or 0)
             prev_status_lower = str(existing.status or "").lower()
@@ -1223,6 +1283,28 @@ async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC sync failed: {e}") from e
+
+    if not rows or not inventory_rows_data:
+        existing_mapping_result = await db.execute(
+            select(OCSkuMapping.id)
+            .where(OCSkuMapping.connection_id == connection.id)
+            .limit(1)
+        )
+        existing_inventory_result = await db.execute(
+            select(OCSkuInventory.id)
+            .where(OCSkuInventory.connection_id == connection.id)
+            .limit(1)
+        )
+        if not rows and existing_mapping_result.first() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="OC SKU mapping sync returned no rows; preserved existing cached mappings.",
+            )
+        if not inventory_rows_data and existing_inventory_result.first() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="OC inventory sync returned no rows; preserved existing cached inventory.",
+            )
 
     await db.execute(delete(OCSkuMapping).where(OCSkuMapping.connection_id == connection.id))
     await db.execute(delete(OCSkuInventory).where(OCSkuInventory.connection_id == connection.id))
