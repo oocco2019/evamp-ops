@@ -174,3 +174,16 @@ To send a non-image file (DOC, PDF, TXT), host the file at an HTTPS URL and pass
 
 5. **Storing blobs — full-size**  
    In `_store_message_media_blobs`, for each item with `mediaType == "IMAGE"` and a URL containing `ebayimg.com`, rewrite the URL with `_ebay_image_full_size_url(url)` before fetching, so the stored bytes are full-size and "open in new tab" shows full-size. If a blob row already exists for that message/index, we still re-fetch and overwrite it when the item is an eBay image (upgrade path for blobs stored before this logic).
+
+---
+
+## Send failure (eBay rejection)
+
+When **Send** fails (eBay blocks the message — e.g. contact details on an old order, policy violation, empty text after trim):
+
+1. **Backend** returns HTTP **502** with `detail` like `eBay rejected the message: …` (parsed from eBay’s `errors[].longMessage` when present).
+2. **Frontend** must **not** clear the reply box or attachments until send succeeds. On failure it shows a red banner and leaves the draft text (and pending attachments) unchanged.
+3. Do **not** add an optimistic seller bubble before eBay confirms send — that made failures look like the message was sent and then vanished.
+
+**Code:** `MessageDashboard.tsx` — `handleSend`; `messages.py` — `send_reply`, `_ebay_api_error_detail`.
+

@@ -13,21 +13,11 @@ import {
 } from 'recharts'
 import { inventoryStatusAPI, type StockForecastRow } from '../services/api'
 import { buildDailyStockLevelsFromHistory } from '../utils/inventoryHistoryFormat'
-
-const formatLocalDate = (d: Date): string => {
-  const year = d.getFullYear()
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-const todayIso = () => formatLocalDate(new Date())
-
-const offsetDaysFromToday = (daysAgo: number) => {
-  const d = new Date()
-  d.setDate(d.getDate() - daysAgo)
-  return formatLocalDate(d)
-}
+import {
+  completeDaysRange,
+  periodPresetRange,
+  type PeriodPreset,
+} from '../utils/datePeriodPresets'
 
 function formatOosDayLabel(iso: string): string {
   const [y, m, d] = iso.split('-').map((v) => Number(v))
@@ -129,11 +119,6 @@ function sortForecastRows(
 const forecastSortHeaderClass =
   'font-medium cursor-pointer hover:text-gray-900 select-none'
 
-/** Inclusive last N calendar days (same as Sales Analytics). */
-const lastNDaysFrom = (n: number) => offsetDaysFromToday(n - 1)
-
-type PeriodPreset = 'today' | '7d' | '1m' | '3m' | '6m' | '1y' | 'custom'
-
 function formatDelta(n: number | null): string {
   if (n === null || n === undefined) return '—'
   if (n === 0) return '0'
@@ -178,38 +163,19 @@ function DiagnosticsPanel() {
 
 export default function InventoryMovement() {
   const queryClient = useQueryClient()
+  const defaultRange = completeDaysRange(365)
   const [periodPreset, setPeriodPreset] = useState<PeriodPreset>('1y')
-  const [from, setFrom] = useState(() => lastNDaysFrom(365))
-  const [to, setTo] = useState(() => todayIso())
+  const [from, setFrom] = useState(defaultRange.from)
+  const [to, setTo] = useState(defaultRange.to)
   /** `all` = every mapped seller SKU (aggregated). Otherwise OC seller SKU id. */
   const [skuSelect, setSkuSelect] = useState<string>('all')
   const [forecastSort, setForecastSort] = useState(loadForecastSort)
 
   const applyPeriodPreset = (preset: PeriodPreset) => {
-    const today = todayIso()
-    let newFrom = from
-    let newTo = to
-    if (preset === 'today') {
-      newFrom = today
-      newTo = today
-    } else if (preset === '7d') {
-      newFrom = lastNDaysFrom(7)
-      newTo = today
-    } else if (preset === '1m') {
-      newFrom = lastNDaysFrom(30)
-      newTo = today
-    } else if (preset === '3m') {
-      newFrom = lastNDaysFrom(90)
-      newTo = today
-    } else if (preset === '6m') {
-      newFrom = lastNDaysFrom(180)
-      newTo = today
-    } else if (preset === '1y') {
-      newFrom = lastNDaysFrom(365)
-      newTo = today
-    }
-    setFrom(newFrom)
-    setTo(newTo)
+    const range = periodPresetRange(preset)
+    if (!range) return
+    setFrom(range.from)
+    setTo(range.to)
     setPeriodPreset(preset)
   }
 

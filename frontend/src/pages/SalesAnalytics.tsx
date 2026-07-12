@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -13,32 +13,36 @@ import {
   Legend,
 } from 'recharts'
 import { stockAPI } from '../services/api'
-
-const formatLocalDate = (d: Date): string => {
-  const year = d.getFullYear()
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-const todayIso = () => formatLocalDate(new Date())
-
-const offsetDaysFromToday = (daysAgo: number) => {
-  const d = new Date()
-  d.setDate(d.getDate() - daysAgo)
-  return formatLocalDate(d)
-}
-
-const lastNDaysFrom = (n: number) => offsetDaysFromToday(n - 1)
-
-const defaultTo = () => todayIso()
-const defaultFrom = () => lastNDaysFrom(90)
-const GBP_TO_EUR_RATE = 1.16
+import {
+  defaultAnalyticsRange,
+  formatLocalDate,
+  periodPresetRange,
+  todayIso,
+  type PeriodPreset,
+} from '../utils/datePeriodPresets'
 
 const SKU_SORT_STORAGE_KEY = 'salesAnalytics.skuSort'
 const COUNTRY_SORT_STORAGE_KEY = 'salesAnalytics.countrySort'
 
-type PeriodPreset = 'today' | '7d' | '1m' | '3m' | '6m' | '1y' | 'custom'
+const GBP_TO_EUR_RATE = 1.16
+
+function sumProfitGbp(rows: { profit: string }[] | null | undefined): number | null {
+  if (!rows?.length) return null
+  return rows.reduce((sum, row) => sum + (Number(row.profit) || 0), 0)
+}
+
+function formatProfitPair(totalGbp: number | null): ReactNode {
+  if (totalGbp == null || Number.isNaN(totalGbp)) return '—'
+  const totalEur = totalGbp * GBP_TO_EUR_RATE
+  return (
+    <>
+      £{totalGbp.toFixed(2)}
+      <span className="text-lg font-normal text-gray-600 ml-2">
+        / €{totalEur.toFixed(2)}
+      </span>
+    </>
+  )
+}
 
 type SkuSortKey = 'sku_code' | 'quantity_sold' | 'profit'
 type CountrySortKey = 'country' | 'quantity_sold' | 'profit'
@@ -92,8 +96,9 @@ function loadCountrySort(): { key: CountrySortKey; dir: 'asc' | 'desc' } {
 
 export default function SalesAnalytics() {
   const queryClient = useQueryClient()
-  const [from, setFrom] = useState(defaultFrom)
-  const [to, setTo] = useState(defaultTo)
+  const defaultRange = defaultAnalyticsRange()
+  const [from, setFrom] = useState(defaultRange.from)
+  const [to, setTo] = useState(defaultRange.to)
   const [periodPreset, setPeriodPreset] = useState<PeriodPreset>('3m')
   const [groupBy, setGroupBy] = useState<'day' | 'week' | 'month'>('day')
   const [country, setCountry] = useState('')
@@ -109,6 +114,7 @@ export default function SalesAnalytics() {
     stockAPI.runImport('incremental').then(() => {
       if (!cancelled) {
         queryClient.invalidateQueries({ queryKey: ['analytics'] })
+        queryClient.invalidateQueries({ queryKey: ['analytics-today'] })
         queryClient.invalidateQueries({ queryKey: ['analytics-monthly-profit'] })
         queryClient.invalidateQueries({ queryKey: ['analytics-monthly-profit-years'] })
       }
@@ -140,6 +146,27 @@ export default function SalesAnalytics() {
         data: summaryRes.data,
         bySku: bySkuRes.data,
         byCountry: byCountryRes.data,
+      }
+    },
+  })
+
+  const { data: todayStats } = useQuery({
+    queryKey: ['analytics-today', country, sku],
+    queryFn: async () => {
+      const today = todayIso()
+      const params = {
+        from: today,
+        to: today,
+        country: country.trim() || undefined,
+        sku: sku.trim() || undefined,
+      }
+      const [summaryRes, byCountryRes] = await Promise.all([
+        stockAPI.getAnalyticsSummary({ ...params, group_by: 'day' }),
+        stockAPI.getAnalyticsByCountry({ from: today, to: today, sku: sku.trim() || undefined }),
+      ])
+      return {
+        unitsSold: summaryRes.data.totals.units_sold,
+        profitGbp: sumProfitGbp(byCountryRes.data) ?? 0,
       }
     },
   })
@@ -197,30 +224,10 @@ export default function SalesAnalytics() {
   }, [])
 
   const applyPeriodPreset = (preset: PeriodPreset) => {
-    const today = todayIso()
-    let newFrom = from
-    let newTo = to
-    if (preset === 'today') {
-      newFrom = today
-      newTo = today
-    } else if (preset === '7d') {
-      newFrom = lastNDaysFrom(7)
-      newTo = today
-    } else if (preset === '1m') {
-      newFrom = lastNDaysFrom(30)
-      newTo = today
-    } else if (preset === '3m') {
-      newFrom = lastNDaysFrom(90)
-      newTo = today
-    } else if (preset === '6m') {
-      newFrom = lastNDaysFrom(180)
-      newTo = today
-    } else if (preset === '1y') {
-      newFrom = lastNDaysFrom(365)
-      newTo = today
-    }
-    setFrom(newFrom)
-    setTo(newTo)
+    const range = periodPresetRange(preset)
+    if (!range) return
+    setFrom(range.from)
+    setTo(range.to)
     setPeriodPreset(preset)
   }
 
@@ -345,6 +352,9 @@ export default function SalesAnalytics() {
       })
     : []
 
+  const periodProfitGbp = byCountry && byCountry.length > 0 ? sumProfitGbp(byCountry) : null
+  const todayProfitGbp = todayStats != null ? todayStats.profitGbp : null
+
   return (
     <div className="px-4 py-6 sm:px-0">
       <h1 className="text-3xl font-bold text-gray-900 mb-4">Sales Analytics</h1>
@@ -448,31 +458,25 @@ export default function SalesAnalytics() {
       {data && (
         <>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
-            <div className="bg-white shadow rounded-lg p-4">
-              <p className="text-sm text-gray-500" title="Sum of quantities across all line items.">Units sold</p>
-              <p className="text-2xl font-bold text-gray-900">{data.totals.units_sold}</p>
+            <div className="bg-white shadow rounded-lg p-4 flex justify-between items-end gap-4">
+              <div>
+                <p className="text-sm text-gray-500" title="Sum of quantities across all line items.">Units sold</p>
+                <p className="text-2xl font-bold text-gray-900">{data.totals.units_sold}</p>
+              </div>
+              <div className="text-right border-l border-gray-200 pl-4 min-w-[5rem]">
+                <p className="text-sm text-gray-500">Today</p>
+                <p className="text-2xl font-bold text-gray-900">{todayStats?.unitsSold ?? '—'}</p>
+              </div>
             </div>
-            <div className="bg-white shadow rounded-lg p-4">
-              <p className="text-sm text-gray-500" title="Total profit in the selected period (GBP / EUR), after 30% tax on profit.">Profit</p>
-              <p className="text-2xl font-bold text-gray-900">
-                {byCountry && byCountry.length > 0 ? (() => {
-                  const totalGbp = byCountry.reduce(
-                    (sum, row) => sum + (Number(row.profit) || 0),
-                    0
-                  )
-                  const totalEur = totalGbp * GBP_TO_EUR_RATE
-                  return (
-                    <>
-                      £{totalGbp.toFixed(2)}
-                      <span className="text-lg font-normal text-gray-600 ml-2">
-                        / €{totalEur.toFixed(2)}
-                      </span>
-                    </>
-                  )
-                })() : (
-                  '—'
-                )}
-              </p>
+            <div className="bg-white shadow rounded-lg p-4 flex justify-between items-end gap-4">
+              <div>
+                <p className="text-sm text-gray-500" title="Total profit in the selected period (GBP / EUR), after 30% tax on profit.">Profit</p>
+                <p className="text-2xl font-bold text-gray-900">{formatProfitPair(periodProfitGbp)}</p>
+              </div>
+              <div className="text-right border-l border-gray-200 pl-4 min-w-[5rem]">
+                <p className="text-sm text-gray-500">Today</p>
+                <p className="text-2xl font-bold text-gray-900">{formatProfitPair(todayProfitGbp)}</p>
+              </div>
             </div>
           </div>
 

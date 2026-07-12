@@ -479,32 +479,20 @@ export default function MessageDashboard() {
   const handleSend = async () => {
     if (!selectedThread || (!replyContent.trim() && replyAttachments.length === 0)) return
     const content = replyContent.trim()
-    const mediaToSend = replyAttachments.length > 0 ? replyAttachments : undefined
+    const mediaToSend = replyAttachments.length > 0 ? [...replyAttachments] : undefined
+    const draftSnapshot = _draft
     setError(null)
-    const optimisticMsg: MessageResp = {
-      message_id: `pending-${Date.now()}`,
-      thread_id: selectedThread.thread_id,
-      sender_type: 'seller',
-      sender_username: null,
-      subject: null,
-      content: content || '(attachment)',
-      media: mediaToSend,
-      is_read: true,
-      detected_language: null,
-      translated_content: null,
-      ebay_created_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-    }
-    setSelectedThread({
-      ...selectedThread,
-      messages: [...selectedThread.messages, optimisticMsg],
-    })
-    setReplyContent('')
-    setDraft('')
-    setReplyAttachments([])
     setLoading(true)
     try {
-      await messagesAPI.sendReply(selectedThread.thread_id, content, _draft ? _draft : undefined, mediaToSend)
+      await messagesAPI.sendReply(
+        selectedThread.thread_id,
+        content,
+        draftSnapshot ? draftSnapshot : undefined,
+        mediaToSend,
+      )
+      setReplyContent('')
+      setDraft('')
+      setReplyAttachments([])
       const threadId = selectedThread.thread_id
       loadThread(threadId)
       loadThreads()
@@ -512,9 +500,18 @@ export default function MessageDashboard() {
       messagesAPI.refreshThread(threadId).catch(() => {})
       window.setTimeout(() => loadThread(threadId, { silent: true }), 4000)
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Send failed')
       setReplyContent(content)
-      loadThread(selectedThread.thread_id)
+      setDraft(draftSnapshot)
+      if (mediaToSend) setReplyAttachments(mediaToSend)
+      const ax = e as { response?: { data?: { detail?: string } } }
+      const detail = ax.response?.data?.detail
+      const base = e instanceof Error ? e.message : 'Send failed'
+      const msg = typeof detail === 'string' && detail ? detail : base
+      setError(
+        msg.includes('rejected') || msg.includes('eBay')
+          ? `Message not sent. ${msg} Your reply is still in the box — edit and try again.`
+          : `Message not sent: ${msg} Your reply is still in the box.`,
+      )
     } finally {
       setLoading(false)
     }
@@ -666,18 +663,20 @@ export default function MessageDashboard() {
 
   const handleComposeGerman = async () => {
     if (!selectedThread || composingDe) return
+    const text = replyContent.trim()
+    if (!text) {
+      setError('Enter reply text to translate, then click DE.')
+      return
+    }
     setComposingDe(true)
     setError(null)
     try {
-      const res = await messagesAPI.draftGerman(selectedThread.thread_id, {
-        seed_text: replyContent.trim() || undefined,
-        extra_instructions: aiPromptInstructions.trim() || undefined,
-      })
+      const res = await messagesAPI.draftGerman(selectedThread.thread_id, text)
       setReplyContent(res.data.draft)
       setDraft('')
     } catch (e: unknown) {
       const ax = e as { response?: { data?: { detail?: string } } }
-      setError(ax.response?.data?.detail || (e instanceof Error ? e.message : 'German compose failed'))
+      setError(ax.response?.data?.detail || (e instanceof Error ? e.message : 'German translation failed'))
     } finally {
       setComposingDe(false)
     }
@@ -1107,9 +1106,9 @@ export default function MessageDashboard() {
                   <button
                     type="button"
                     onClick={handleComposeGerman}
-                    disabled={composingDe || loading}
+                    disabled={composingDe || loading || !replyContent.trim()}
                     className="h-10 px-3 flex-shrink-0 rounded-full bg-gray-100 text-gray-800 hover:bg-gray-200 disabled:opacity-50 flex items-center justify-center text-xs font-semibold tracking-wide"
-                    title="Compose reply in German using AI (replaces draft text)"
+                    title="Translate reply text to German (uses reply box only; ignores Instructions for AI)"
                     aria-label="Compose in German"
                   >
                     {composingDe ? '…' : 'DE'}

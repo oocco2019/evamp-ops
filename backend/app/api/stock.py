@@ -16,6 +16,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from app.core.database import get_db
 from app.core.config import settings as app_settings
 from app.core.security import encryption_service
+from app.utils.date_ranges import latest_complete_day
 from app.models.settings import APICredential, Warehouse
 from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem
 from app.services.shopify_client import (
@@ -963,15 +964,16 @@ async def get_analytics_monthly_profit(
     Always returns 12 rows: selected calendar year or rolling last 12 calendar months ending this month.
     """
     today = date.today()
+    latest = latest_complete_day()
     if year is not None:
         month_keys = [date(year, m, 1) for m in range(1, 13)]
         from_date = date(year, 1, 1)
-        to_date = min(date(year, 12, 31), today)
+        to_date = min(date(year, 12, 31), latest)
     else:
         first_this = _month_start(today)
         month_keys = [_add_months(first_this, i) for i in range(-11, 1)]
         from_date = month_keys[0]
-        to_date = today
+        to_date = latest
 
     stmt = (
         select(Order)

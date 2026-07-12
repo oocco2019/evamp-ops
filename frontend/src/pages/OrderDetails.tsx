@@ -2,28 +2,11 @@ import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { isAxiosError } from 'axios'
 import { stockAPI, type OrderDetailsResponse } from '../services/api'
-
-const formatLocalDate = (d: Date): string => {
-  const year = d.getFullYear()
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-const todayIso = () => formatLocalDate(new Date())
-
-const offsetDaysFromToday = (daysAgo: number) => {
-  const d = new Date()
-  d.setDate(d.getDate() - daysAgo)
-  return formatLocalDate(d)
-}
-
-const lastNDaysFrom = (n: number) => offsetDaysFromToday(n - 1)
-
-const defaultTo = () => todayIso()
-const defaultFrom = () => lastNDaysFrom(90)
-
-type PeriodPreset = 'today' | '7d' | '1m' | '3m' | '6m' | '1y' | 'custom'
+import {
+  defaultAnalyticsRange,
+  periodPresetRange,
+  type PeriodPreset,
+} from '../utils/datePeriodPresets'
 
 function num(v: string | number | null | undefined): number {
   if (v === null || v === undefined) return NaN
@@ -58,8 +41,9 @@ function fmtShare(v: string | number | null | undefined): string {
 }
 
 export default function OrderDetails() {
-  const [from, setFrom] = useState(defaultFrom)
-  const [to, setTo] = useState(defaultTo)
+  const defaultRange = defaultAnalyticsRange()
+  const [from, setFrom] = useState(defaultRange.from)
+  const [to, setTo] = useState(defaultRange.to)
   const [periodPreset, setPeriodPreset] = useState<PeriodPreset>('3m')
   const [country, setCountry] = useState('')
   const [sku, setSku] = useState('')
@@ -73,17 +57,10 @@ export default function OrderDetails() {
 
   const applyPeriodPreset = (preset: PeriodPreset) => {
     setPeriodPreset(preset)
-    if (preset === 'custom') return
-    const end = todayIso()
-    let start = end
-    if (preset === 'today') start = end
-    else if (preset === '7d') start = lastNDaysFrom(7)
-    else if (preset === '1m') start = lastNDaysFrom(30)
-    else if (preset === '3m') start = lastNDaysFrom(90)
-    else if (preset === '6m') start = lastNDaysFrom(180)
-    else if (preset === '1y') start = lastNDaysFrom(365)
-    setFrom(start)
-    setTo(end)
+    const range = periodPresetRange(preset)
+    if (!range) return
+    setFrom(range.from)
+    setTo(range.to)
   }
 
   const {

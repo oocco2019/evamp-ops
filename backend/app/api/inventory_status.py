@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.utils.date_ranges import complete_days_range, latest_complete_day
 from app.models.settings import (
     APICredential,
     OCConnection,
@@ -1306,10 +1307,9 @@ async def list_oc_inventory(
     sold_by_sku_3m: dict[str, int] = {}
     sold_by_sku_1m: dict[str, int] = {}
     if seller_skus:
-        # Match Sales Analytics date presets (frontend `lastNDaysFrom(n)`): from = today − (n−1) through today inclusive.
-        today = date.today()
-        from_3m = today - timedelta(days=89)  # 90-day window (3m preset)
-        from_1m = today - timedelta(days=29)  # 30-day window (1m preset)
+        # Match Sales Analytics presets: complete days only (through yesterday).
+        from_3m, to_sales = complete_days_range(90)
+        from_1m, _ = complete_days_range(30)
         sales_stmt = (
             select(
                 LineItem.sku.label("sku"),
@@ -1330,7 +1330,7 @@ async def list_oc_inventory(
                 LineItem.sku.in_(seller_skus),
                 Order.cancel_status != "CANCELED",
                 Order.date >= from_3m,
-                Order.date <= today,
+                Order.date <= to_sales,
             )
             .group_by(LineItem.sku)
         )
@@ -1528,7 +1528,7 @@ async def get_stock_forecast(
     cid = await _active_oc_connection_id(db)
     if not cid:
         raise HTTPException(status_code=400, detail="No active OC connection configured.")
-    eff_to = to_date or date.today()
+    eff_to = to_date or latest_complete_day()
     eff_from = from_date or (eff_to - timedelta(days=180))
     if eff_from > eff_to:
         raise HTTPException(status_code=400, detail="'from' must be on or before 'to'.")

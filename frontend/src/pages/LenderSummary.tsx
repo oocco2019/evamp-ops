@@ -10,27 +10,11 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { stockAPI } from '../services/api'
-
-const formatLocalDate = (d: Date): string => {
-  const year = d.getFullYear()
-  const month = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-const todayIso = () => formatLocalDate(new Date())
-/** Inclusive n-day window ending today; matches Sales Analytics presets (e.g. 3m = 90 days). */
-const offsetDaysFromToday = (daysAgo: number) => {
-  const d = new Date()
-  d.setDate(d.getDate() - daysAgo)
-  return formatLocalDate(d)
-}
-const lastNDaysFrom = (n: number) => offsetDaysFromToday(n - 1)
-
-type Preset = '6m' | '3m' | 'custom'
-const PERIOD_DAYS: Record<'6m' | '3m', number> = {
-  '6m': 180,
-  '3m': 90,
-}
+import {
+  completeDaysRange,
+  PERIOD_DAYS,
+  periodPresetRange,
+} from '../utils/datePeriodPresets'
 
 const COMPANY = {
   name: 'oocco limited',
@@ -39,9 +23,12 @@ const COMPANY = {
   brand: 'evamp',
 }
 
+type Preset = '6m' | '3m' | 'custom'
+
 export default function LenderSummary() {
-  const [from, setFrom] = useState(() => lastNDaysFrom(180))
-  const [to, setTo] = useState(todayIso())
+  const defaultRange = completeDaysRange(PERIOD_DAYS['6m'])
+  const [from, setFrom] = useState(defaultRange.from)
+  const [to, setTo] = useState(defaultRange.to)
   const [preset, setPreset] = useState<Preset>('6m')
 
   useEffect(() => {
@@ -54,8 +41,10 @@ export default function LenderSummary() {
   const applyPreset = (p: Preset) => {
     setPreset(p)
     if (p === 'custom') return
-    setTo(todayIso())
-    setFrom(lastNDaysFrom(PERIOD_DAYS[p]))
+    const range = periodPresetRange(p)
+    if (!range) return
+    setFrom(range.from)
+    setTo(range.to)
   }
 
   const { data, isLoading, error } = useQuery({

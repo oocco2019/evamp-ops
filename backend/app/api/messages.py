@@ -55,6 +55,33 @@ logger = logging.getLogger(__name__)
 # to empty, so image-only sends fail. U+2060 is non-whitespace, invisible to readers, and survives trim.
 _SEND_TEXT_WHEN_MEDIA_ONLY = "\u2060"
 
+
+def _ebay_api_error_detail(response: httpx.Response) -> str:
+    """Best-effort human-readable message from an eBay REST error body."""
+    try:
+        body = response.json()
+    except Exception:
+        return (response.text or "").strip() or f"HTTP {response.status_code}"
+    errors = body.get("errors")
+    if isinstance(errors, list):
+        parts: List[str] = []
+        for err in errors:
+            if not isinstance(err, dict):
+                continue
+            for key in ("longMessage", "message", "errorId"):
+                val = err.get(key)
+                if val:
+                    parts.append(str(val))
+                    break
+        if parts:
+            return "; ".join(parts)
+    for key in ("error_description", "message", "detail"):
+        val = body.get(key)
+        if val:
+            return str(val)
+    text = (response.text or "").strip()
+    return text or f"HTTP {response.status_code}"
+
 # === Schemas ===
 
 class MessageMediaItem(BaseModel):
@@ -115,14 +142,8 @@ class DraftRequest(BaseModel):
 
 
 class DraftGermanRequest(BaseModel):
-    """Compose reply in German using the same AI stack as draft."""
-    seed_text: Optional[str] = Field(
-        None,
-        max_length=8000,
-        description="Current English draft to adapt into natural German; optional.",
-    )
-    extra_instructions: Optional[str] = Field(None, max_length=2000)
-    procedure: Optional[str] = Field(None, description="Procedure name to apply")
+    """Translate reply draft text to German (reply box only; no thread or AI-prompt context)."""
+    seed_text: str = Field(..., min_length=1, max_length=8000, description="Reply text to translate to German.")
 
 
 class DraftResponse(BaseModel):
@@ -606,93 +627,27 @@ async def draft_reply_german(
     body: DraftGermanRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate a German reply using the same AI model/instructions as draft (replaces English draft)."""
-    ai = AIService(db)
-    result = await db.execute(
-        select(MessageThread)
-        .where(MessageThread.thread_id == thread_id)
-        .options(selectinload(MessageThread.messages))
-    )
-    thread = result.scalar_one_or_none()
-    if not thread:
+    """
+    Translate the reply-box text to natural German via AI.
+
+    Does not use Instructions-for-AI, global/SKU instructions, thread history, or style profiles —
+    only seed_text (avoids conflicts like "always write in English").
+    """
+    seed = body.seed_text.strip()
+    if not seed:
+        raise HTTPException(status_code=400, detail="Enter reply text to translate to German.")
+    result = await db.execute(select(MessageThread.thread_id).where(MessageThread.thread_id == thread_id))
+    if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Thread not found")
-    msgs = sorted(thread.messages, key=lambda m: m.ebay_created_at)
-    thread_history = [
-        {"role": m.sender_type, "content": (m.subject or "") + "\n" + (m.content or "")}
-        for m in msgs
-    ]
 
-    global_result = await db.execute(select(AIInstruction).where(AIInstruction.type == "global"))
-    global_instructions = " ".join(i.instructions for i in global_result.scalars().all() if i.instructions)
-    sku_instructions = ""
-    if thread.sku:
-        sku_result = await db.execute(
-            select(AIInstruction).where(
-                AIInstruction.type == "sku",
-                AIInstruction.sku_code == thread.sku,
-            )
-        )
-        sku_row = sku_result.scalar_one_or_none()
-        if sku_row and sku_row.instructions:
-            sku_instructions = sku_row.instructions
-
-    style_profile_text = ""
-    style_result = await db.execute(
-        select(StyleProfile)
-        .where(StyleProfile.is_approved == True)
-        .order_by(StyleProfile.created_at.desc())
-        .limit(1)
-    )
-    style_profile = style_result.scalar_one_or_none()
-    if style_profile and style_profile.style_summary:
-        style_profile_text = f"""
-COMMUNICATION STYLE (mimic this exactly):
-{style_profile.style_summary}
-
-Greeting style: {style_profile.greeting_patterns or 'Use appropriate greeting'}
-Closing style: {style_profile.closing_patterns or 'Use appropriate sign-off'}
-Tone: {style_profile.tone_description or 'Professional and friendly'}
-"""
-
-    procedure_text = ""
-    if body.procedure:
-        proc_result = await db.execute(select(Procedure).where(Procedure.name == body.procedure))
-        procedure = proc_result.scalar_one_or_none()
-        if procedure:
-            procedure_text = f"""
-PROCEDURE TO FOLLOW ({procedure.display_name}):
-{procedure.steps}
-"""
-
-    seed = (body.seed_text or "").strip()
-    if seed:
-        prompt = (
-            "Write the customer reply entirely in German (Deutsch). "
-            "Adapt the following draft into natural, polite German — output German only, no English:\n\n"
-            f"{seed}"
-        )
-    else:
-        prompt = (
-            "Draft a reply to this customer entirely in German (Deutsch). "
-            "The customer writes in German. Output German only, no English."
-        )
-
-    if style_profile_text:
-        prompt += f"\n\n{style_profile_text}"
-    if procedure_text:
-        prompt += f"\n\n{procedure_text}"
-    if body.extra_instructions:
-        prompt += f"\n\nAdditional instructions: {body.extra_instructions}"
-    if not style_profile_text:
-        prompt += "\n\nBe professional, helpful, and concise."
-
-    context = {
-        "thread_history": thread_history,
-        "global_instructions": global_instructions or "",
-        "sku_instructions": sku_instructions,
-    }
+    ai = AIService(db)
     try:
-        draft = await ai.generate_message(prompt, context)
+        translated = await ai.translate(seed, "en", "de")
+        draft = (translated.get("translated") or "").strip()
+        if not draft:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Translation returned empty text.")
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except httpx.HTTPStatusError as e:
@@ -703,12 +658,15 @@ PROCEDURE TO FOLLOW ({procedure.display_name}):
             detail = body_json.get("error", {}).get("message") or body_json.get("message") or str(e)
         except Exception:
             detail = e.response.text[:200] if e.response.text else str(e)
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"AI provider error: {detail}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI provider error: {detail}",
+        )
     except Exception as e:
-        logger.exception("German draft generation failed")
+        logger.exception("German translation failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate German draft: {e!s}",
+            detail=f"Failed to translate to German: {e!s}",
         )
     return DraftResponse(draft=draft)
 
@@ -777,16 +735,11 @@ async def send_reply(
             message_media=message_media_payload,
         )
     except httpx.HTTPStatusError as e:
-        detail = ""
-        try:
-            body_json = e.response.json()
-            detail = body_json.get("errors", [{}])[0].get("message") or body_json.get("error_description") or e.response.text
-        except Exception:
-            detail = e.response.text or str(e)
+        detail = _ebay_api_error_detail(e.response)
         logger.warning("eBay send failed: %s %s", e.response.status_code, detail)
         raise HTTPException(
-            status_code=e.response.status_code,
-            detail=f"eBay send failed: {detail}",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"eBay rejected the message: {detail}",
         )
     except Exception as e:
         logger.exception("Send: eBay API error")

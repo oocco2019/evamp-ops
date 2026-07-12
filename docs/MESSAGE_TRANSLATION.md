@@ -7,7 +7,7 @@ EvampOps stores English subtitles for German buyer/seller messages in PostgreSQL
 | Path | Engine | When |
 |------|--------|------|
 | Inbound display (de→en) | `Helsinki-NLP/opus-mt-de-en` via Marian + `langdetect` | Sync backfill, Translate Thread, send (seller DE→en subtitle) |
-| Outbound German reply | AI draft (`POST /api/messages/threads/{id}/draft-german`) | **DE** button in thread UI |
+| Outbound German reply | AI translate (`POST /api/messages/threads/{id}/draft-german`) | **DE** button — translates **reply box text only** (ignores Instructions for AI, global/SKU rules, thread history) |
 | Single-text LLM translate | Legacy `POST /api/messages/translate` | Not used by thread translate-all |
 
 Implementation: `backend/app/services/local_translation.py`.
@@ -21,6 +21,17 @@ After message sync completes, the backend schedules `schedule_translation_backfi
 When a seller sends a reply detected as German, the same service stores an English `translated_content` on that outbound row.
 
 Empty body and `(attachment)`-only rows are skipped (no infinite retry).
+
+## DE button vs Generate draft
+
+| Control | Uses Instructions for AI? | Uses thread / global rules? | Output |
+|---------|---------------------------|-----------------------------|--------|
+| **Generate draft** | Yes | Yes | New English (or mixed) draft from full context |
+| **DE** | No | No | German translation of **reply box text only** |
+
+If Instructions for AI say “write in English”, **Generate draft** follows that. **DE** ignores it so you can translate an English draft before sending to a German buyer.
+
+---
 
 ## Manual: Translate Thread
 
