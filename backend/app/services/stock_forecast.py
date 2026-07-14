@@ -7,7 +7,7 @@ import math
 from datetime import date, datetime, timedelta, timezone, time as dt_time
 from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.settings import OCStockMovementLine, OCSkuInventory, OCSkuMapping
@@ -140,18 +140,38 @@ async def _latest_avl_actual_count(
 ) -> Optional[int]:
     mov = OCStockMovementLine
     event_t = func.coalesce(mov.update_time_utc, mov.created_at)
+    region = str(service_region).strip() if service_region is not None else ""
     filters = [
         mov.connection_id == connection_id,
         func.lower(mov.mfskuid) == mfskuid.strip().lower(),
         func.upper(mov.inventory_status) == "AVL",
     ]
-    if service_region is not None and str(service_region).strip():
-        filters.append(mov.service_region == str(service_region).strip())
-    stmt = (
-        select(mov.actual_count)
+    if region:
+        filters.append(mov.service_region == region)
+        stmt = (
+            select(mov.actual_count)
+            .where(*filters)
+            .order_by(event_t.desc())
+            .limit(1)
+        )
+        r = await db.execute(stmt)
+        row = r.first()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+
+    rn = func.row_number().over(
+        partition_by=mov.service_region,
+        order_by=event_t.desc(),
+    ).label("rn")
+    latest_by_region = (
+        select(mov.service_region, func.coalesce(mov.actual_count, 0).label("actual_count"), rn)
         .where(*filters)
-        .order_by(event_t.desc())
-        .limit(1)
+        .subquery()
+    )
+    stmt = (
+        select(func.sum(latest_by_region.c.actual_count))
+        .where(latest_by_region.c.rn == 1)
     )
     r = await db.execute(stmt)
     row = r.first()
@@ -167,13 +187,19 @@ async def _latest_pipeline_counts(
     service_region: Optional[str],
 ) -> Tuple[int, int]:
     """In-transit and received quantities from the latest OC StockSnapshot pull."""
+    region = str(service_region).strip() if service_region is not None else ""
     filters = [
         OCSkuInventory.connection_id == connection_id,
         func.lower(OCSkuInventory.mfskuid) == mfskuid.strip().lower(),
     ]
-    if service_region is not None and str(service_region).strip():
-        filters.append(OCSkuInventory.service_region == str(service_region).strip())
-    stmt = select(OCSkuInventory.in_transit, OCSkuInventory.received).where(*filters).limit(1)
+    if region:
+        filters.append(OCSkuInventory.service_region == region)
+        stmt = select(OCSkuInventory.in_transit, OCSkuInventory.received).where(*filters).limit(1)
+    else:
+        stmt = select(
+            func.sum(OCSkuInventory.in_transit),
+            func.sum(OCSkuInventory.received),
+        ).where(*filters)
     r = await db.execute(stmt)
     row = r.first()
     if row is None:
@@ -219,7 +245,7 @@ async def _ebay_units_by_order_date(
         .join(Order, Order.order_id == LineItem.order_id)
         .where(
             LineItem.sku.in_(line_item_skus),
-            Order.cancel_status != "CANCELED",
+            or_(Order.cancel_status.is_(None), Order.cancel_status != "CANCELED"),
             Order.date >= window_start,
             Order.date <= window_end,
         )
