@@ -351,6 +351,18 @@ export default function InventoryMovement() {
 
       <DiagnosticsPanel />
 
+      {mappingsQuery.isSuccess && sellerOptions.length === 0 && (
+        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-sm">
+          <strong>No OC SKU mappings in the database.</strong> Charts, forecast, and sync need mappings from OrangeConnex.
+          Go to{' '}
+          <Link to="/inventory-status" className="text-amber-950 underline font-medium">
+            Inventory status
+          </Link>{' '}
+          and click <strong>Pull latest data</strong>. Movement history in PostgreSQL is kept separately — it is not
+          deleted when mappings are missing.
+        </div>
+      )}
+
       <p className="text-sm text-gray-600 mb-6 max-w-3xl">
         Stock levels by day (from movement data in PostgreSQL — same filter card layout as Sales Analytics). Table below
         shows the same feed in detail.
@@ -456,6 +468,15 @@ export default function InventoryMovement() {
         <p className="text-green-800 text-sm mb-2">
           Fetched {syncFromOcMutation.data.fetched}, inserted {syncFromOcMutation.data.inserted} (
           {syncFromOcMutation.data.from_date} → {syncFromOcMutation.data.to_date}).
+          {syncFromOcMutation.data.mfskuid_count === 0 ? (
+            <span className="block mt-1 text-amber-800">
+              No SKU mappings — run <strong>Pull latest data</strong> on{' '}
+              <Link to="/inventory-status" className="underline">
+                Inventory status
+              </Link>{' '}
+              first.
+            </span>
+          ) : null}
           {syncFromOcMutation.data.clamped ? (
             <span className="block mt-1 text-amber-800">
               Range was limited to the last 12 months (OrangeConnex API constraint). Effective window is shown above.

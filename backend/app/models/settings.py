@@ -3,7 +3,7 @@ Settings and configuration models
 """
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Boolean, DateTime, Text, Integer, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Boolean, DateTime, Text, Integer, ForeignKey, UniqueConstraint, LargeBinary
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -254,4 +254,22 @@ class OCInboundOrder(Base):
 
     __table_args__ = (
         UniqueConstraint("connection_id", "dedup_key", name="uq_oc_inbound_conn_dedup"),
+    )
+
+
+class AppBranding(Base):
+    """Single-row app branding: display name, logo, favicon (stored in PostgreSQL)."""
+
+    __tablename__ = "app_branding"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    app_name: Mapped[str] = mapped_column(String(120), nullable=False, default="EvampOps")
+    logo_mime: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    logo_data: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    favicon_mime: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    favicon_data: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
     )

@@ -1,5 +1,6 @@
 import { lazy, Suspense } from 'react'
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom'
+import { useBranding } from './hooks/useBranding'
 
 const Settings = lazy(() => import('./pages/Settings'))
 const SalesAnalytics = lazy(() => import('./pages/SalesAnalytics'))
@@ -13,6 +14,8 @@ const OrderDetails = lazy(() => import('./pages/OrderDetails'))
 const LenderSummary = lazy(() => import('./pages/LenderSummary'))
 
 function App() {
+  const { appName, faviconUrl } = useBranding()
+
   return (
     <Router>
       <div className="min-h-screen bg-gray-50">
@@ -22,7 +25,10 @@ function App() {
             <div className="flex justify-between h-16">
               <div className="flex">
                 <div className="flex-shrink-0 flex items-center">
-                  <h1 className="text-xl font-bold text-gray-900">EvampOps</h1>
+                  <Link to="/" className="flex items-center gap-2">
+                    <img src={faviconUrl} alt="" className="h-8 w-8 object-contain rounded" />
+                    <span className="text-xl font-bold text-gray-900">{appName}</span>
+                  </Link>
                 </div>
                 <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
                   <Link
@@ -117,10 +123,12 @@ function PageLoader() {
 }
 
 function Home() {
+  const { appName } = useBranding()
+
   return (
     <div className="px-4 py-6 sm:px-0">
       <div className="border-4 border-dashed border-gray-200 rounded-lg p-8">
-        <h2 className="text-2xl font-bold text-gray-900 mb-4">Welcome to EvampOps</h2>
+        <h2 className="text-2xl font-bold text-gray-900 mb-4">Welcome to {appName}</h2>
         <p className="text-gray-600 mb-4">
           Your integrated platform for stock management and customer service.
         </p>

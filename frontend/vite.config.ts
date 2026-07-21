@@ -16,6 +16,13 @@ export default defineConfig({
           'http://127.0.0.1:8000',
         changeOrigin: true,
       },
+      '/favicon.ico': {
+        target:
+          process.env.VITE_PROXY_API_TARGET ||
+          process.env.VITE_API_URL ||
+          'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
     },
   },
   test: {

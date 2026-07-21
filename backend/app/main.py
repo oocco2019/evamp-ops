@@ -2,13 +2,15 @@
 Main FastAPI application
 """
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.config import settings
-from app.core.database import init_db, close_db
+from app.core.database import get_db, init_db, close_db
 from app.services.inventory_refresh_scheduler import (
     shutdown_inventory_refresh_scheduler,
     start_inventory_refresh_scheduler,
@@ -153,3 +155,11 @@ async def health_check():
         "database": "connected",
         "debug_mode": settings.DEBUG
     }
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def root_favicon(db: AsyncSession = Depends(get_db)):
+    """Browser / shortcut favicon from PostgreSQL (uploaded in Settings → Branding)."""
+    from app.api.settings import favicon_http_response
+
+    return await favicon_http_response(db)

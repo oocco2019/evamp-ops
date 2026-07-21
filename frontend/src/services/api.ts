@@ -82,6 +82,16 @@ export interface EmailTemplate {
   body: string
 }
 
+export interface AppBranding {
+  app_name: string
+  has_logo: boolean
+  has_favicon: boolean
+  logo_url: string | null
+  favicon_url: string | null
+  favicon_mime: string | null
+  updated_at: string | null
+}
+
 export interface OCConnection {
   id: number
   name: string
@@ -375,6 +385,8 @@ export const settingsAPI = {
   ) => api.put<EmailTemplate>(`/api/settings/email-templates/${id}`, data),
   deleteEmailTemplate: (id: number) =>
     api.delete(`/api/settings/email-templates/${id}`),
+
+  getBranding: () => api.get<AppBranding>('/api/settings/branding'),
 }
 
 // Stock API (eBay + SKUs)

@@ -5,16 +5,25 @@ Settings API endpoints (GN01)
 - Warehouse management
 """
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel, Field
 
 from app.core.database import get_db
 from app.core.security import encryption_service
-from app.models.settings import APICredential, AIModelSetting, Warehouse, EmailTemplate
+from app.models.settings import APICredential, AIModelSetting, Warehouse, EmailTemplate, AppBranding
 
 router = APIRouter()
+
+BRANDING_ID = 1
+LOGO_MAX_BYTES = 1_048_576  # 1 MiB
+FAVICON_MAX_BYTES = 262_144  # 256 KiB
+ALLOWED_LOGO_MIMES = frozenset({"image/png", "image/jpeg", "image/svg+xml", "image/webp"})
+ALLOWED_FAVICON_MIMES = frozenset(
+    {"image/png", "image/jpeg", "image/svg+xml", "image/x-icon", "image/vnd.microsoft.icon"}
+)
 
 
 # === Pydantic Schemas ===
@@ -500,3 +509,152 @@ async def delete_email_template(template_id: int, db: AsyncSession = Depends(get
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
     await db.delete(template)
     await db.commit()
+
+
+# === App branding ===
+
+
+class BrandingUpdate(BaseModel):
+    app_name: str = Field(..., min_length=1, max_length=120)
+
+
+class BrandingResponse(BaseModel):
+    app_name: str
+    has_logo: bool
+    has_favicon: bool
+    logo_url: Optional[str] = None
+    favicon_url: Optional[str] = None
+    favicon_mime: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+async def favicon_http_response(db: AsyncSession) -> Response:
+    """Serve uploaded favicon bytes (used by /favicon.ico and API)."""
+    row = await _get_or_create_branding(db)
+    if not row.favicon_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No favicon configured.")
+    return Response(
+        content=row.favicon_data,
+        media_type=row.favicon_mime or "application/octet-stream",
+        headers={"Cache-Control": "no-cache, must-revalidate"},
+    )
+
+
+async def _get_or_create_branding(db: AsyncSession) -> AppBranding:
+    result = await db.execute(select(AppBranding).where(AppBranding.id == BRANDING_ID))
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = AppBranding(id=BRANDING_ID, app_name="EvampOps")
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+    return row
+
+
+def _branding_to_response(row: AppBranding) -> BrandingResponse:
+    version = row.updated_at.isoformat() if row.updated_at else None
+    vq = f"?v={version}" if version else ""
+    return BrandingResponse(
+        app_name=row.app_name,
+        has_logo=bool(row.logo_data),
+        has_favicon=bool(row.favicon_data),
+        logo_url=f"/api/settings/branding/logo{vq}" if row.logo_data else None,
+        favicon_url=f"/favicon.ico{vq}" if row.favicon_data else None,
+        favicon_mime=row.favicon_mime if row.favicon_data else None,
+        updated_at=version,
+    )
+
+
+@router.get("/branding", response_model=BrandingResponse)
+async def get_branding(db: AsyncSession = Depends(get_db)):
+    """App display name and logo/favicon URLs for nav and browser tab."""
+    row = await _get_or_create_branding(db)
+    return _branding_to_response(row)
+
+
+@router.put("/branding", response_model=BrandingResponse)
+async def update_branding(body: BrandingUpdate, db: AsyncSession = Depends(get_db)):
+    row = await _get_or_create_branding(db)
+    row.app_name = body.app_name.strip()
+    await db.commit()
+    await db.refresh(row)
+    return _branding_to_response(row)
+
+
+async def _read_upload(file: UploadFile, max_bytes: int, allowed: frozenset[str]) -> tuple[bytes, str]:
+    content_type = (file.content_type or "").split(";")[0].strip().lower()
+    if content_type not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file type: {content_type or 'unknown'}",
+        )
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty file.")
+    if len(data) > max_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File too large (max {max_bytes // 1024} KiB).",
+        )
+    return data, content_type
+
+
+@router.post("/branding/logo", response_model=BrandingResponse)
+async def upload_logo(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    data, mime = await _read_upload(file, LOGO_MAX_BYTES, ALLOWED_LOGO_MIMES)
+    row = await _get_or_create_branding(db)
+    row.logo_data = data
+    row.logo_mime = mime
+    await db.commit()
+    await db.refresh(row)
+    return _branding_to_response(row)
+
+
+@router.post("/branding/favicon", response_model=BrandingResponse)
+async def upload_favicon(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    data, mime = await _read_upload(file, FAVICON_MAX_BYTES, ALLOWED_FAVICON_MIMES)
+    row = await _get_or_create_branding(db)
+    row.favicon_data = data
+    row.favicon_mime = mime
+    await db.commit()
+    await db.refresh(row)
+    return _branding_to_response(row)
+
+
+@router.delete("/branding/logo", response_model=BrandingResponse)
+async def delete_logo(db: AsyncSession = Depends(get_db)):
+    row = await _get_or_create_branding(db)
+    row.logo_data = None
+    row.logo_mime = None
+    await db.commit()
+    await db.refresh(row)
+    return _branding_to_response(row)
+
+
+@router.delete("/branding/favicon", response_model=BrandingResponse)
+async def delete_favicon(db: AsyncSession = Depends(get_db)):
+    row = await _get_or_create_branding(db)
+    row.favicon_data = None
+    row.favicon_mime = None
+    await db.commit()
+    await db.refresh(row)
+    return _branding_to_response(row)
+
+
+@router.get("/branding/logo")
+async def get_logo(db: AsyncSession = Depends(get_db)):
+    row = await _get_or_create_branding(db)
+    if not row.logo_data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No logo configured.")
+    return Response(content=row.logo_data, media_type=row.logo_mime or "application/octet-stream")
+
+
+@router.get("/branding/favicon")
+async def get_favicon(db: AsyncSession = Depends(get_db)):
+    return await favicon_http_response(db)
