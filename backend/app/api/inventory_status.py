@@ -158,6 +158,7 @@ class StockForecastRowResponse(BaseModel):
     reorder_by_date: Optional[str] = None
     days_until_reorder: Optional[float] = None
     total_sales_in_window: Optional[int] = None
+    reorder_cost_gbp: Optional[float] = None
 
 
 class StockForecastBundleResponse(BaseModel):

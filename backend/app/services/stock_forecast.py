@@ -10,8 +10,9 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings as app_settings
 from app.models.settings import OCStockMovementLine, OCSkuInventory, OCSkuMapping
-from app.models.stock import LineItem, Order
+from app.models.stock import LineItem, Order, SKU
 
 MIN_AVL_IN_STOCK = 7
 REORDER_LEAD_TIME_DAYS = 90  # supplier delivery ~3 months after order
@@ -76,6 +77,20 @@ def _cover_and_oos(total: int, burn: float, today: date) -> Tuple[Optional[float
     return round(doc, 4), oos
 
 
+def reorder_cost_gbp(
+    reorder_qty: Optional[int],
+    landed_cost_usd: Optional[float],
+    usd_to_gbp: float,
+) -> Optional[float]:
+    """Reorder line cost in GBP from SKU landed cost (USD) × qty × USD→GBP rate."""
+    if reorder_qty is None or reorder_qty <= 0:
+        return None
+    unit = float(landed_cost_usd or 0)
+    if unit <= 0:
+        return None
+    return round(reorder_qty * unit * usd_to_gbp, 2)
+
+
 def _reorder_plan(
     oos_iso: Optional[str],
     burn: float,
@@ -112,6 +127,7 @@ def _forecast_row(
     reorder_by_date: Optional[str] = None,
     days_until_reorder: Optional[float] = None,
     total_sales_in_window: Optional[int] = None,
+    reorder_cost_gbp: Optional[float] = None,
 ) -> dict:
     return {
         "seller_skuid": seller_skuid,
@@ -129,6 +145,7 @@ def _forecast_row(
         "reorder_by_date": reorder_by_date,
         "days_until_reorder": days_until_reorder,
         "total_sales_in_window": total_sales_in_window,
+        "reorder_cost_gbp": reorder_cost_gbp,
     }
 
 
@@ -229,12 +246,25 @@ async def _ebay_units_by_order_date(
     return {row[0]: int(row[1] or 0) for row in r.all()}
 
 
+def _sku_landed_cost_usd(sku_map: Dict[str, SKU], *codes: Optional[str]) -> Optional[float]:
+    for raw in codes:
+        code = (raw or "").strip()
+        if not code:
+            continue
+        sku = sku_map.get(code)
+        if sku and sku.landed_cost is not None:
+            return float(sku.landed_cost)
+    return None
+
+
 async def _forecast_for_mapping_row(
     db: AsyncSession,
     connection_id: int,
     mapping: OCSkuMapping,
     window_start: date,
     window_end: date,
+    sku_map: Dict[str, SKU],
+    usd_to_gbp: float,
 ) -> dict:
     from app.api.inventory_status import list_inventory_history
 
@@ -303,6 +333,7 @@ async def _forecast_for_mapping_row(
 
     ordered_doc, ordered_oos = _cover_and_oos(ordered_total, burn, today)
     reorder_qty, reorder_by, days_until_reorder = _reorder_plan(ordered_oos, burn, today)
+    landed = _sku_landed_cost_usd(sku_map, mapping.sku_code, mapping.seller_skuid)
     return _forecast_row(
         **stock_fields,
         burn_rate_per_day=round(burn, 4),
@@ -313,6 +344,7 @@ async def _forecast_for_mapping_row(
         reorder_by_date=reorder_by,
         days_until_reorder=days_until_reorder,
         total_sales_in_window=total_sales_in_window,
+        reorder_cost_gbp=reorder_cost_gbp(reorder_qty, landed, usd_to_gbp),
     )
 
 
@@ -328,8 +360,21 @@ async def build_stock_forecast_payload(
         .order_by(OCSkuMapping.seller_skuid.asc(), OCSkuMapping.mfskuid.asc())
     )
     mappings = list(mr.scalars().all())
+    sku_codes: set[str] = set()
+    for m in mappings:
+        for raw in (m.sku_code, m.seller_skuid):
+            code = (raw or "").strip()
+            if code:
+                sku_codes.add(code)
+    sku_map: Dict[str, SKU] = {}
+    if sku_codes:
+        sr = await db.execute(select(SKU).where(SKU.sku_code.in_(sku_codes)))
+        sku_map = {s.sku_code: s for s in sr.scalars().all()}
+    usd_to_gbp = float(getattr(app_settings, "USD_TO_GBP_RATE", 0.79))
     rows = [
-        await _forecast_for_mapping_row(db, connection_id, m, window_start, window_end)
+        await _forecast_for_mapping_row(
+            db, connection_id, m, window_start, window_end, sku_map, usd_to_gbp
+        )
         for m in mappings
     ]
 

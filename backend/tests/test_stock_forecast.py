@@ -1,7 +1,14 @@
 """Unit tests for stock run-out forecast helpers."""
 from datetime import date, datetime, time as dt_time
 
-from app.services.stock_forecast import average_burn_rate, forward_fill_daily_avl, forecast_note, _cover_and_oos, _reorder_plan
+from app.services.stock_forecast import (
+    average_burn_rate,
+    forward_fill_daily_avl,
+    forecast_note,
+    reorder_cost_gbp,
+    _cover_and_oos,
+    _reorder_plan,
+)
 
 
 def test_forward_fill_daily_avl_resets_each_day_like_chart():
@@ -61,3 +68,10 @@ def test_reorder_plan_three_month_lead():
     assert overdue_qty == 90
     assert overdue_by == "2026-05-03"
     assert overdue_days < 0
+
+
+def test_reorder_cost_gbp_from_landed_cost():
+    assert reorder_cost_gbp(180, 10.0, 0.79) == 1422.0
+    assert reorder_cost_gbp(180, None, 0.79) is None
+    assert reorder_cost_gbp(None, 10.0, 0.79) is None
+    assert reorder_cost_gbp(0, 10.0, 0.79) is None

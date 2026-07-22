@@ -43,6 +43,15 @@ function reorderUrgencyClass(daysUntil: number | null | undefined): string {
   return 'text-slate-800'
 }
 
+function forecastRowKey(f: StockForecastRow): string {
+  return `${f.seller_skuid}::${f.mfskuid}`
+}
+
+function formatForecastCostGbp(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  return `£${value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
 const FORECAST_SORT_STORAGE_KEY = 'inventoryMovement.forecastSort'
 
 type ForecastSortKey =
@@ -170,6 +179,7 @@ export default function InventoryMovement() {
   /** `all` = every mapped seller SKU (aggregated). Otherwise OC seller SKU id. */
   const [skuSelect, setSkuSelect] = useState<string>('all')
   const [forecastSort, setForecastSort] = useState(loadForecastSort)
+  const [selectedForecastKeys, setSelectedForecastKeys] = useState<Set<string>>(() => new Set())
 
   const applyPeriodPreset = (preset: PeriodPreset) => {
     const range = periodPresetRange(preset)
@@ -250,6 +260,31 @@ export default function InventoryMovement() {
     if (!rows?.length) return []
     return sortForecastRows(rows, forecastSort)
   }, [stockForecastQuery.data?.forecasts, forecastSort])
+
+  const toggleForecastRow = (key: string) => {
+    setSelectedForecastKeys((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const selectedForecastSummary = useMemo(() => {
+    let totalGbp = 0
+    let withCost = 0
+    let missingCost = 0
+    for (const f of sortedForecasts) {
+      if (!selectedForecastKeys.has(forecastRowKey(f))) continue
+      if (f.reorder_cost_gbp != null) {
+        totalGbp += f.reorder_cost_gbp
+        withCost += 1
+      } else if (f.reorder_quantity != null) {
+        missingCost += 1
+      }
+    }
+    return { totalGbp, withCost, missingCost, count: selectedForecastKeys.size }
+  }, [sortedForecasts, selectedForecastKeys])
 
   type SyncStockMovementMode = { mode: 'incremental' } | { mode: 'range' }
 
@@ -512,6 +547,35 @@ export default function InventoryMovement() {
             {stockForecastQuery.data.note && (
               <p className="text-xs text-slate-600 mt-1">{stockForecastQuery.data.note}</p>
             )}
+            <p className="text-xs text-slate-500 mt-1">
+              Click rows to mark SKUs for a combined reorder cost. Reorder cost uses SKU landed cost (USD) converted to
+              GBP.
+            </p>
+          </div>
+          <div className="px-4 py-2 border-b border-indigo-200 bg-indigo-50 flex flex-wrap items-center justify-between gap-2 text-sm">
+            <span className="text-indigo-900">
+              {selectedForecastSummary.count} SKU{selectedForecastSummary.count === 1 ? '' : 's'} selected
+              {selectedForecastSummary.missingCost > 0 ? (
+                <span className="text-indigo-700">
+                  {' '}
+                  · {selectedForecastSummary.missingCost} without cost data
+                </span>
+              ) : null}
+            </span>
+            <div className="flex items-center gap-3">
+              <span className="font-semibold text-indigo-950 tabular-nums">
+                Total reorder: {formatForecastCostGbp(selectedForecastSummary.totalGbp)}
+              </span>
+              {selectedForecastSummary.count > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => setSelectedForecastKeys(new Set())}
+                  className="text-xs text-indigo-800 underline hover:text-indigo-950"
+                >
+                  Clear
+                </button>
+              ) : null}
+            </div>
           </div>
           <div className="overflow-x-auto max-h-[28rem] overflow-y-auto">
             <table className="min-w-full text-sm text-left">
@@ -560,10 +624,17 @@ export default function InventoryMovement() {
                 </tr>
               </thead>
               <tbody>
-                {sortedForecasts.map((f, idx) => (
+                {sortedForecasts.map((f, idx) => {
+                  const rowKey = forecastRowKey(f)
+                  const selected = selectedForecastKeys.has(rowKey)
+                  return (
                   <tr
                     key={`${f.seller_skuid}-${f.mfskuid}-${idx}`}
-                    className="border-b border-gray-50 hover:bg-slate-50/80"
+                    className={`border-b border-gray-50 cursor-pointer select-none ${
+                      selected ? 'bg-indigo-50 hover:bg-indigo-100/70' : 'hover:bg-slate-50/80'
+                    }`}
+                    onClick={() => toggleForecastRow(rowKey)}
+                    aria-selected={selected}
                   >
                     <td className="py-2 pl-4 pr-3 font-mono text-xs">{f.sku_name || f.seller_skuid}</td>
                     <td className="py-2 pr-3 text-right tabular-nums">{f.current_available}</td>
@@ -596,13 +667,20 @@ export default function InventoryMovement() {
                           {f.reorder_quantity.toLocaleString()} units
                           <span className="text-slate-500"> · </span>
                           {formatOosDayLabel(f.reorder_by_date)}
+                          {f.reorder_cost_gbp != null ? (
+                            <>
+                              <span className="text-slate-500"> · </span>
+                              <span className="tabular-nums">{formatForecastCostGbp(f.reorder_cost_gbp)}</span>
+                            </>
+                          ) : null}
                         </>
                       ) : (
                         '—'
                       )}
                     </td>
                   </tr>
-                ))}
+                  )
+                })}
               </tbody>
             </table>
           </div>

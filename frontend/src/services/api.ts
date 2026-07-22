@@ -201,6 +201,7 @@ export interface StockForecastRow {
   reorder_by_date: string | null
   days_until_reorder: number | null
   total_sales_in_window: number | null
+  reorder_cost_gbp: number | null
 }
 
 export interface StockForecastBundle {
