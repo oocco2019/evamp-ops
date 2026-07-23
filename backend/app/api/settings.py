@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.core.database import get_db
 from app.core.security import encryption_service
-from app.models.settings import APICredential, AIModelSetting, Warehouse, EmailTemplate, AppBranding
+from app.models.settings import APICredential, AIModelSetting, Warehouse, EmailTemplate, AppBranding, AppNotepad
 
 router = APIRouter()
 
@@ -579,6 +579,54 @@ async def update_branding(body: BrandingUpdate, db: AsyncSession = Depends(get_d
     await db.commit()
     await db.refresh(row)
     return _branding_to_response(row)
+
+
+# === App notepad ===
+
+NOTEPAD_ID = 1
+
+
+class NotepadUpdate(BaseModel):
+    body: str = Field(..., max_length=500_000)
+
+
+class NotepadResponse(BaseModel):
+    body: str
+    updated_at: Optional[str] = None
+
+
+async def _get_or_create_notepad(db: AsyncSession) -> AppNotepad:
+    result = await db.execute(select(AppNotepad).where(AppNotepad.id == NOTEPAD_ID))
+    row = result.scalar_one_or_none()
+    if row is None:
+        row = AppNotepad(id=NOTEPAD_ID, body="")
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+    return row
+
+
+def _notepad_to_response(row: AppNotepad) -> NotepadResponse:
+    return NotepadResponse(
+        body=row.body or "",
+        updated_at=row.updated_at.isoformat() if row.updated_at else None,
+    )
+
+
+@router.get("/notepad", response_model=NotepadResponse)
+async def get_notepad(db: AsyncSession = Depends(get_db)):
+    """Home-page free-form notepad body."""
+    row = await _get_or_create_notepad(db)
+    return _notepad_to_response(row)
+
+
+@router.put("/notepad", response_model=NotepadResponse)
+async def update_notepad(body: NotepadUpdate, db: AsyncSession = Depends(get_db)):
+    row = await _get_or_create_notepad(db)
+    row.body = body.body
+    await db.commit()
+    await db.refresh(row)
+    return _notepad_to_response(row)
 
 
 async def _read_upload(file: UploadFile, max_bytes: int, allowed: frozenset[str]) -> tuple[bytes, str]:

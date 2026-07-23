@@ -92,6 +92,11 @@ export interface AppBranding {
   updated_at: string | null
 }
 
+export interface AppNotepad {
+  body: string
+  updated_at: string | null
+}
+
 export interface OCConnection {
   id: number
   name: string
@@ -439,6 +444,11 @@ export const settingsAPI = {
     api.delete(`/api/settings/email-templates/${id}`),
 
   getBranding: () => api.get<AppBranding>('/api/settings/branding'),
+  updateBranding: (data: { app_name: string }) =>
+    api.put<AppBranding>('/api/settings/branding', data),
+  getNotepad: () => api.get<AppNotepad>('/api/settings/notepad'),
+  updateNotepad: (data: { body: string }) =>
+    api.put<AppNotepad>('/api/settings/notepad', data),
 }
 
 // Stock API (eBay + SKUs)

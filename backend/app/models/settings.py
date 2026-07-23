@@ -258,7 +258,7 @@ class OCInboundOrder(Base):
 
 
 class AppBranding(Base):
-    """Single-row app branding: display name, logo, favicon (stored in PostgreSQL)."""
+    """Single-row app branding: display name, logo, favicon (PostgreSQL)."""
 
     __tablename__ = "app_branding"
 
@@ -268,6 +268,20 @@ class AppBranding(Base):
     logo_data: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     favicon_mime: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     favicon_data: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+class AppNotepad(Base):
+    """Single-row free-form notepad (home page). Shape may evolve later."""
+
+    __tablename__ = "app_notepad"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,
