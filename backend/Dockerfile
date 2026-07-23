@@ -6,6 +6,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     postgresql-client \
     gcc \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install dependencies

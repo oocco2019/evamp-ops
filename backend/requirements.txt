@@ -31,6 +31,11 @@ apscheduler==3.10.4
 # IANA timezone database (zoneinfo lookups like Europe/Vilnius on slim images)
 tzdata==2024.1
 
+# Returns label compose (A4 multi-label sheet)
+pypdf==5.1.0
+Pillow==10.4.0
+pdf2image==1.17.0
+
 # Local message translation (OPUS-MT de→en, lazy-loaded)
 # torch CPU is installed in Dockerfile (aarch64 has no 2.4.1+cpu wheel)
 langdetect==1.0.9

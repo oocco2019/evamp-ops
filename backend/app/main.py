@@ -21,6 +21,7 @@ from app.api import messages as messages_api
 from app.api import listing_video as listing_video_api
 from app.api import inventory_status as inventory_status_api
 from app.api import lender_summary as lender_summary_api
+from app.api import returns as returns_api
 
 # Configure logging
 logging.basicConfig(
@@ -134,6 +135,11 @@ app.include_router(
     inventory_status_api.router,
     prefix="/api/inventory-status",
     tags=["inventory-status"]
+)
+app.include_router(
+    returns_api.router,
+    prefix="/api/returns",
+    tags=["returns"],
 )
 
 

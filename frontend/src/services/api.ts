@@ -451,6 +451,37 @@ export const settingsAPI = {
     api.put<AppNotepad>('/api/settings/notepad', data),
 }
 
+export interface LabelComposeSlot {
+  source_index: number
+  x: number
+  y: number
+  width: number
+  height: number
+  scale: number
+  crop: { llx: number; lly: number; urx: number; ury: number }
+}
+
+export interface LabelComposeResult {
+  pdf_base64: string
+  preview_png_base64: string
+  fingerprint: string
+  slots: LabelComposeSlot[]
+  arrangement_index: number
+  arrangement_count: number
+  cache_hit: boolean
+}
+
+export const returnsAPI = {
+  compose: (formData: FormData) =>
+    api.post<LabelComposeResult>('/api/returns/compose', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  saveTemplate: (
+    fingerprint: string,
+    data: { slots: LabelComposeSlot[]; arrangement_index?: number }
+  ) => api.put(`/api/returns/templates/${fingerprint}`, data),
+}
+
 // Stock API (eBay + SKUs)
 export interface SKU {
   sku_code: string

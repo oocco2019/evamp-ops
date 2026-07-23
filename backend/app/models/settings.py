@@ -2,9 +2,9 @@
 Settings and configuration models
 """
 from datetime import datetime
-from typing import Optional
-from sqlalchemy import String, Boolean, DateTime, Text, Integer, ForeignKey, UniqueConstraint, LargeBinary
+from sqlalchemy import String, Boolean, DateTime, Text, Integer, ForeignKey, UniqueConstraint, LargeBinary, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from typing import Any, Optional
 from app.core.database import Base
 
 
@@ -282,6 +282,21 @@ class AppNotepad(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+class LabelComposeTemplate(Base):
+    """Cached A4 slot layout keyed by content-box fingerprint."""
+
+    __tablename__ = "label_compose_templates"
+
+    fingerprint: Mapped[str] = mapped_column(String(64), primary_key=True)
+    slots: Mapped[Any] = mapped_column(JSON, nullable=False)
+    arrangement_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow,

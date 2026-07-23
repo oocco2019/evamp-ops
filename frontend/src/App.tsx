@@ -12,6 +12,7 @@ const MessageDashboard = lazy(() => import('./pages/MessageDashboard'))
 const InventoryStatus = lazy(() => import('./pages/InventoryStatus'))
 const OrderDetails = lazy(() => import('./pages/OrderDetails'))
 const AIInstructions = lazy(() => import('./pages/AIInstructions'))
+const Returns = lazy(() => import('./pages/Returns'))
 
 const NAV_LINK =
   'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-[1.1375rem] font-medium'
@@ -42,6 +43,9 @@ function App() {
                 <Link to="/planning" className={NAV_LINK}>
                   Stock Order
                 </Link>
+                <Link to="/returns" className={NAV_LINK}>
+                  Returns
+                </Link>
                 <Link to="/settings" className={NAV_LINK}>
                   Misc
                 </Link>
@@ -59,6 +63,7 @@ function App() {
               <Route path="/lender-summary" element={<Navigate to="/settings?tab=lender" replace />} />
               <Route path="/order-details" element={<OrderDetails />} />
               <Route path="/planning" element={<StockPlanning />} />
+              <Route path="/returns" element={<Returns />} />
               <Route path="/skus" element={<Navigate to="/settings?tab=skus" replace />} />
               <Route path="/inventory" element={<InventoryStatus />} />
               <Route path="/inventory-status" element={<Navigate to="/inventory" replace />} />
