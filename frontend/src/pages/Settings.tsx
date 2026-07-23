@@ -1,9 +1,48 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { settingsAPI, stockAPI, messagesAPI, inventoryStatusAPI, type AIModelSetting, type APICredential, type Warehouse, type EmailTemplate, type AIInstruction, type OCConnection } from '../services/api'
+import { settingsAPI, stockAPI, inventoryStatusAPI, type AIModelSetting, type APICredential, type Warehouse, type EmailTemplate, type OCConnection } from '../services/api'
+import VideoManagement from './VideoManagement'
+import LenderSummary from './LenderSummary'
+import SKUManager from './SKUManager'
+
+type SettingsTab =
+  | 'credentials'
+  | 'ai-models'
+  | 'ebay'
+  | 'shopify'
+  | 'oc'
+  | 'warehouses'
+  | 'email-templates'
+  | 'skus'
+  | 'video'
+  | 'lender'
+
+const SETTINGS_TABS: SettingsTab[] = [
+  'credentials',
+  'ai-models',
+  'ebay',
+  'shopify',
+  'oc',
+  'warehouses',
+  'email-templates',
+  'skus',
+  'video',
+  'lender',
+]
+
+function tabFromSearch(): SettingsTab {
+  const raw = new URLSearchParams(window.location.search).get('tab')
+  if (raw === 'ai-instructions' || raw === 'ai_instructions') {
+    window.location.replace('/ai-instructions')
+    return 'credentials'
+  }
+  if (raw === 'lender-summary') return 'lender'
+  if (raw && (SETTINGS_TABS as string[]).includes(raw)) return raw as SettingsTab
+  return 'credentials'
+}
 
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState<'credentials' | 'ai-models' | 'ai-instructions' | 'ebay' | 'shopify' | 'oc' | 'warehouses' | 'email-templates'>('credentials')
+  const [activeTab, setActiveTab] = useState<SettingsTab>(() => tabFromSearch())
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
@@ -16,113 +55,68 @@ export default function Settings() {
       next.delete('ebay_error_detail')
       const search = next.toString()
       window.history.replaceState({}, '', window.location.pathname + (search ? `?${search}` : ''))
+      setActiveTab('ebay')
     }
   }, [])
+
+  const selectTab = (tab: SettingsTab) => {
+    setActiveTab(tab)
+    const params = new URLSearchParams(window.location.search)
+    if (tab === 'credentials') params.delete('tab')
+    else params.set('tab', tab)
+    const search = params.toString()
+    window.history.replaceState({}, '', window.location.pathname + (search ? `?${search}` : ''))
+  }
+
+  const tabBtn = (tab: SettingsTab, label: string) => (
+    <button
+      key={tab}
+      type="button"
+      onClick={() => selectTab(tab)}
+      className={`${
+        activeTab === tab
+          ? 'border-blue-500 text-blue-600'
+          : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+      } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
+    >
+      {label}
+    </button>
+  )
 
   return (
     <div className="px-4 py-6 sm:px-0">
       <div className="mb-6">
-        <h1 className="text-3xl font-bold text-gray-900">Settings</h1>
+        <h1 className="text-3xl font-bold text-gray-900">Misc</h1>
         <p className="mt-2 text-gray-600">
           Manage API credentials, AI models, and warehouse addresses.
         </p>
       </div>
 
-      {/* Tabs */}
       <div className="border-b border-gray-200 mb-6">
-        <nav className="-mb-px flex space-x-8">
-          <button
-            onClick={() => setActiveTab('credentials')}
-            className={`${
-              activeTab === 'credentials'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
-          >
-            API Credentials
-          </button>
-          <button
-            onClick={() => setActiveTab('ai-models')}
-            className={`${
-              activeTab === 'ai-models'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
-          >
-            AI Models
-          </button>
-          <button
-            onClick={() => setActiveTab('ai-instructions')}
-            className={`${
-              activeTab === 'ai-instructions'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
-          >
-            AI Instructions
-          </button>
-          <button
-            onClick={() => setActiveTab('ebay')}
-            className={`${
-              activeTab === 'ebay'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
-          >
-            eBay
-          </button>
-          <button
-            onClick={() => setActiveTab('shopify')}
-            className={`${
-              activeTab === 'shopify'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
-          >
-            Shopify
-          </button>
-          <button
-            onClick={() => setActiveTab('oc')}
-            className={`${
-              activeTab === 'oc'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
-          >
-            OC Integration
-          </button>
-          <button
-            onClick={() => setActiveTab('warehouses')}
-            className={`${
-              activeTab === 'warehouses'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
-          >
-            Warehouses
-          </button>
-          <button
-            onClick={() => setActiveTab('email-templates')}
-            className={`${
-              activeTab === 'email-templates'
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-            } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
-          >
-            Email Templates
-          </button>
+        <nav className="-mb-px flex flex-wrap gap-x-8 gap-y-1">
+          {tabBtn('credentials', 'API')}
+          {tabBtn('ai-models', 'AI Models')}
+          {tabBtn('ebay', 'eBay')}
+          {tabBtn('shopify', 'Shopify')}
+          {tabBtn('oc', 'OC Integration')}
+          {tabBtn('warehouses', 'Warehouses')}
+          {tabBtn('email-templates', 'Email Templates')}
+          {tabBtn('skus', 'SKUs')}
+          {tabBtn('video', 'Video ID getter')}
+          {tabBtn('lender', 'Lender summary')}
         </nav>
       </div>
 
-      {/* Tab content */}
       {activeTab === 'credentials' && <CredentialsTab />}
       {activeTab === 'ai-models' && <AIModelsTab />}
-      {activeTab === 'ai-instructions' && <AIInstructionsTab />}
       {activeTab === 'ebay' && <EbayTab />}
       {activeTab === 'shopify' && <ShopifyTab />}
       {activeTab === 'oc' && <OCTab />}
       {activeTab === 'email-templates' && <EmailTemplatesTab />}
       {activeTab === 'warehouses' && <WarehousesTab />}
+      {activeTab === 'skus' && <SKUManager embedded />}
+      {activeTab === 'video' && <VideoManagement embedded />}
+      {activeTab === 'lender' && <LenderSummary embedded />}
     </div>
   )
 }
@@ -171,7 +165,7 @@ function CredentialsTab() {
 
   return (
     <div className="bg-white shadow rounded-lg p-6">
-      <h2 className="text-xl font-semibold mb-4">API Credentials</h2>
+      <h2 className="text-xl font-semibold mb-4">API</h2>
       <p className="text-gray-600 mb-6">
         Store API keys for AI providers (Anthropic, OpenAI). eBay app keys (App ID, Cert, etc.) are in .env; the eBay OAuth token (refresh_token) is stored here after you use Connect with eBay and persists across <code className="bg-gray-200 px-1 rounded">make down</code> / <code className="bg-gray-200 px-1 rounded">make up</code> (database volume is kept). All values are encrypted.
       </p>
@@ -659,7 +653,7 @@ function AIModelsTab() {
             {!defaultModel && <li>Add an AI model and set it as default (below)</li>}
             {defaultModel && !hasMatchingCredential && (
               <li>
-                Add {defaultModel.provider} API key in the <strong>API Credentials</strong> tab
+                Add {defaultModel.provider} API key in the <strong>API</strong> tab
               </li>
             )}
           </ul>
@@ -778,330 +772,6 @@ function AIModelsTab() {
               No AI models configured yet. Add one above to enable AI features.
             </p>
           )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function AIInstructionsTab() {
-  const queryClient = useQueryClient()
-  const [instructionType, setInstructionType] = useState<'global' | 'sku'>('global')
-  const [skuCode, setSkuCode] = useState('')
-  const [itemDetails, setItemDetails] = useState('')
-  const [instructions, setInstructions] = useState('')
-  const [editingId, setEditingId] = useState<number | null>(null)
-
-  const { data: allInstructions, isLoading } = useQuery({
-    queryKey: ['ai-instructions'],
-    queryFn: async () => {
-      const response = await messagesAPI.listAIInstructions()
-      return response.data
-    },
-  })
-
-  const { data: skus } = useQuery({
-    queryKey: ['skus'],
-    queryFn: async () => {
-      const response = await stockAPI.listSKUs()
-      return response.data
-    },
-  })
-
-  const createMutation = useMutation({
-    mutationFn: messagesAPI.createAIInstruction,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['ai-instructions'] })
-      resetForm()
-    },
-  })
-
-  const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: number; data: { item_details?: string; instructions?: string } }) =>
-      messagesAPI.updateAIInstruction(id, data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['ai-instructions'] })
-      resetForm()
-    },
-  })
-
-  const deleteMutation = useMutation({
-    mutationFn: messagesAPI.deleteAIInstruction,
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['ai-instructions'] })
-    },
-  })
-
-  const resetForm = () => {
-    setInstructionType('global')
-    setSkuCode('')
-    setItemDetails('')
-    setInstructions('')
-    setEditingId(null)
-  }
-
-  const handleEdit = (instr: AIInstruction) => {
-    setInstructionType(instr.type)
-    setSkuCode(instr.sku_code || '')
-    setItemDetails(instr.item_details || '')
-    setInstructions(instr.instructions)
-    setEditingId(instr.id)
-  }
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (editingId) {
-      updateMutation.mutate({
-        id: editingId,
-        data: { item_details: itemDetails || undefined, instructions },
-      })
-    } else {
-      createMutation.mutate({
-        type: instructionType,
-        sku_code: instructionType === 'sku' ? skuCode : undefined,
-        item_details: itemDetails || undefined,
-        instructions,
-      })
-    }
-  }
-
-  const globalInstruction = allInstructions?.find((i) => i.type === 'global')
-  const skuInstructions = allInstructions?.filter((i) => i.type === 'sku') || []
-
-  const [generating, setGenerating] = useState(false)
-  const [generateError, setGenerateError] = useState<string | null>(null)
-  const generateMutation = useMutation({
-    mutationFn: () => messagesAPI.generateGlobalInstruction(),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['ai-instructions'] })
-      setGenerateError(null)
-    },
-    onError: (e: unknown) => {
-      const ax = e as { response?: { data?: { detail?: string } } }
-      setGenerateError(ax.response?.data?.detail || (e instanceof Error ? e.message : 'Generation failed'))
-    },
-    onSettled: () => setGenerating(false),
-  })
-
-  const handleGenerateFromHistory = () => {
-    setGenerateError(null)
-    setGenerating(true)
-    generateMutation.mutate()
-  }
-
-  return (
-    <div className="bg-white shadow rounded-lg p-6">
-      <h2 className="text-xl font-semibold mb-4">AI Instructions</h2>
-      <p className="text-gray-600 mb-6">
-        Customize how AI drafts message replies. Global instructions apply to all messages.
-        SKU-specific instructions override or supplement global ones for specific products.
-      </p>
-
-      {/* Add/Edit instruction form */}
-      <form onSubmit={handleSubmit} className="mb-8 bg-gray-50 p-4 rounded-lg">
-        <h3 className="font-medium mb-4">{editingId ? 'Edit Instruction' : 'Add Instruction'}</h3>
-        <div className="grid grid-cols-1 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Type
-            </label>
-            <select
-              value={instructionType}
-              onChange={(e) => setInstructionType(e.target.value as 'global' | 'sku')}
-              className="w-full border border-gray-300 rounded-md px-3 py-2"
-              disabled={!!editingId}
-            >
-              <option value="global">Global (applies to all messages)</option>
-              <option value="sku">SKU-specific</option>
-            </select>
-          </div>
-
-          {instructionType === 'sku' && !editingId && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                SKU
-              </label>
-              <select
-                value={skuCode}
-                onChange={(e) => setSkuCode(e.target.value)}
-                className="w-full border border-gray-300 rounded-md px-3 py-2"
-                required
-              >
-                <option value="">Select a SKU...</option>
-                {skus?.map((sku) => (
-                  <option key={sku.sku_code} value={sku.sku_code}>
-                    {sku.sku_code} - {sku.title}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {instructionType === 'sku' && (
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Item Details (optional)
-              </label>
-              <textarea
-                value={itemDetails}
-                onChange={(e) => setItemDetails(e.target.value)}
-                placeholder="Product specifications, common issues, shipping info..."
-                rows={3}
-                className="w-full border border-gray-300 rounded-md px-3 py-2"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Background info about this product that helps AI understand context
-              </p>
-            </div>
-          )}
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Instructions
-            </label>
-            <textarea
-              value={instructions}
-              onChange={(e) => setInstructions(e.target.value)}
-              placeholder={instructionType === 'global'
-                ? "e.g., Be friendly and professional. Always offer solutions. Sign off with 'Best regards, [Your Team]'..."
-                : "e.g., This product has a 30-day return policy. Common size issue: recommend one size up..."
-              }
-              rows={5}
-              className="w-full border border-gray-300 rounded-md px-3 py-2"
-              required
-            />
-            <p className="text-xs text-gray-500 mt-1">
-              These instructions guide AI when drafting replies
-            </p>
-          </div>
-        </div>
-        <div className="flex gap-2 mt-4">
-          <button
-            type="submit"
-            disabled={createMutation.isPending || updateMutation.isPending || (instructionType === 'global' && !editingId && !!globalInstruction)}
-            className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
-          >
-            {createMutation.isPending || updateMutation.isPending
-              ? 'Saving...'
-              : editingId
-              ? 'Update'
-              : 'Add Instruction'}
-          </button>
-          {editingId && (
-            <button
-              type="button"
-              onClick={resetForm}
-              className="bg-gray-200 text-gray-700 px-4 py-2 rounded-md hover:bg-gray-300"
-            >
-              Cancel
-            </button>
-          )}
-        </div>
-        {instructionType === 'global' && !editingId && globalInstruction && (
-          <p className="text-amber-600 text-sm mt-2">
-            Global instruction already exists. Edit or delete it below.
-          </p>
-        )}
-      </form>
-
-      {/* Instructions list */}
-      {isLoading ? (
-        <p>Loading instructions...</p>
-      ) : (
-        <div className="space-y-6">
-          {/* Global instruction */}
-          <div>
-            <div className="flex items-center gap-3 mb-2 flex-wrap">
-              <h3 className="font-medium text-gray-800">Global Instruction</h3>
-              <button
-                type="button"
-                onClick={handleGenerateFromHistory}
-                disabled={generating}
-                className="px-3 py-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 text-sm"
-              >
-                {generating ? 'Generating...' : 'Generate from history'}
-              </button>
-              {generateError && (
-                <span className="text-red-600 text-sm">{generateError}</span>
-              )}
-            </div>
-            {globalInstruction ? (
-              <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
-                <div className="flex justify-between items-start">
-                  <div className="flex-1">
-                    <pre className="whitespace-pre-wrap text-sm text-gray-700 font-sans">
-                      {globalInstruction.instructions}
-                    </pre>
-                  </div>
-                  <div className="flex gap-2 ml-4">
-                    <button
-                      onClick={() => handleEdit(globalInstruction)}
-                      className="text-blue-600 hover:text-blue-800 text-sm"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      onClick={() => deleteMutation.mutate(globalInstruction.id)}
-                      className="text-red-600 hover:text-red-800 text-sm"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <p className="text-gray-500 text-center py-4 bg-gray-50 rounded-lg">
-                No global instruction set. Add one above.
-              </p>
-            )}
-          </div>
-
-          {/* SKU-specific instructions */}
-          <div>
-            <h3 className="font-medium text-gray-800 mb-2">SKU-Specific Instructions ({skuInstructions.length})</h3>
-            {skuInstructions.length > 0 ? (
-              <div className="space-y-3">
-                {skuInstructions.map((instr) => (
-                  <div
-                    key={instr.id}
-                    className="p-4 bg-gray-50 rounded-lg"
-                  >
-                    <div className="flex justify-between items-start">
-                      <div className="flex-1">
-                        <div className="font-medium text-gray-800">{instr.sku_code}</div>
-                        {instr.item_details && (
-                          <div className="text-sm text-gray-600 mt-1 italic">
-                            {instr.item_details}
-                          </div>
-                        )}
-                        <pre className="whitespace-pre-wrap text-sm text-gray-700 mt-2 font-sans">
-                          {instr.instructions}
-                        </pre>
-                      </div>
-                      <div className="flex gap-2 ml-4">
-                        <button
-                          onClick={() => handleEdit(instr)}
-                          className="text-blue-600 hover:text-blue-800 text-sm"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => deleteMutation.mutate(instr.id)}
-                          className="text-red-600 hover:text-red-800 text-sm"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-gray-500 text-center py-4 bg-gray-50 rounded-lg">
-                No SKU-specific instructions. Add one above when needed.
-              </p>
-            )}
-          </div>
         </div>
       )}
     </div>
@@ -1352,11 +1022,6 @@ function EbayTab() {
 }
 
 function ShopifyTab() {
-  const queryClient = useQueryClient()
-  const [shop, setShop] = useState('')
-  const [accessToken, setAccessToken] = useState('')
-  const [formError, setFormError] = useState<string | null>(null)
-
   const { data: st, isLoading } = useQuery({
     queryKey: ['shopify-status'],
     queryFn: async () => {
@@ -1365,158 +1030,26 @@ function ShopifyTab() {
     },
   })
 
-  useEffect(() => {
-    if (st?.shop_domain) {
-      setShop(st.shop_domain)
-    }
-  }, [st?.shop_domain])
-
-  const saveMutation = useMutation({
-    mutationFn: (payload: { shop: string; access_token: string }) => stockAPI.saveShopify(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['shopify-status'] })
-      setAccessToken('')
-      setFormError(null)
-    },
-    onError: (err: unknown) => {
-      const message =
-        err && typeof err === 'object' && 'response' in err
-          ? (err as { response?: { data?: { detail?: string | { msg: string }[] } } }).response?.data?.detail
-          : null
-      const text =
-        typeof message === 'string'
-          ? message
-          : Array.isArray(message)
-            ? message.map((m) => (typeof m === 'object' && m && 'msg' in m ? String(m.msg) : String(m))).join(', ')
-            : err instanceof Error
-              ? err.message
-              : 'Failed to save'
-      setFormError(text)
-    },
-  })
-
-  const clearMutation = useMutation({
-    mutationFn: () => stockAPI.clearShopify(),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['shopify-status'] })
-      setAccessToken('')
-      setShop('')
-      setFormError(null)
-    },
-    onError: (err: unknown) => {
-      const message =
-        err && typeof err === 'object' && 'response' in err
-          ? (err as { response?: { data?: { detail?: string } } }).response?.data?.detail
-          : null
-      setFormError(typeof message === 'string' ? message : 'Failed to clear')
-    },
-  })
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault()
-    setFormError(null)
-    saveMutation.mutate({ shop, access_token: accessToken })
-  }
+  const sourceLabel =
+    st?.source === 'env' ? 'env' : st?.source === 'database' ? 'database' : null
 
   return (
     <div className="bg-white shadow rounded-lg p-6">
       <h2 className="text-xl font-semibold mb-4">Shopify</h2>
-      <p className="text-gray-600 mb-4">
-        Connect a <strong>custom app</strong> in Shopify Admin (Settings → Apps → Develop apps), install it on your store, and
-        enable <strong>read orders</strong> (Admin API). Paste the <strong>Admin API access token</strong> and your store
-        domain (e.g. <code className="bg-gray-200 px-1 rounded">your-store.myshopify.com</code>) here. Values are stored
-        encrypted in the database, like other API keys.
-      </p>
-
-      {st?.source === 'env' && (
-        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-sm">
-          <p className="font-medium">Using environment variables</p>
-          <p className="mt-1">
-            <code className="bg-white/80 px-1 rounded">SHOPIFY_SHOP</code> and{' '}
-            <code className="bg-white/80 px-1 rounded">SHOPIFY_ACCESS_TOKEN</code> are set. They override Settings until you
-            remove them and restart the API.
-            {st.shop_domain && (
-              <span>
-                {' '}
-                Current shop: <code className="bg-white/80 px-1 rounded break-all">{st.shop_domain}</code>
-              </span>
-            )}
-          </p>
-        </div>
-      )}
-
       {isLoading ? (
         <p className="text-gray-500">Loading…</p>
       ) : (
-        <>
-          <div className="mb-4">
-            <p className="text-sm text-gray-600">
-              Status:{' '}
-              {st?.connected ? (
-                <span className="text-green-700 font-medium">Ready for import</span>
-              ) : (
-                <span className="text-gray-600">Not configured</span>
-              )}
-              {st && st.source !== 'none' && (
-                <span className="text-gray-500"> (source: {st.source})</span>
-              )}
-            </p>
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-4 max-w-xl">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Store domain</label>
-              <input
-                type="text"
-                value={shop}
-                onChange={(e) => setShop(e.target.value)}
-                placeholder="your-store.myshopify.com"
-                className="w-full border border-gray-300 rounded-md px-3 py-2"
-                disabled={st?.source === 'env'}
-                required
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Admin API access token</label>
-              <input
-                type="password"
-                value={accessToken}
-                onChange={(e) => setAccessToken(e.target.value)}
-                placeholder={st?.connected && st?.source === 'database' ? '•••• (leave empty to keep current token)' : 'shpat_…'}
-                className="w-full border border-gray-300 rounded-md px-3 py-2"
-                disabled={st?.source === 'env'}
-                autoComplete="off"
-              />
-              <p className="text-xs text-gray-500 mt-1">Stored encrypted. Leave empty when updating the domain only.</p>
-            </div>
-            {formError && (
-              <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">{formError}</div>
-            )}
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="submit"
-                disabled={saveMutation.isPending || st?.source === 'env'}
-                className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
-              >
-                {saveMutation.isPending ? 'Saving…' : 'Save'}
-              </button>
-              {st?.source === 'database' && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (window.confirm('Remove Shopify credentials from the database?')) {
-                      clearMutation.mutate()
-                    }
-                  }}
-                  disabled={clearMutation.isPending}
-                  className="bg-white border border-gray-300 text-gray-800 px-4 py-2 rounded-md hover:bg-gray-50 disabled:opacity-50"
-                >
-                  {clearMutation.isPending ? 'Clearing…' : 'Clear stored credentials'}
-                </button>
-              )}
-            </div>
-          </form>
-        </>
+        <p className="text-sm text-gray-600">
+          Status:{' '}
+          {st?.connected ? (
+            <span className="text-green-700 font-medium">Ready for import</span>
+          ) : (
+            <span className="text-gray-600">Not configured</span>
+          )}
+          {sourceLabel ? (
+            <span className="text-gray-500"> (credential source: {sourceLabel})</span>
+          ) : null}
+        </p>
       )}
     </div>
   )

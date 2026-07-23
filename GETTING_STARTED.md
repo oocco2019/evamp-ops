@@ -199,7 +199,7 @@ docker-compose logs postgres
 
 ### Phase 3: Analytics & Planning (Complete)
 - Sales analytics dashboard with charts (SM01)
-- Stock planning calculator (SM04)
+- Stock Order calculator (SM04)
 - Supplier order management (SM06-SM07)
 
 ### Phase 4-6: Customer Service

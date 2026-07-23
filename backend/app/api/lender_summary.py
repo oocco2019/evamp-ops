@@ -117,6 +117,7 @@ def _process_order_for_lender(
 
     line_cost_usd = Decimal(0)
     line_postage_usd = Decimal(0)
+    units = 0
     for li in o.line_items:
         s = sku_map.get(li.sku) if li.sku else None
         landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
@@ -124,6 +125,7 @@ def _process_order_for_lender(
         qty = li.quantity or 0
         line_cost_usd += (landed + postage) * qty
         line_postage_usd += postage * qty
+        units += qty
 
     op = _order_profit_gbp(
         o.total_due_seller,
@@ -135,6 +137,8 @@ def _process_order_for_lender(
         line_cost_usd,
         line_postage_usd,
         usd_to_gbp,
+        sales_channel=o.sales_channel,
+        units=units,
     )
     if op is None:
         return None

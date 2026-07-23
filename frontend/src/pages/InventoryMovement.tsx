@@ -1,6 +1,5 @@
-import { useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { useMemo, useState, type ReactNode } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import {
   LineChart,
   Line,
@@ -11,10 +10,11 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from 'recharts'
-import { inventoryStatusAPI, type StockForecastRow } from '../services/api'
+import { inventoryStatusAPI, type StockBurnTrendRow, type StockForecastRow } from '../services/api'
 import { buildDailyStockLevelsFromHistory } from '../utils/inventoryHistoryFormat'
 import {
   completeDaysRange,
+  latestCompleteDayIso,
   periodPresetRange,
   type PeriodPreset,
 } from '../utils/datePeriodPresets'
@@ -52,12 +52,50 @@ function formatForecastCostGbp(value: number | null | undefined): string {
   return `£${value.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
+function formatBurnRate(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  return value.toFixed(2)
+}
+
+function trendVerdictLabel(row: StockBurnTrendRow): string {
+  if (!row.verdict) return '—'
+  const base =
+    row.verdict === 'accelerating'
+      ? 'Accelerating'
+      : row.verdict === 'stable'
+        ? 'Stable'
+        : row.verdict === 'decaying'
+          ? 'Decaying'
+          : 'insufficient volume'
+  return row.low_sample ? `${base} · low sample` : base
+}
+
+function trendVerdictClass(verdict: StockBurnTrendRow['verdict']): string {
+  if (verdict === 'accelerating') return 'text-emerald-800 font-medium'
+  if (verdict === 'stable') return 'text-slate-600'
+  if (verdict === 'decaying') return 'text-amber-800 font-medium'
+  if (verdict === 'insufficient_volume') return 'text-slate-500'
+  return 'text-slate-400'
+}
+
+const TREND_DEAD_STORAGE_KEY = 'inventoryMovement.showDeadBurnTrend'
+
+function loadShowDeadBurnTrend(): boolean {
+  try {
+    return localStorage.getItem(TREND_DEAD_STORAGE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+
 const FORECAST_SORT_STORAGE_KEY = 'inventoryMovement.forecastSort'
 
 type ForecastSortKey =
   | 'sku_name'
   | 'current_available'
   | 'ordered_total'
+  | 'sold_3m_units'
+  | 'sold_1m_units'
   | 'burn_rate_per_day'
   | 'ordered_days_of_cover'
   | 'days_until_reorder'
@@ -73,6 +111,8 @@ function loadForecastSort(): { key: ForecastSortKey; dir: 'asc' | 'desc' } {
         (key === 'sku_name' ||
           key === 'current_available' ||
           key === 'ordered_total' ||
+          key === 'sold_3m_units' ||
+          key === 'sold_1m_units' ||
           key === 'burn_rate_per_day' ||
           key === 'ordered_days_of_cover' ||
           key === 'days_until_reorder') &&
@@ -113,6 +153,10 @@ function sortForecastRows(
         return compareNullableNumber(a.current_available, b.current_available, mult)
       case 'ordered_total':
         return compareNullableNumber(a.ordered_total, b.ordered_total, mult)
+      case 'sold_3m_units':
+        return compareNullableNumber(a.sold_3m_units, b.sold_3m_units, mult)
+      case 'sold_1m_units':
+        return compareNullableNumber(a.sold_1m_units, b.sold_1m_units, mult)
       case 'burn_rate_per_day':
         return compareNullableNumber(a.burn_rate_per_day, b.burn_rate_per_day, mult)
       case 'ordered_days_of_cover':
@@ -134,44 +178,7 @@ function formatDelta(n: number | null): string {
   return n > 0 ? `+${n}` : String(n)
 }
 
-function DiagnosticsPanel() {
-  const dbDbg = useQuery({
-    queryKey: ['debug-stock-movement-db'],
-    queryFn: async () => (await inventoryStatusAPI.debugStockMovementDb()).data,
-    enabled: false,
-  })
-
-  return (
-    <div className="mb-4 p-3 bg-slate-50 border border-slate-200 rounded text-sm">
-      <div className="font-medium text-slate-800 mb-1">Diagnostics</div>
-      <p className="text-slate-600 mb-2">
-        Verbatim OC JSON and DB stats.{' '}
-        <code className="text-xs break-all">GET /api/inventory-status/debug/stock-movement-db</code> — persisted movement
-        rows. <code className="text-xs break-all">GET /api/inventory-status/debug-raw</code> — StockSnapshot v2 + SKU
-        query.{' '}
-        <code className="text-xs break-all">GET /api/inventory-status/debug/oc-movement-raw?mfskuid=…</code> — single
-        GetStockMovement call.
-      </p>
-      <button
-        type="button"
-        onClick={() => void dbDbg.refetch()}
-        className="text-sm px-3 py-1 bg-slate-200 rounded hover:bg-slate-300"
-      >
-        Load movement DB stats (JSON)
-      </button>
-      {dbDbg.isFetching && <span className="ml-2 text-slate-500">Loading…</span>}
-      {dbDbg.data && (
-        <pre className="mt-2 text-xs overflow-auto max-h-48 bg-white p-2 border rounded">{JSON.stringify(dbDbg.data, null, 2)}</pre>
-      )}
-      {dbDbg.isError && (
-        <p className="text-red-600 text-xs mt-1">{dbDbg.error instanceof Error ? dbDbg.error.message : 'Request failed'}</p>
-      )}
-    </div>
-  )
-}
-
-export default function InventoryMovement() {
-  const queryClient = useQueryClient()
+export function StockMovementPanel({ afterForecast }: { afterForecast?: ReactNode } = {}) {
   const defaultRange = completeDaysRange(365)
   const [periodPreset, setPeriodPreset] = useState<PeriodPreset>('1y')
   const [from, setFrom] = useState(defaultRange.from)
@@ -180,6 +187,7 @@ export default function InventoryMovement() {
   const [skuSelect, setSkuSelect] = useState<string>('all')
   const [forecastSort, setForecastSort] = useState(loadForecastSort)
   const [selectedForecastKeys, setSelectedForecastKeys] = useState<Set<string>>(() => new Set())
+  const [showDeadBurnTrend, setShowDeadBurnTrend] = useState(loadShowDeadBurnTrend)
 
   const applyPeriodPreset = (preset: PeriodPreset) => {
     const range = periodPresetRange(preset)
@@ -228,9 +236,19 @@ export default function InventoryMovement() {
     queryFn: async () => (await inventoryStatusAPI.getStockForecast({ from, to })).data,
   })
 
+  const stockBurnTrendQuery = useQuery({
+    queryKey: ['stock-burn-trend', latestCompleteDayIso()],
+    queryFn: async () => (await inventoryStatusAPI.getStockBurnTrend()).data,
+  })
+
   const handleForecastSort = (key: ForecastSortKey) => {
     setForecastSort((prev) => {
-      const defaultDesc = key === 'burn_rate_per_day' || key === 'current_available' || key === 'ordered_total'
+      const defaultDesc =
+        key === 'burn_rate_per_day' ||
+        key === 'current_available' ||
+        key === 'ordered_total' ||
+        key === 'sold_3m_units' ||
+        key === 'sold_1m_units'
       const next = {
         key,
         dir:
@@ -286,23 +304,20 @@ export default function InventoryMovement() {
     return { totalGbp, withCost, missingCost, count: selectedForecastKeys.size }
   }, [sortedForecasts, selectedForecastKeys])
 
-  type SyncStockMovementMode = { mode: 'incremental' } | { mode: 'range' }
+  const visibleTrendRows = useMemo(() => {
+    const rows = stockBurnTrendQuery.data?.rows ?? []
+    if (showDeadBurnTrend) return rows
+    return rows.filter((r) => !r.is_dead)
+  }, [stockBurnTrendQuery.data?.rows, showDeadBurnTrend])
 
-  const syncFromOcMutation = useMutation({
-    mutationFn: async (opts: SyncStockMovementMode) => {
-      if (opts.mode === 'incremental') {
-        const res = await inventoryStatusAPI.syncStockMovementFromOc({ incremental: true })
-        return res.data
-      }
-      const res = await inventoryStatusAPI.syncStockMovementFromOc({ from, to })
-      return res.data
-    },
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['stock-movement'] })
-      await queryClient.invalidateQueries({ queryKey: ['inventory-history'] })
-      await queryClient.invalidateQueries({ queryKey: ['stock-forecast'] })
-    },
-  })
+  const persistShowDeadBurnTrend = (next: boolean) => {
+    setShowDeadBurnTrend(next)
+    try {
+      localStorage.setItem(TREND_DEAD_STORAGE_KEY, next ? '1' : '0')
+    } catch {
+      // ignore
+    }
+  }
 
   const rawHistoryPoints = inventoryHistoryQuery.data?.points ?? []
   const dailyStockChartData = useMemo(
@@ -315,15 +330,6 @@ export default function InventoryMovement() {
     if (skuSelect === 'all') return rows
     return rows.filter((r) => (r.seller_skuid || '').trim() === skuSelect)
   }, [inventoryQuery.data, skuSelect])
-
-  const skuCodeByMfskuid = useMemo(() => {
-    const m = new Map<string, string>()
-    for (const row of mappingsQuery.data ?? []) {
-      const mf = (row.mfskuid || '').trim().toLowerCase()
-      if (mf && !m.has(mf)) m.set(mf, (row.sku_code || '').trim())
-    }
-    return m
-  }, [mappingsQuery.data])
 
   const stockStats = useMemo(() => {
     let totalAvail = 0
@@ -361,49 +367,18 @@ export default function InventoryMovement() {
   const errMsg =
     movementQuery.error instanceof Error ? movementQuery.error.message : 'Failed to load movement data'
 
-  const sortedInvTable = useMemo(() => {
-    return [...invRows].sort((a, b) => a.available - b.available).slice(0, 40)
-  }, [invRows])
 
   return (
-    <div className="px-4 py-6 sm:px-0">
-      <div className="flex flex-wrap items-baseline justify-between gap-4 mb-4">
-        <h1 className="text-3xl font-bold text-gray-900">Stock & movement</h1>
-        <Link to="/inventory-status" className="text-sm text-blue-600 hover:underline">
-          Inventory status (OC sync)
-        </Link>
-      </div>
-
-      <p className="text-gray-600 mb-4 max-w-3xl">
-        <strong>Current stock levels</strong> (available, in transit) live on{' '}
-        <Link to="/inventory-status" className="text-blue-600 hover:underline">
-          Inventory status
-        </Link>{' '}
-        → <strong>Pull latest data</strong>.         The <strong>stock chart</strong> uses persisted GetStockMovement rows (
-        <code className="text-xs">actual_count</code>, AVL only); sync movement below to fill history. This page
-        also lists raw <strong>movement lines</strong> for audit.
-      </p>
-
-      <DiagnosticsPanel />
-
+    <>
       {mappingsQuery.isSuccess && sellerOptions.length === 0 && (
-        <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-sm">
+        <div className="mb-4 mt-6 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-900 text-sm">
           <strong>No OC SKU mappings in the database.</strong> Charts, forecast, and sync need mappings from OrangeConnex.
-          Go to{' '}
-          <Link to="/inventory-status" className="text-amber-950 underline font-medium">
-            Inventory status
-          </Link>{' '}
-          and click <strong>Pull latest data</strong>. Movement history in PostgreSQL is kept separately — it is not
+          Use <strong>Pull latest data</strong> above. Movement history in PostgreSQL is kept separately — it is not
           deleted when mappings are missing.
         </div>
       )}
 
-      <p className="text-sm text-gray-600 mb-6 max-w-3xl">
-        Stock levels by day (from movement data in PostgreSQL — same filter card layout as Sales Analytics). Table below
-        shows the same feed in detail.
-      </p>
-
-      <div className="bg-white shadow rounded-lg p-4 mb-6">
+      <div className="bg-white shadow rounded-lg p-4 mb-6 mt-6">
         <h2 className="text-lg font-semibold text-gray-800 mb-3">Filters</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div>
@@ -413,7 +388,7 @@ export default function InventoryMovement() {
               onChange={(e) => applyPeriodPreset(e.target.value as PeriodPreset)}
               className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
             >
-              <option value="today">Today</option>
+              <option value="yesterday">Yesterday</option>
               <option value="7d">Last 7 days</option>
               <option value="1m">Last month</option>
               <option value="3m">Last 3 months</option>
@@ -462,63 +437,8 @@ export default function InventoryMovement() {
             </select>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2 mt-4">
-          <button
-            type="button"
-            onClick={() => {
-              void inventoryQuery.refetch()
-              void movementQuery.refetch()
-              void inventoryHistoryQuery.refetch()
-              void stockForecastQuery.refetch()
-            }}
-            className="px-4 py-2 bg-blue-600 text-white text-sm rounded hover:bg-blue-700"
-          >
-            Refresh
-          </button>
-          <button
-            type="button"
-            disabled={syncFromOcMutation.isPending}
-            onClick={() => syncFromOcMutation.mutate({ mode: 'range' })}
-            className="px-4 py-2 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:opacity-50"
-          >
-            {syncFromOcMutation.isPending ? 'Syncing…' : 'Sync range from OC'}
-          </button>
-          <button
-            type="button"
-            disabled={syncFromOcMutation.isPending}
-            onClick={() => syncFromOcMutation.mutate({ mode: 'incremental' })}
-            className="px-4 py-2 border border-indigo-600 text-indigo-700 text-sm rounded hover:bg-indigo-50 disabled:opacity-50"
-          >
-            Incremental sync
-          </button>
-        </div>
         {inventoryHistoryQuery.isLoading && <p className="mt-2 text-sm text-gray-500">Loading chart data…</p>}
       </div>
-      {syncFromOcMutation.isError && (
-        <p className="text-red-600 text-sm mb-2">
-          {syncFromOcMutation.error instanceof Error ? syncFromOcMutation.error.message : 'Sync failed'}
-        </p>
-      )}
-      {syncFromOcMutation.isSuccess && syncFromOcMutation.data && (
-        <p className="text-green-800 text-sm mb-2">
-          Fetched {syncFromOcMutation.data.fetched}, inserted {syncFromOcMutation.data.inserted} (
-          {syncFromOcMutation.data.from_date} → {syncFromOcMutation.data.to_date}).
-          {syncFromOcMutation.data.mfskuid_count === 0 ? (
-            <span className="block mt-1 text-amber-800">
-              No SKU mappings — run <strong>Pull latest data</strong> on{' '}
-              <Link to="/inventory-status" className="underline">
-                Inventory status
-              </Link>{' '}
-              first.
-            </span>
-          ) : null}
-          {syncFromOcMutation.data.clamped ? (
-            <span className="block mt-1 text-amber-800">
-              Range was limited to the last 12 months (OrangeConnex API constraint). Effective window is shown above.
-            </span>
-          ) : null}
-        </p>
-      )}
 
       {inventoryHistoryQuery.isError && (
         <p className="text-red-600 text-sm mb-4">
@@ -526,10 +446,6 @@ export default function InventoryMovement() {
             ? inventoryHistoryQuery.error.message
             : 'Failed to load inventory history'}
         </p>
-      )}
-
-      {inventoryHistoryQuery.data?.note && (
-        <p className="text-xs text-gray-500 mb-2 max-w-3xl">{inventoryHistoryQuery.data.note}</p>
       )}
 
       {stockForecastQuery.isError && (
@@ -544,12 +460,8 @@ export default function InventoryMovement() {
         <div className="mb-6 rounded-lg border border-slate-200 bg-white overflow-hidden shadow-sm">
           <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
             <h2 className="text-lg font-semibold text-slate-800">Stock run-out forecast</h2>
-            {stockForecastQuery.data.note && (
-              <p className="text-xs text-slate-600 mt-1">{stockForecastQuery.data.note}</p>
-            )}
-            <p className="text-xs text-slate-500 mt-1">
-              Click rows to mark SKUs for a combined reorder cost. Reorder cost uses SKU landed cost (USD) converted to
-              GBP.
+            <p className="text-xs text-slate-600 mt-1">
+              Days with less than 7 units are ignored.
             </p>
           </div>
           <div className="px-4 py-2 border-b border-indigo-200 bg-indigo-50 flex flex-wrap items-center justify-between gap-2 text-sm">
@@ -603,6 +515,20 @@ export default function InventoryMovement() {
                   </th>
                   <th
                     className={`py-2 pr-3 text-right ${forecastSortHeaderClass}`}
+                    onClick={() => handleForecastSort('sold_3m_units')}
+                  >
+                    Sold last 3 months{' '}
+                    {forecastSort.key === 'sold_3m_units' && (forecastSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className={`py-2 pr-3 text-right ${forecastSortHeaderClass}`}
+                    onClick={() => handleForecastSort('sold_1m_units')}
+                  >
+                    Sold last 1 month{' '}
+                    {forecastSort.key === 'sold_1m_units' && (forecastSort.dir === 'asc' ? '▲' : '▼')}
+                  </th>
+                  <th
+                    className={`py-2 pr-3 text-right ${forecastSortHeaderClass}`}
                     onClick={() => handleForecastSort('burn_rate_per_day')}
                   >
                     Burn rate/day{' '}
@@ -639,6 +565,8 @@ export default function InventoryMovement() {
                     <td className="py-2 pl-4 pr-3 font-mono text-xs">{f.sku_name || f.seller_skuid}</td>
                     <td className="py-2 pr-3 text-right tabular-nums">{f.current_available}</td>
                     <td className="py-2 pr-3 text-right tabular-nums">{f.ordered_total}</td>
+                    <td className="py-2 pr-3 text-right tabular-nums">{f.sold_3m_units ?? 0}</td>
+                    <td className="py-2 pr-3 text-right tabular-nums">{f.sold_1m_units ?? 0}</td>
                     <td className="py-2 pr-3 text-right tabular-nums">
                       {f.burn_rate_per_day != null ? f.burn_rate_per_day.toFixed(2) : '—'}
                     </td>
@@ -687,28 +615,80 @@ export default function InventoryMovement() {
         </div>
       )}
 
+      {afterForecast}
+
+      {stockBurnTrendQuery.isError && (
+        <p className="text-red-600 text-sm mb-4">
+          {stockBurnTrendQuery.error instanceof Error
+            ? stockBurnTrendQuery.error.message
+            : 'Failed to load burn rate trend'}
+        </p>
+      )}
+
+      {stockBurnTrendQuery.data && !stockBurnTrendQuery.isError && (
+        <div className="mb-6 rounded-lg border border-slate-200 bg-white overflow-hidden shadow-sm">
+          <div className="px-4 py-3 border-b border-slate-200 bg-slate-50">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold text-slate-800">Burn rate trend</h2>
+              <label className="inline-flex items-center gap-2 text-xs text-slate-700 whitespace-nowrap">
+                <input
+                  type="checkbox"
+                  checked={showDeadBurnTrend}
+                  onChange={(e) => persistShowDeadBurnTrend(e.target.checked)}
+                  className="rounded border-gray-300"
+                />
+                Show dead SKUs
+              </label>
+            </div>
+          </div>
+          <div className="overflow-x-auto max-h-[28rem] overflow-y-auto">
+            <table className="min-w-full text-sm text-left">
+              <caption className="sr-only">Burn rate trend by mapping</caption>
+              <thead>
+                <tr className="text-gray-600 border-b border-gray-200 bg-white">
+                  <th className="py-2 pl-4 pr-3 text-left font-medium">SKU</th>
+                  <th className="py-2 pr-3 text-right font-medium">burn30</th>
+                  <th className="py-2 pr-3 text-right font-medium">burn90</th>
+                  <th className="py-2 pr-3 text-right font-medium">burn180</th>
+                  <th className="py-2 pr-4 text-left font-medium">Trend</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleTrendRows.map((r, idx) => (
+                  <tr
+                    key={`${r.seller_skuid}-${r.mfskuid}-${idx}`}
+                    className="border-b border-gray-50 hover:bg-slate-50/80"
+                  >
+                    <td className="py-2 pl-4 pr-3 font-mono text-xs">{r.sku_name || r.seller_skuid}</td>
+                    <td className="py-2 pr-3 text-right tabular-nums text-emerald-800">
+                      {formatBurnRate(r.burn_30)}
+                    </td>
+                    <td className="py-2 pr-3 text-right tabular-nums text-emerald-800">
+                      {formatBurnRate(r.burn_90)}
+                    </td>
+                    <td className="py-2 pr-3 text-right tabular-nums text-emerald-800">
+                      {formatBurnRate(r.burn_180)}
+                    </td>
+                    <td className={`py-2 pr-4 ${trendVerdictClass(r.verdict)}`}>{trendVerdictLabel(r)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {visibleTrendRows.length === 0 && (
+            <p className="px-4 py-3 text-sm text-slate-500">
+              No rows to show{showDeadBurnTrend ? '' : ' (dead SKUs hidden)'}.
+            </p>
+          )}
+        </div>
+      )}
+
       {!inventoryHistoryQuery.isError && dailyStockChartData.length > 0 && (
         <div className="bg-white shadow rounded-lg p-4 mb-6">
           <h2 className="text-lg font-semibold text-gray-800 mb-4">Stock level by day</h2>
-          <p className="text-sm text-gray-600 mb-4">
-            Available stock from GetStockMovement (<code className="text-xs">actual_count</code>, AVL bucket only),
-            grouped by event time — not eBay sales.{' '}
-            {skuSelect === 'all' ? (
-              <strong>All</strong>
-            ) : (
-              <>
-                Seller SKU <span className="font-mono">{skuSelect}</span>
-              </>
-            )}
-            . One point per calendar day (local); levels carry forward after the first sample in range.{' '}
-            <span className="text-gray-500">
-              {rawHistoryPoints.length.toLocaleString()} chart point(s) from movement rows in this filter.
-            </span>
-          </p>
           {rawHistoryPoints.length === 0 && !inventoryHistoryQuery.isLoading && (
             <p className="text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
-              No movement samples in this range — line stays at 0. Run <strong>Sync range from OC</strong> or{' '}
-              <strong>Incremental sync</strong>, then <strong>Refresh</strong>.
+              No movement samples in this range — line stays at 0. Use <strong>Pull latest data</strong> above.
             </p>
           )}
           {rawHistoryPoints.length === 1 && !inventoryHistoryQuery.isLoading && (
@@ -770,11 +750,7 @@ export default function InventoryMovement() {
 
       {!mappingsQuery.isLoading && sellerOptions.length === 0 && (
         <div className="mb-6 p-4 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-700">
-          Add OrangeConnex SKU mappings on{' '}
-          <Link to="/inventory-status" className="text-blue-600 hover:underline">
-            Inventory status
-          </Link>{' '}
-          so a seller SKU can be chosen for the stock cycle chart.
+          Add OrangeConnex SKU mappings (Pull latest data above) so a seller SKU can be chosen for the stock cycle chart.
         </div>
       )}
 
@@ -799,67 +775,15 @@ export default function InventoryMovement() {
         </div>
       </div>
 
-      {skuSelect === 'all' && (
-        <p className="text-sm text-gray-600 mb-3">
-          <strong>SKU: All</strong> — chart and tables sum every mapped seller SKU. Choose one SKU to see that line only.
-        </p>
-      )}
-
       {loading && <p className="text-gray-500 text-sm">Loading movement…</p>}
       {isError && <p className="text-red-600 text-sm mb-4">{errMsg}</p>}
-
-      {movementQuery.data && (
-        <p className="text-xs text-gray-500 mb-2">
-          {movementQuery.data.note} {movementQuery.data.row_count.toLocaleString()} line(s), {movementQuery.data.from_date}{' '}
-          → {movementQuery.data.to_date}.
-        </p>
-      )}
-
-      <div className="mb-8 bg-white shadow rounded-lg overflow-hidden border border-gray-200">
-        <div className="p-3 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-800">Stock levels (lowest first)</h2>
-          <p className="text-xs text-gray-500 mt-1">From last Pull latest data. {sortedInvTable.length} row(s) shown.</p>
-        </div>
-        <div className="overflow-x-auto max-h-64 overflow-y-auto">
-          <table className="min-w-full text-sm">
-            <thead className="bg-gray-50 sticky top-0">
-              <tr>
-                <th className="px-3 py-2 text-left font-medium text-gray-700">SKU code</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700">Seller SKU</th>
-                <th className="px-3 py-2 text-left font-medium text-gray-700">Region</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700">Available</th>
-                <th className="px-3 py-2 text-right font-medium text-gray-700">In transit</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {sortedInvTable.map((r) => (
-                <tr key={`${r.id}-${r.seller_skuid}-${r.service_region}`} className="hover:bg-gray-50">
-                  <td className="px-3 py-1.5 text-gray-800">
-                    {skuCodeByMfskuid.get((r.mfskuid || '').toLowerCase()) || '—'}
-                  </td>
-                  <td className="px-3 py-1.5 font-mono text-xs">{r.seller_skuid ?? '—'}</td>
-                  <td className="px-3 py-1.5 text-gray-600">{r.service_region}</td>
-                  <td
-                    className={`px-3 py-1.5 text-right tabular-nums font-medium ${
-                      r.available <= 0 ? 'text-red-700' : 'text-gray-900'
-                    }`}
-                  >
-                    {r.available}
-                  </td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{r.in_transit}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
 
       <div className="bg-white shadow rounded-lg overflow-hidden border border-gray-200">
           <div className="p-3 border-b border-gray-200 flex justify-between items-center">
             <h2 className="text-lg font-semibold text-gray-800">Stored movement lines</h2>
             {movementQuery.data?.row_count === 0 && !movementQuery.isLoading && (
               <span className="text-sm text-gray-600">
-                No rows in this range — run <strong>Sync range from OC</strong> or <strong>Incremental sync</strong>.
+                No rows in this range — use <strong>Pull latest data</strong> above.
               </span>
             )}
           </div>
@@ -906,6 +830,6 @@ export default function InventoryMovement() {
             </table>
           </div>
         </div>
-    </div>
+    </>
   )
 }

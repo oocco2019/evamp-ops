@@ -8,7 +8,7 @@ A full-stack application for managing eBay stock operations and customer service
 - **Sales Analytics Dashboard** (SM01) - Interactive charts with filtering
 - **eBay Data Import** (SM02) - Automated order sync via API
 - **SKU Management** (SM03) - Product catalog with costs
-- **Stock Planning** (SM04) - Order calculation tools
+- **Stock Order** (SM04) - Order calculation tools
 - **Warehouse Management** (SM05) - Address tracking
 - **Supplier Orders** (SM06-07) - Order generation and tracking
 

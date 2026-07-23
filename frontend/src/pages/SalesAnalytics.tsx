@@ -103,6 +103,10 @@ export default function SalesAnalytics() {
   const [groupBy, setGroupBy] = useState<'day' | 'week' | 'month'>('day')
   const [country, setCountry] = useState('')
   const [sku, setSku] = useState('')
+  /** '' = all channels */
+  const [salesChannel, setSalesChannel] = useState<'' | 'ebay' | 'shopify'>('')
+  /** all = sales + refunds (default); refunds = clawbacks only */
+  const [outcome, setOutcome] = useState<'all' | 'refunds'>('all')
   const [tableSort, setTableSort] = useState<{ key: SkuSortKey; dir: 'asc' | 'desc' }>(loadSkuSort)
   const [countrySort, setCountrySort] = useState<{ key: CountrySortKey; dir: 'asc' | 'desc' }>(loadCountrySort)
   const [filterOptions, setFilterOptions] = useState<{ countries: string[]; skus: string[] } | null>(null)
@@ -129,18 +133,26 @@ export default function SalesAnalytics() {
     isLoading: loading,
     error: analyticsError,
   } = useQuery({
-    queryKey: ['analytics', from, to, groupBy, country, sku],
+    queryKey: ['analytics', from, to, groupBy, country, sku, salesChannel, outcome],
     queryFn: async () => {
       const params = {
         from,
         to,
         country: country.trim() || undefined,
         sku: sku.trim() || undefined,
+        sales_channel: salesChannel || undefined,
+        outcome: outcome === 'refunds' ? ('refunds' as const) : undefined,
       }
       const [summaryRes, bySkuRes, byCountryRes] = await Promise.all([
         stockAPI.getAnalyticsSummary({ ...params, group_by: groupBy }),
         stockAPI.getAnalyticsBySku(params),
-        stockAPI.getAnalyticsByCountry({ from, to, sku: sku.trim() || undefined }),
+        stockAPI.getAnalyticsByCountry({
+          from,
+          to,
+          sku: sku.trim() || undefined,
+          sales_channel: salesChannel || undefined,
+          outcome: outcome === 'refunds' ? 'refunds' : undefined,
+        }),
       ])
       return {
         data: summaryRes.data,
@@ -151,7 +163,7 @@ export default function SalesAnalytics() {
   })
 
   const { data: todayStats } = useQuery({
-    queryKey: ['analytics-today', country, sku],
+    queryKey: ['analytics-today', country, sku, salesChannel, outcome],
     queryFn: async () => {
       const today = todayIso()
       const params = {
@@ -159,10 +171,18 @@ export default function SalesAnalytics() {
         to: today,
         country: country.trim() || undefined,
         sku: sku.trim() || undefined,
+        sales_channel: salesChannel || undefined,
+        outcome: outcome === 'refunds' ? ('refunds' as const) : undefined,
       }
       const [summaryRes, byCountryRes] = await Promise.all([
         stockAPI.getAnalyticsSummary({ ...params, group_by: 'day' }),
-        stockAPI.getAnalyticsByCountry({ from: today, to: today, sku: sku.trim() || undefined }),
+        stockAPI.getAnalyticsByCountry({
+          from: today,
+          to: today,
+          sku: sku.trim() || undefined,
+          sales_channel: salesChannel || undefined,
+          outcome: outcome === 'refunds' ? 'refunds' : undefined,
+        }),
       ])
       return {
         unitsSold: summaryRes.data.totals.units_sold,
@@ -357,14 +377,36 @@ export default function SalesAnalytics() {
 
   return (
     <div className="px-4 py-6 sm:px-0">
-      <h1 className="text-3xl font-bold text-gray-900 mb-4">Sales Analytics</h1>
-      <p className="text-gray-600 mb-6">
-        View units sold by period (default: last 90 days). Filters apply automatically.
-      </p>
+      <h1 className="text-3xl font-bold text-gray-900 mb-6">Sales Analytics</h1>
 
       <div className="bg-white shadow rounded-lg p-4 mb-6">
-        <h2 className="text-lg font-semibold text-gray-800 mb-3">Filters</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <h2 className="text-lg font-semibold text-gray-800">Filters</h2>
+          <label
+            className="inline-flex items-center gap-2 cursor-pointer select-none"
+            title="When on, only orders with total due seller ≤ 0 (refunds / clawbacks). Off = sales and refunds together."
+          >
+            <span className="text-sm text-gray-700">Refunds only</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={outcome === 'refunds'}
+              onClick={() => setOutcome((prev) => (prev === 'refunds' ? 'all' : 'refunds'))}
+              className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 ${
+                outcome === 'refunds'
+                  ? 'border-indigo-600 bg-indigo-600'
+                  : 'border-gray-300 bg-gray-200'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${
+                  outcome === 'refunds' ? 'translate-x-5' : 'translate-x-0.5'
+                } mt-px`}
+              />
+            </button>
+          </label>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Period</label>
             <select
@@ -372,7 +414,7 @@ export default function SalesAnalytics() {
               onChange={(e) => applyPeriodPreset(e.target.value as PeriodPreset)}
               className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
             >
-              <option value="today">Today</option>
+              <option value="yesterday">Yesterday</option>
               <option value="7d">Last 7 days</option>
               <option value="1m">Last month</option>
               <option value="3m">Last 3 months</option>
@@ -415,6 +457,18 @@ export default function SalesAnalytics() {
               <option value="day">Day</option>
               <option value="week">Week</option>
               <option value="month">Month</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Source</label>
+            <select
+              value={salesChannel}
+              onChange={(e) => setSalesChannel(e.target.value as '' | 'ebay' | 'shopify')}
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
+            >
+              <option value="">All</option>
+              <option value="ebay">eBay</option>
+              <option value="shopify">Shopify</option>
             </select>
           </div>
           <div>
@@ -554,9 +608,6 @@ export default function SalesAnalytics() {
 
           <div className="bg-white shadow rounded-lg p-4 overflow-x-auto mb-6">
             <h2 className="text-lg font-semibold text-gray-800 mb-4">Sales by SKU</h2>
-            <p className="text-sm text-gray-500 mb-3">
-              Profit = quantity sold × profit per unit (set in SKU Manager).
-            </p>
             {!bySku || bySku.length === 0 ? (
               <p className="text-gray-500 text-sm">No data for the selected filters.</p>
             ) : (

@@ -330,30 +330,7 @@ export default function StockPlanning() {
 
   return (
     <div className="px-4 py-6 sm:px-0">
-      <h1 className="text-3xl font-bold text-gray-900 mb-4">Stock Planning</h1>
-      <p className="text-gray-600 mb-4">
-        Enter units to order for each SKU. Landed cost is in USD; line totals show GBP (÷ {USD_PER_GBP}{' '}
-        USD/GBP) and USD. Planned units are saved automatically in this browser when you change them.
-      </p>
-      <div className="flex flex-wrap items-center gap-3 mb-6 text-sm text-gray-700">
-        <label className="flex items-center gap-2">
-          <span className="text-gray-600">Profit lookback (Sales Analytics)</span>
-          <select
-            className="rounded border border-gray-300 px-2 py-1"
-            value={analyticsLookbackDays}
-            onChange={(e) => setAnalyticsLookbackDays(Number(e.target.value))}
-          >
-            <option value={30}>Last 30 days</option>
-            <option value={90}>Last 90 days</option>
-            <option value={180}>Last 180 days</option>
-            <option value={365}>Last 365 days</option>
-          </select>
-        </label>
-        <span className="text-gray-500">
-          Est. profit (GBP) = planned units × average profit/unit from that window (same logic as Sales
-          Analytics → by SKU). If a SKU has no sales in the window, we use the manual SKU profit field ×0.8.
-        </span>
-      </div>
+      <h1 className="text-3xl font-bold text-gray-900 mb-6">Stock Order</h1>
 
       {error && (
         <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
@@ -431,9 +408,25 @@ export default function StockPlanning() {
           Clear all
         </button>
       </div>
-      <div className="mb-4 text-sm text-gray-700 flex flex-wrap items-center gap-4">
+      <div className="mb-6 text-sm text-gray-700 flex flex-wrap items-center gap-4">
         <label className="flex items-center gap-2">
-          <span>Items per carton</span>
+          <span className="text-gray-600">Profit lookback (Sales Analytics)</span>
+          <select
+            className="h-9 w-28 appearance-none rounded border border-gray-300 bg-white bg-[length:12px_12px] bg-[right_0.6rem_center] bg-no-repeat pl-2 pr-8 text-sm text-gray-900"
+            style={{
+              backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 24 24' stroke='%236b7280'%3E%3Cpath stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M19 9l-7 7-7-7'/%3E%3C/svg%3E")`,
+            }}
+            value={analyticsLookbackDays}
+            onChange={(e) => setAnalyticsLookbackDays(Number(e.target.value))}
+          >
+            <option value={30}>30 days</option>
+            <option value={90}>90 days</option>
+            <option value={180}>180 days</option>
+            <option value={365}>365 days</option>
+          </select>
+        </label>
+        <label className="flex items-center gap-2">
+          <span>Items per carton for Generate supplier order</span>
           <input
             type="number"
             min={4}
@@ -445,20 +438,10 @@ export default function StockPlanning() {
               setItemsPerCarton(next)
               persistItemsPerCarton(next)
             }}
-            className="w-24 rounded border border-gray-300 px-2 py-1 text-right"
+            className="h-9 w-28 rounded border border-gray-300 bg-white px-2 text-right text-sm text-gray-900"
           />
         </label>
-        <span className="text-gray-500">Export splits each SKU quantity into multiple carton rows.</span>
       </div>
-      <p className="text-xs text-gray-500 mb-6 max-w-3xl">
-        <strong>Generate OC inbound</strong> downloads OrangeConnex SKU import files (template{' '}
-        <code className="text-[11px] bg-gray-100 px-1 rounded">SKUImportTemplateV1_EN.xlsx</code>
-        ): one workbook per SKU letter-prefix group (example: <code className="text-[11px]">bee01</code> &{' '}
-        <code className="text-[11px]">bee02</code> go into the same file; <code className="text-[11px]">dee01</code>{' '}
-        into another). Columns use seller SKU and OC MFSKUID from Inventory status mappings. Groups with no
-        units are skipped. Each SKU quantity is split into carton rows based on the "Items per carton"
-        value above. Multiple groups download as a zip.
-      </p>
 
       {/* Order Message Modal */}
       {showMessageModal && (

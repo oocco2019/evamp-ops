@@ -25,7 +25,7 @@ const COMPANY = {
 
 type Preset = '6m' | '3m' | 'custom'
 
-export default function LenderSummary() {
+export default function LenderSummary({ embedded = false }: { embedded?: boolean } = {}) {
   const defaultRange = completeDaysRange(PERIOD_DAYS['6m'])
   const [from, setFrom] = useState(defaultRange.from)
   const [to, setTo] = useState(defaultRange.to)
@@ -81,7 +81,7 @@ export default function LenderSummary() {
   const disclosureLast = disclosureParas.slice(2).join('\n\n')
 
   return (
-    <div className="px-4 py-6 sm:px-0 lender-summary-print">
+    <div className={`${embedded ? '' : 'px-4 py-6 sm:px-0 '}lender-summary-print`}>
       <style>{`
         @media print {
           @page { size: A4; margin: 20mm; }
@@ -93,7 +93,7 @@ export default function LenderSummary() {
 
       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Lender summary</h1>
+          <h1 className={`font-bold text-gray-900 ${embedded ? 'text-xl' : 'text-3xl'}`}>Lender summary</h1>
           <p className="text-gray-600 mt-1">
             Pre-tax gross profit and volume (Sales Analytics may show after-tax &quot;profit&quot; on margin).
           </p>

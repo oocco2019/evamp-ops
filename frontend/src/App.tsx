@@ -1,20 +1,20 @@
 import { lazy, Suspense } from 'react'
-import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom'
+import { BrowserRouter as Router, Routes, Route, Link, Navigate } from 'react-router-dom'
 import { useBranding } from './hooks/useBranding'
 
 const Settings = lazy(() => import('./pages/Settings'))
 const SalesAnalytics = lazy(() => import('./pages/SalesAnalytics'))
 const StockPlanning = lazy(() => import('./pages/StockPlanning'))
-const SKUManager = lazy(() => import('./pages/SKUManager'))
 const MessageDashboard = lazy(() => import('./pages/MessageDashboard'))
-const VideoManagement = lazy(() => import('./pages/VideoManagement'))
 const InventoryStatus = lazy(() => import('./pages/InventoryStatus'))
-const InventoryMovement = lazy(() => import('./pages/InventoryMovement'))
 const OrderDetails = lazy(() => import('./pages/OrderDetails'))
-const LenderSummary = lazy(() => import('./pages/LenderSummary'))
+const AIInstructions = lazy(() => import('./pages/AIInstructions'))
+
+const NAV_LINK =
+  'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-[1.1375rem] font-medium'
 
 function App() {
-  const { appName, faviconUrl } = useBranding()
+  const { faviconUrl } = useBranding()
 
   return (
     <Router>
@@ -22,70 +22,26 @@ function App() {
         {/* Navigation */}
         <nav className="bg-white shadow-sm">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex justify-between h-16">
-              <div className="flex">
-                <div className="flex-shrink-0 flex items-center">
-                  <Link to="/" className="flex items-center gap-2">
-                    <img src={faviconUrl} alt="" className="h-8 w-8 object-contain rounded" />
-                    <span className="text-xl font-bold text-gray-900">{appName}</span>
-                  </Link>
-                </div>
-                <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
-                  <Link
-                    to="/analytics"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Sales Analytics
-                  </Link>
-                  <Link
-                    to="/lender-summary"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Lender summary
-                  </Link>
-                  <Link
-                    to="/planning"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Stock Planning
-                  </Link>
-                  <Link
-                    to="/skus"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    SKUs
-                  </Link>
-                  <Link
-                    to="/messages"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Messages
-                  </Link>
-                  <Link
-                    to="/inventory-status"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Inventory status
-                  </Link>
-                  <Link
-                    to="/inventory-movement"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Stock & movement
-                  </Link>
-                  <Link
-                    to="/listing-video"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Video ID getter
-                  </Link>
-                  <Link
-                    to="/settings"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Settings
-                  </Link>
-                </div>
+            <div className="flex h-16 items-center gap-6">
+              <Link to="/" className="flex-shrink-0 flex items-center">
+                <img src={faviconUrl} alt="" className="h-8 w-8 object-contain rounded" />
+              </Link>
+              <div className="flex flex-wrap gap-x-8 gap-y-1">
+                <Link to="/analytics" className={NAV_LINK}>
+                  Sales Analytics
+                </Link>
+                <Link to="/messages" className={NAV_LINK}>
+                  Messages
+                </Link>
+                <Link to="/inventory" className={NAV_LINK}>
+                  Inventory
+                </Link>
+                <Link to="/planning" className={NAV_LINK}>
+                  Stock Order
+                </Link>
+                <Link to="/settings" className={NAV_LINK}>
+                  Misc
+                </Link>
               </div>
             </div>
           </div>
@@ -97,14 +53,16 @@ function App() {
             <Routes>
               <Route path="/" element={<Home />} />
               <Route path="/analytics" element={<SalesAnalytics />} />
-              <Route path="/lender-summary" element={<LenderSummary />} />
+              <Route path="/lender-summary" element={<Navigate to="/settings?tab=lender" replace />} />
               <Route path="/order-details" element={<OrderDetails />} />
               <Route path="/planning" element={<StockPlanning />} />
-              <Route path="/skus" element={<SKUManager />} />
-              <Route path="/inventory-status" element={<InventoryStatus />} />
-              <Route path="/inventory-movement" element={<InventoryMovement />} />
+              <Route path="/skus" element={<Navigate to="/settings?tab=skus" replace />} />
+              <Route path="/inventory" element={<InventoryStatus />} />
+              <Route path="/inventory-status" element={<Navigate to="/inventory" replace />} />
+              <Route path="/inventory-movement" element={<Navigate to="/inventory" replace />} />
               <Route path="/messages" element={<MessageDashboard />} />
-              <Route path="/listing-video" element={<VideoManagement />} />
+              <Route path="/ai-instructions" element={<AIInstructions />} />
+              <Route path="/listing-video" element={<Navigate to="/settings?tab=video" replace />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>
           </Suspense>
@@ -126,51 +84,8 @@ function Home() {
   const { appName } = useBranding()
 
   return (
-    <div className="px-4 py-6 sm:px-0">
-      <div className="border-4 border-dashed border-gray-200 rounded-lg p-8">
-        <h2 className="text-2xl font-bold text-gray-900 mb-4">Welcome to {appName}</h2>
-        <p className="text-gray-600 mb-4">
-          Your integrated platform for stock management and customer service.
-        </p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
-          <Link
-            to="/settings"
-            className="block p-6 bg-blue-50 border border-blue-200 rounded-lg hover:bg-blue-100"
-          >
-            <h3 className="text-lg font-semibold text-blue-900 mb-2">Get Started</h3>
-            <p className="text-blue-700">
-              Configure your API credentials and AI settings to begin.
-            </p>
-          </Link>
-          <Link
-            to="/analytics"
-            className="block p-6 bg-green-50 border border-green-200 rounded-lg hover:bg-green-100"
-          >
-            <h3 className="text-lg font-semibold text-green-900 mb-2">Sales Analytics</h3>
-            <p className="text-green-700">
-              View sales data and trends with interactive charts.
-            </p>
-          </Link>
-          <Link
-            to="/skus"
-            className="block p-6 bg-purple-50 border border-purple-200 rounded-lg hover:bg-purple-100"
-          >
-            <h3 className="text-lg font-semibold text-purple-900 mb-2">Manage SKUs</h3>
-            <p className="text-purple-700">
-              Organize your product catalog with costs and profit margins.
-            </p>
-          </Link>
-          <Link
-            to="/messages"
-            className="block p-6 bg-orange-50 border border-orange-200 rounded-lg hover:bg-orange-100"
-          >
-            <h3 className="text-lg font-semibold text-orange-900 mb-2">Customer Service</h3>
-            <p className="text-orange-700">
-              Manage eBay messages with AI-powered drafting.
-            </p>
-          </Link>
-        </div>
-      </div>
+    <div className="px-4 py-24 sm:px-0 flex justify-center">
+      <h1 className="text-3xl font-bold text-gray-900 text-center">{appName}</h1>
     </div>
   )
 }

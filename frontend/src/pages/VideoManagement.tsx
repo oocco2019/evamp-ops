@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { listingVideoAPI, type VideoIdResponse } from '../services/api'
 
-export default function VideoManagement() {
+export default function VideoManagement({ embedded = false }: { embedded?: boolean } = {}) {
   const [input, setInput] = useState('')
   const [result, setResult] = useState<VideoIdResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -26,9 +26,13 @@ export default function VideoManagement() {
     }
   }
 
+  const Heading = embedded ? 'h2' : 'h1'
+
   return (
-    <div className="px-4 py-6 sm:px-0">
-      <h1 className="text-2xl font-bold text-gray-900 mb-2">Video ID getter</h1>
+    <div className={embedded ? '' : 'px-4 py-6 sm:px-0'}>
+      <Heading className={`font-bold text-gray-900 mb-2 ${embedded ? 'text-xl' : 'text-2xl'}`}>
+        Video ID getter
+      </Heading>
       <p className="text-sm text-gray-600 mb-6">
         Paste a listing URL or item number to get the video ID(s) for that listing.
       </p>

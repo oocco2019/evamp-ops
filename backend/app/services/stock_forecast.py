@@ -13,10 +13,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings as app_settings
 from app.models.settings import OCStockMovementLine, OCSkuInventory, OCSkuMapping
 from app.models.stock import LineItem, Order, SKU
+from app.utils.date_ranges import complete_days_range
 
 MIN_AVL_IN_STOCK = 7
-REORDER_LEAD_TIME_DAYS = 90  # supplier delivery ~3 months after order
+# Default when settings unavailable (tests); production uses STOCK_REORDER_* from config.
+REORDER_LEAD_TIME_DAYS = 90
 NOTE_SUFFIX = "Assumes no inbound restock."
+
+
+def effective_reorder_lead_days() -> int:
+    lead = int(getattr(app_settings, "STOCK_REORDER_LEAD_TIME_DAYS", REORDER_LEAD_TIME_DAYS))
+    buf = int(getattr(app_settings, "STOCK_REORDER_BUFFER_DAYS", 0))
+    return max(0, lead) + max(0, buf)
 
 
 def average_burn_rate(daily_sales: List[float]) -> float:
@@ -27,11 +35,12 @@ def average_burn_rate(daily_sales: List[float]) -> float:
 
 
 def forecast_note(window_start: date, window_end: date) -> str:
+    lead = effective_reorder_lead_days()
     return (
         f"Burn rate = average eBay units/day over in-stock days (AVL >= {MIN_AVL_IN_STOCK}) "
         f"from {window_start.isoformat()} to {window_end.isoformat()}. "
         f"Ordered = available + in transit + received (OC snapshot); ordered run-out = ordered ÷ burn rate; "
-        f"reorder = order {REORDER_LEAD_TIME_DAYS} days before run-out (qty ≈ burn × {REORDER_LEAD_TIME_DAYS} days). {NOTE_SUFFIX}"
+        f"reorder = order {lead} days before run-out (qty ≈ burn × {lead} days). {NOTE_SUFFIX}"
     )
 
 
@@ -95,7 +104,7 @@ def _reorder_plan(
     oos_iso: Optional[str],
     burn: float,
     today: date,
-    lead_days: int = REORDER_LEAD_TIME_DAYS,
+    lead_days: Optional[int] = None,
 ) -> Tuple[Optional[int], Optional[str], Optional[float]]:
     """
     JIT reorder: place order lead_days before run-out; qty covers sales over the lead window.
@@ -103,9 +112,10 @@ def _reorder_plan(
     """
     if not oos_iso or burn <= 0:
         return None, None, None
+    lead = effective_reorder_lead_days() if lead_days is None else max(0, int(lead_days))
     oos_d = date.fromisoformat(oos_iso)
-    reorder_d = oos_d - timedelta(days=lead_days)
-    qty = int(math.ceil(burn * lead_days))
+    reorder_d = oos_d - timedelta(days=lead)
+    qty = int(math.ceil(burn * lead)) if lead > 0 else 0
     days_until = float((reorder_d - today).days)
     return qty, reorder_d.isoformat(), days_until
 
@@ -128,6 +138,8 @@ def _forecast_row(
     days_until_reorder: Optional[float] = None,
     total_sales_in_window: Optional[int] = None,
     reorder_cost_gbp: Optional[float] = None,
+    sold_3m_units: int = 0,
+    sold_1m_units: int = 0,
 ) -> dict:
     return {
         "seller_skuid": seller_skuid,
@@ -146,6 +158,8 @@ def _forecast_row(
         "days_until_reorder": days_until_reorder,
         "total_sales_in_window": total_sales_in_window,
         "reorder_cost_gbp": reorder_cost_gbp,
+        "sold_3m_units": sold_3m_units,
+        "sold_1m_units": sold_1m_units,
     }
 
 
@@ -246,6 +260,21 @@ async def _ebay_units_by_order_date(
     return {row[0]: int(row[1] or 0) for row in r.all()}
 
 
+async def _sold_units_1m_3m(
+    db: AsyncSession,
+    line_item_skus: List[str],
+) -> Tuple[int, int]:
+    """Units sold over last 30 / 90 complete days (through yesterday), same windows as inventory sold columns."""
+    if not line_item_skus:
+        return 0, 0
+    from_3m, to_sales = complete_days_range(90)
+    from_1m, _ = complete_days_range(30)
+    sales = await _ebay_units_by_order_date(db, line_item_skus, from_3m, to_sales)
+    sold_3m = int(sum(sales.values()))
+    sold_1m = int(sum(v for d, v in sales.items() if d >= from_1m))
+    return sold_3m, sold_1m
+
+
 def _sku_landed_cost_usd(sku_map: Dict[str, SKU], *codes: Optional[str]) -> Optional[float]:
     for raw in codes:
         code = (raw or "").strip()
@@ -284,6 +313,9 @@ async def _forecast_for_mapping_row(
     )
     ordered_total = current_avl + current_in_transit + current_received
 
+    line_skus = await _line_item_skus_for_mapping(db, connection_id, seller_skuid)
+    sold_3m_units, sold_1m_units = await _sold_units_1m_3m(db, line_skus)
+
     stock_fields = dict(
         seller_skuid=seller_skuid,
         mfskuid=mfskuid,
@@ -292,6 +324,8 @@ async def _forecast_for_mapping_row(
         current_in_transit=current_in_transit,
         current_received=current_received,
         ordered_total=ordered_total,
+        sold_3m_units=sold_3m_units,
+        sold_1m_units=sold_1m_units,
     )
 
     if ordered_total <= 0:
@@ -318,7 +352,6 @@ async def _forecast_for_mapping_row(
         d for d in _daterange(window_start, window_end) if daily.get(d, 0) >= MIN_AVL_IN_STOCK
     ]
 
-    line_skus = await _line_item_skus_for_mapping(db, connection_id, seller_skuid)
     sales_by_date = await _ebay_units_by_order_date(db, line_skus, window_start, window_end)
     total_sales_in_window = int(sum(sales_by_date.values()))
     daily_sales = [float(sales_by_date.get(d, 0)) for d in in_stock_days]

@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { PieChart, Pie, Cell, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import {
   inventoryStatusAPI,
   stockAPI,
   type OCInboundOrderRow,
-  type OCSkuInventoryRow,
   type OCSkuMapping,
 } from '../services/api'
+import { StockMovementPanel } from './InventoryMovement'
+import { completeDaysRange } from '../utils/datePeriodPresets'
 
 function inboundGetCi(obj: Record<string, unknown>, ...names: string[]): unknown {
   const lower = Object.fromEntries(Object.entries(obj).map(([k, v]) => [k.toLowerCase(), v]))
@@ -120,7 +120,7 @@ function pickWalkedValue(entries: InboundWalkEntry[], test: (keyLower: string) =
   return undefined
 }
 
-function discoverCreateFromWalk(entries: InboundWalkEntry): unknown {
+function discoverCreateFromWalk(entries: InboundWalkEntry[]): unknown {
   const tries = [
     (k: string) =>
       k === 'createtime' ||
@@ -138,23 +138,7 @@ function discoverCreateFromWalk(entries: InboundWalkEntry): unknown {
   return undefined
 }
 
-function discoverPutawayFromWalk(entries: InboundWalkEntry): unknown {
-  const tries = [
-    (k: string) =>
-      k === 'putawaytime' ||
-      k === 'put_away_time' ||
-      k === 'completeputawaytime' ||
-      (k.includes('putaway') && k.includes('time')),
-    (k: string) => k.includes('putaway') && !k.includes('qty') && !k.includes('quantity'),
-  ]
-  for (const t of tries) {
-    const v = pickWalkedValue(entries, t)
-    if (v !== undefined) return v
-  }
-  return undefined
-}
-
-function discoverArrivedFromWalk(entries: InboundWalkEntry): unknown {
+function discoverArrivedFromWalk(entries: InboundWalkEntry[]): unknown {
   const tries = [
     (k: string) =>
       (k.includes('arrival') || k.includes('arrived') || k.includes('actualarrival')) &&
@@ -197,25 +181,6 @@ function formatInboundCreateTime(raw: OCInboundOrderRow['raw'], inboundAtIso: st
   }
   if ((v === undefined || v === null || v === '') && inboundAtIso) {
     v = inboundAtIso
-  }
-  return formatOcTimestamp(v)
-}
-
-function formatInboundPutawayTime(raw: OCInboundOrderRow['raw']): string {
-  if (!raw || typeof raw !== 'object') return '—'
-  const o = raw as Record<string, unknown>
-  let v: unknown = inboundGetCi(
-    o,
-    'putAwayTime',
-    'putawayTime',
-    'putawaytime',
-    'putAwayDateTime',
-    'completePutawayTime',
-    'putawayDate',
-    'completePutawayDateTime',
-  )
-  if (v === undefined || v === null || v === '') {
-    v = discoverPutawayFromWalk(walkInboundRaw(raw))
   }
   return formatOcTimestamp(v)
 }
@@ -708,30 +673,12 @@ type InboundSortKey = 'sku_list' | 'create_time' | 'eta' | 'arrived'
 const INBOUND_SORT_STORAGE_KEY = 'evampops.inventoryStatus.inboundSort'
 const INBOUND_SKU5_FILTER_STORAGE_KEY = 'evampops.inventoryStatus.inboundSkuCountMin5'
 const SKU_FILTER_STORAGE_KEY = 'evampops.inventoryStatus.skuFilter'
-const INVENTORY_SORT_STORAGE_KEY = 'evampops.inventoryStatus.inventorySort'
 const STATUS_EXCLUDED_LOCAL_KEY = 'evampops.inventoryStatus.inboundStatusExcluded'
-
-type InventorySortKey =
-  | 'seller_skuid'
-  | 'available'
-  | 'in_transit'
-  | 'reserved_allocated'
-  | 'sold_3m_units'
-  | 'sold_1m_units'
-
-const INVENTORY_SORT_KEYS: readonly InventorySortKey[] = [
-  'seller_skuid',
-  'available',
-  'in_transit',
-  'reserved_allocated',
-  'sold_3m_units',
-  'sold_1m_units',
-]
 
 function loadSkuFilter(): string {
   try {
     const v = localStorage.getItem(SKU_FILTER_STORAGE_KEY)
-    return typeof v === 'string' ? v : ''
+    return v ?? ''
   } catch {
     return ''
   }
@@ -741,35 +688,6 @@ function persistSkuFilter(value: string) {
   try {
     if (value.trim() === '') localStorage.removeItem(SKU_FILTER_STORAGE_KEY)
     else localStorage.setItem(SKU_FILTER_STORAGE_KEY, value)
-  } catch {
-    // ignore
-  }
-}
-
-function loadInventorySort(): { key: InventorySortKey; dir: 'asc' | 'desc' } {
-  try {
-    const raw = localStorage.getItem(INVENTORY_SORT_STORAGE_KEY)
-    if (raw) {
-      const parsed = JSON.parse(raw) as { key?: string; dir?: string }
-      const key = parsed?.key
-      const dir = parsed?.dir
-      if (
-        typeof key === 'string' &&
-        INVENTORY_SORT_KEYS.includes(key as InventorySortKey) &&
-        (dir === 'asc' || dir === 'desc')
-      ) {
-        return { key: key as InventorySortKey, dir }
-      }
-    }
-  } catch {
-    // ignore
-  }
-  return { key: 'seller_skuid', dir: 'asc' }
-}
-
-function persistInventorySort(next: { key: InventorySortKey; dir: 'asc' | 'desc' }) {
-  try {
-    localStorage.setItem(INVENTORY_SORT_STORAGE_KEY, JSON.stringify(next))
   } catch {
     // ignore
   }
@@ -825,19 +743,6 @@ function loadSku5Filter(): boolean {
   }
 }
 
-const INBOUND_STATUS_CHART_COLORS = [
-  '#2563eb',
-  '#16a34a',
-  '#ca8a04',
-  '#dc2626',
-  '#9333ea',
-  '#0891b2',
-  '#ea580c',
-  '#64748b',
-  '#4f46e5',
-  '#db2777',
-]
-
 export default function InventoryStatus() {
   const qc = useQueryClient()
   const [skuFilter, setSkuFilter] = useState(() => loadSkuFilter())
@@ -865,9 +770,6 @@ export default function InventoryStatus() {
   const statusFilterButtonRef = useRef<HTMLButtonElement>(null)
   const statusFilterPanelRef = useRef<HTMLDivElement>(null)
   const [statusFilterPos, setStatusFilterPos] = useState({ top: 0, left: 0 })
-  const [inventorySort, setInventorySort] = useState<{ key: InventorySortKey; dir: 'asc' | 'desc' }>(
-    loadInventorySort
-  )
   const summaryQuery = useQuery({
     queryKey: ['inventory-status', 'summary'],
     queryFn: async () => (await inventoryStatusAPI.getSummary()).data,
@@ -876,14 +778,6 @@ export default function InventoryStatus() {
   const mappingsQuery = useQuery({
     queryKey: ['inventory-status', 'mappings', skuFilter],
     queryFn: async () => (await inventoryStatusAPI.listSkuMappings(skuFilter.trim() || undefined)).data,
-  })
-  const inventoryQuery = useQuery({
-    queryKey: ['inventory-status', 'inventory'],
-    queryFn: async () => (await inventoryStatusAPI.listInventory()).data,
-  })
-  const inboundStatusSummaryQuery = useQuery({
-    queryKey: ['inventory-status', 'inbound-status-summary'],
-    queryFn: async () => (await inventoryStatusAPI.getInboundOrderStatusSummary()).data,
   })
   const inboundOrdersQuery = useQuery({
     queryKey: ['inventory-status', 'inbound-orders', 6, 'full'],
@@ -981,15 +875,17 @@ export default function InventoryStatus() {
   })
 
   /**
-   * Same steps as server-scheduled refresh: eBay import, OC SKU + inventory snapshot, OC stock movement (incremental),
-   * inbound cache. Movement is best-effort so a OC range/API error does not fail the whole pull.
+   * eBay import, OC SKU + inventory snapshot, OC stock movement (~last year / OC 12-month clamp),
+   * inbound cache. Movement is best-effort so an OC range/API error does not fail the whole pull.
    */
   const executeInventoryPull = useCallback(async () => {
     await stockAPI.runImport('incremental')
     await inventoryStatusAPI.syncSkuMappings()
     let movementSummary = ''
     try {
-      const mvRes = await inventoryStatusAPI.syncStockMovementFromOc({ incremental: true })
+      // Fill ~last year (OC clamps to ~12 months) so charts/forecast match default Filters period.
+      const year = completeDaysRange(365)
+      const mvRes = await inventoryStatusAPI.syncStockMovementFromOc({ from: year.from, to: year.to })
       const mv = mvRes.data
       const clampNote = mv.clamped ? ' (range clamped to OC last-12-months limit).' : ''
       movementSummary = ` OrangeConnex stock movement: inserted ${mv.inserted} new line(s) (${mv.from_date} → ${mv.to_date}).${clampNote}`
@@ -1009,6 +905,8 @@ export default function InventoryStatus() {
       qc.invalidateQueries({ queryKey: ['analytics'] })
       qc.invalidateQueries({ queryKey: ['stock-movement'] })
       qc.invalidateQueries({ queryKey: ['inventory-history'] })
+      qc.invalidateQueries({ queryKey: ['stock-forecast'] })
+      qc.invalidateQueries({ queryKey: ['stock-burn-trend'] })
     },
     onSuccess: (movementSummary: string) => {
       if (suppressPullNoticeRef.current) {
@@ -1045,25 +943,8 @@ export default function InventoryStatus() {
     setStatusFilterOpen(false)
   }, [saveInboundStatusFilterMutation])
 
-  const syncInboundMutation = useMutation({
-    mutationFn: (full: boolean) => inventoryStatusAPI.syncInboundOrders(full),
-    onSuccess: (res) => {
-      const data = res.data
-      setError(null)
-      setNotice(
-        `Inbound cache updated: ${data.synced} order(s) from OC (${data.full ? 'full backfill' : 'incremental'}).`
-      )
-      qc.invalidateQueries({ queryKey: ['inventory-status', 'inbound-status-summary'] })
-      qc.invalidateQueries({ queryKey: ['inventory-status', 'inbound-orders'] })
-    },
-    onError: (e: unknown) => {
-      setError(e instanceof Error ? e.message : 'Inbound sync failed')
-    },
-  })
-
   const summary = summaryQuery.data
   const mappings: OCSkuMapping[] = mappingsQuery.data ?? []
-  const inventoryRows: OCSkuInventoryRow[] = inventoryQuery.data ?? []
   const inboundOrders: OCInboundOrderRow[] = inboundOrdersQuery.data ?? []
   const inboundOrdersActive = useMemo(
     () => inboundOrders.filter((row) => !isInboundCanceled(row)),
@@ -1203,17 +1084,15 @@ export default function InventoryStatus() {
 
   const handleInboundSort = (sortKey: InboundSortKey) => {
     setInboundSort((prev) => {
-      const next = {
-        key: sortKey,
-        dir:
-          prev.key === sortKey
-            ? prev.dir === 'asc'
-              ? 'desc'
-              : 'asc'
-            : sortKey === 'sku_list'
-              ? 'asc'
-              : 'desc',
-      }
+      const dir: 'asc' | 'desc' =
+        prev.key === sortKey
+          ? prev.dir === 'asc'
+            ? 'desc'
+            : 'asc'
+          : sortKey === 'sku_list'
+            ? 'asc'
+            : 'desc'
+      const next = { key: sortKey, dir }
       try {
         localStorage.setItem(INBOUND_SORT_STORAGE_KEY, JSON.stringify(next))
       } catch {
@@ -1307,24 +1186,6 @@ export default function InventoryStatus() {
   }, [inboundNeedsHorizontalScroll, inboundScrollContentWidth])
 
   const hasRequiredCredentials = summary?.has_required_credentials ?? false
-  const sortedInventoryRows = [...inventoryRows].sort((a, b) => {
-    const mult = inventorySort.dir === 'asc' ? 1 : -1
-    if (inventorySort.key === 'seller_skuid') {
-      return mult * (a.seller_skuid || '').localeCompare(b.seller_skuid || '')
-    }
-    return mult * ((a[inventorySort.key] as number) - (b[inventorySort.key] as number))
-  })
-  const handleInventorySort = (key: InventorySortKey) => {
-    setInventorySort((prev) => {
-      const next: { key: InventorySortKey; dir: 'asc' | 'desc' } = {
-        key,
-        dir:
-          prev.key === key ? (prev.dir === 'asc' ? 'desc' : 'asc') : key === 'seller_skuid' ? 'asc' : 'desc',
-      }
-      persistInventorySort(next)
-      return next
-    })
-  }
 
   const setInboundEtaOverride = (rowKey: string, ymd: string | null, computedDefaultYmd: string) => {
     setEtaOverrides((prev) => {
@@ -1398,11 +1259,7 @@ export default function InventoryStatus() {
 
   return (
     <div className="px-4 py-6 sm:px-0">
-      <h1 className="text-3xl font-bold text-gray-900 mb-2">Inventory status</h1>
-      <p className="text-sm text-gray-600 mb-6">
-        Read-only OrangeConnex visibility inside the platform.
-      </p>
-
+      <h1 className="text-3xl font-bold text-gray-900 mb-6">Inventory</h1>
       {notice && <div className="mb-4 rounded border border-green-200 bg-green-50 p-3 text-sm text-green-800">{notice}</div>}
       {error && <div className="mb-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</div>}
       {summaryQuery.isError && (
@@ -1412,7 +1269,7 @@ export default function InventoryStatus() {
       )}
       {!hasRequiredCredentials && (
         <div className="mb-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-          Missing OC credentials (client_id, client_secret, refresh_token) in Settings &gt; OC Integration.
+          Missing OC credentials (client_id, client_secret, refresh_token) in Misc &gt; OC Integration.
         </div>
       )}
 
@@ -1420,252 +1277,19 @@ export default function InventoryStatus() {
         <button
           type="button"
           onClick={() => pullLatestDataMutation.mutate()}
-          className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-50 text-sm font-medium"
+          className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 text-sm font-medium"
           disabled={pullLatestDataMutation.isPending}
           title="Incremental eBay import, OrangeConnex SKU mappings + inventory snapshot, OC stock movement, and inbound cache (same as the scheduled background refresh)"
         >
           {pullLatestDataMutation.isPending ? 'Pulling latest data…' : 'Pull latest data'}
         </button>
-        <p className="text-sm text-gray-600 max-w-2xl">
-          Refreshes eBay orders, OC inventory, <strong>OC stock movement</strong> (into the database for Stock &amp;
-          movement), and inbound cache. The backend runs the same incremental pull on a schedule (default every{' '}
-          <span className="font-mono">15</span> minutes; configurable via{' '}
-          <span className="font-mono">INVENTORY_REFRESH_INTERVAL_MINUTES</span>, <span className="font-mono">0</span> to
-          disable). Sold columns use the same date windows as Sales Analytics (30 / 90 inclusive days).
-        </p>
       </div>
 
-      <section className="bg-white rounded-lg border border-gray-200 p-4">
-        <div className="flex flex-wrap items-end gap-2 mb-3">
-          <h2 className="text-lg font-semibold text-gray-800 mr-4">SKU mappings</h2>
-          <label className="text-sm text-gray-700">
-            SKU filter
-            <input
-              className="ml-2 rounded border border-gray-300 px-2 py-1"
-              value={skuFilter}
-              onChange={(e) => {
-                const v = e.target.value
-                setSkuFilter(v)
-                persistSkuFilter(v)
-              }}
-              placeholder="e.g. uke01"
-            />
-          </label>
-          <span className="text-sm text-gray-500">Rows: {summary?.mapping_count ?? 0}</span>
-        </div>
-        {mappingsQuery.isLoading ? (
-          <p className="text-sm text-gray-500">Loading mappings...</p>
-        ) : mappings.length === 0 ? (
-          <p className="text-sm text-gray-500">No mappings yet. Use <strong>Pull latest data</strong> above.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm border border-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-3 py-2 text-left">SKU</th>
-                  <th className="px-3 py-2 text-left">Seller SKU</th>
-                  <th className="px-3 py-2 text-left">Reference SKU</th>
-                  <th className="px-3 py-2 text-left">MFSKUID</th>
-                  <th className="px-3 py-2 text-left">Region</th>
-                  <th className="px-3 py-2 text-left">Synced</th>
-                </tr>
-              </thead>
-              <tbody>
-                {mappings.map((row) => (
-                  <tr key={row.id} className="border-t border-gray-100">
-                    <td className="px-3 py-2">{row.sku_code}</td>
-                    <td className="px-3 py-2">{row.seller_skuid}</td>
-                    <td className="px-3 py-2">{row.reference_skuid}</td>
-                    <td className="px-3 py-2 font-mono">{row.mfskuid}</td>
-                    <td className="px-3 py-2">{row.service_region || '—'}</td>
-                    <td className="px-3 py-2">{new Date(row.last_synced_at).toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      <section className="bg-white rounded-lg border border-gray-200 p-4 mt-6">
-        <h2 className="text-lg font-semibold text-gray-800 mb-3">OC inventory snapshot</h2>
-        {inventoryQuery.isLoading ? (
-          <p className="text-sm text-gray-500">Loading inventory...</p>
-        ) : inventoryRows.length === 0 ? (
-          <p className="text-sm text-gray-500">No inventory rows yet. Use <strong>Pull latest data</strong> above.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm border border-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th
-                    className="px-3 py-2 text-left cursor-pointer hover:text-gray-900"
-                    onClick={() => handleInventorySort('seller_skuid')}
-                  >
-                    Seller SKU {inventorySort.key === 'seller_skuid' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
-                  </th>
-                  <th
-                    className="px-3 py-2 text-right cursor-pointer hover:text-gray-900"
-                    onClick={() => handleInventorySort('available')}
-                  >
-                    Available {inventorySort.key === 'available' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
-                  </th>
-                  <th
-                    className="px-3 py-2 text-right cursor-pointer hover:text-gray-900"
-                    onClick={() => handleInventorySort('in_transit')}
-                  >
-                    In transit {inventorySort.key === 'in_transit' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
-                  </th>
-                  <th
-                    className="px-3 py-2 text-right cursor-pointer hover:text-gray-900"
-                    onClick={() => handleInventorySort('reserved_allocated')}
-                  >
-                    Reserved alloc {inventorySort.key === 'reserved_allocated' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
-                  </th>
-                  <th
-                    className="px-3 py-2 text-right cursor-pointer hover:text-gray-900"
-                    onClick={() => handleInventorySort('sold_3m_units')}
-                  >
-                    Sold last 3 months {inventorySort.key === 'sold_3m_units' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
-                  </th>
-                  <th
-                    className="px-3 py-2 text-right cursor-pointer hover:text-gray-900"
-                    onClick={() => handleInventorySort('sold_1m_units')}
-                  >
-                    Sold last 1 month {inventorySort.key === 'sold_1m_units' && (inventorySort.dir === 'asc' ? '▲' : '▼')}
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedInventoryRows.map((row) => (
-                  <tr key={row.seller_skuid || `inv-${row.id}`} className="border-t border-gray-100">
-                    <td className="px-3 py-2 font-mono">{row.seller_skuid || '—'}</td>
-                    <td className="px-3 py-2 text-right">{row.available}</td>
-                    <td className="px-3 py-2 text-right">{row.in_transit}</td>
-                    <td className="px-3 py-2 text-right">{row.reserved_allocated}</td>
-                    <td className="px-3 py-2 text-right">{row.sold_3m_units}</td>
-                    <td className="px-3 py-2 text-right">{row.sold_1m_units}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      <section className="bg-white rounded-lg border border-gray-200 p-4 mt-6">
-        <div className="flex flex-wrap items-center gap-2 mb-2">
-          <h2 className="text-lg font-semibold text-gray-800">Inbound orders by status</h2>
-          <button
-            type="button"
-            onClick={() => syncInboundMutation.mutate(false)}
-            disabled={syncInboundMutation.isPending}
-            className="text-sm px-2 py-1 rounded border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-            title="Incremental sync from OrangeConnex into the database (fast after first full load)"
-          >
-            {syncInboundMutation.isPending ? 'Syncing from OC…' : 'Sync from OC'}
-          </button>
-          <button
-            type="button"
-            onClick={() => syncInboundMutation.mutate(true)}
-            disabled={syncInboundMutation.isPending}
-            className="text-sm px-2 py-1 rounded border border-amber-300 text-amber-900 hover:bg-amber-50 disabled:opacity-50"
-            title="Full backfill from 2024-01-01 (many API calls; check server logs)"
-          >
-            Full backfill (2024+)
-          </button>
-        </div>
-        <p className="text-sm text-gray-600 mb-3">
-          Chart and table read from the <strong>local cache</strong>. Use <strong>Sync from OC</strong> to pull updates
-          (incremental after the first run). <strong>Full backfill</strong> re-fetches from 2024-01-01 UTC (slow; server
-          logs each 7-day chunk). All OC warehouse locations are included when the API returns them.
-        </p>
-        {inboundStatusSummaryQuery.data?.last_sync_at && (
-          <p className="text-xs text-gray-500 mb-6 font-mono">
-            Cache last updated: {new Date(inboundStatusSummaryQuery.data.last_sync_at).toLocaleString()}
-          </p>
-        )}
-        {inboundStatusSummaryQuery.isLoading ? (
-          <p className="text-sm text-gray-500">Loading cached status distribution…</p>
-        ) : inboundStatusSummaryQuery.isError ? (
-          <p className="text-sm text-red-700">
-            {inboundStatusSummaryQuery.error instanceof Error
-              ? inboundStatusSummaryQuery.error.message
-              : 'Failed to load status summary'}
-          </p>
-        ) : !inboundStatusSummaryQuery.data?.slices.length ? (
-          <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded p-3">
-            No cached inbound orders yet. Click <strong>Sync from OC</strong> (or <strong>Full backfill</strong> for
-            complete history from 2024). Watch the backend log for chunk progress.
-          </div>
-        ) : (
-          <div className="flex flex-col lg:flex-row lg:items-start gap-6 mt-2">
-            <div className="h-80 w-full max-w-md mx-auto lg:mx-0 pt-2">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart margin={{ top: 28, right: 8, bottom: 8, left: 8 }}>
-                  <Pie
-                    data={inboundStatusSummaryQuery.data.slices.map((s) => ({
-                      name: s.status,
-                      value: s.count,
-                    }))}
-                    dataKey="value"
-                    nameKey="name"
-                    cx="50%"
-                    cy="50%"
-                    outerRadius={100}
-                    label={({ name, value }) => `${name}: ${value}`}
-                  >
-                    {inboundStatusSummaryQuery.data.slices.map((_, index) => (
-                      <Cell
-                        key={`cell-${index}`}
-                        fill={INBOUND_STATUS_CHART_COLORS[index % INBOUND_STATUS_CHART_COLORS.length]}
-                      />
-                    ))}
-                  </Pie>
-                  <Tooltip formatter={(value: number) => [value, 'Orders']} />
-                  <Legend />
-                </PieChart>
-              </ResponsiveContainer>
-            </div>
-            <div className="text-sm text-gray-600 space-y-1">
-              <p>
-                <span className="text-gray-500">Total orders in range:</span>{' '}
-                <span className="font-semibold text-gray-900">{inboundStatusSummaryQuery.data.total_orders}</span>
-              </p>
-              <p>
-                <span className="text-gray-500">Range:</span>{' '}
-                <span className="font-mono">
-                  {inboundStatusSummaryQuery.data.from_date} → {inboundStatusSummaryQuery.data.to_date}
-                </span>
-              </p>
-            </div>
-          </div>
-        )}
-      </section>
-
-      <section className="bg-white rounded-lg border border-gray-200 p-4 mt-6 max-w-full min-w-0 overflow-x-hidden">
+      <StockMovementPanel
+        afterForecast={
+          <>
+      <section className="bg-white rounded-lg border border-gray-200 p-4 max-w-full min-w-0 overflow-x-hidden mt-6 mb-6">
         <h2 className="text-lg font-semibold text-gray-800 mb-3">Inbound orders</h2>
-        <p className="text-sm text-gray-600 mb-3">
-          Evamp-ops workflows always involve these OC marketplaces together: `UK`, `DE`, `US`, `AU`. Rows come from the
-          same cache as above (last ~6 months by date). Create / putaway / arrived are parsed from that cache on the
-          server. The <span className="font-mono text-xs">CREATE TIME</span> column is the first-seen sync timestamp
-          in EvampOps; you can edit it (same date input style as ETA), and edited values stay local (not overwritten
-          by later syncs). <strong>Tracking #</strong> comes from OC <span className="font-mono text-xs">trackingList</span>
-          when available; click <strong>—</strong> to add your own (saved on the server, not overwritten by OC sync).
-          <strong> ETA</strong> (after SKU list) defaults to <strong>effective</strong> create date (first-seen or your
-          edited CREATE TIME, when shown) + 3 months; edit ETA to override—overrides are saved in this browser (green
-          background). When you have not overridden ETA, it recalculates if create or server dates change.{' '}
-          <strong>Courier</strong> uses OC carrier links when available; click <strong>—</strong> to add a custom
-          tracking URL (saved on the server, not overwritten by OC sync)—shown as <strong>Custom</strong>. Otherwise
-          links open <span className="font-mono text-xs">parcelsapp.com</span> with the tracking number (country hint
-          from region / warehouse when available). <strong>Order time (d)</strong> is whole days
-          from effective create to <strong>arrived</strong> when the API includes an arrival time; otherwise &mdash;.{' '}
-          <strong>ETA Δ (d)</strong> is whole days from effective ETA to arrived (arrived &minus; ETA: negative if
-          arrived sooner, positive if later). Run{' '}
-          <strong>Sync from OC</strong> to refresh data; if times stay empty, the API may not include those fields for
-          your tenant. Click column headers to sort (▲/▼). Click <strong>SKU count</strong> to keep only orders with SKU count ≥ 5 (header
-          uses the same mint highlight as an edited ETA).
-        </p>
         {skuCountFilterMin5 ? (
           <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1 mb-2 inline-block">
             SKU count ≥5 filter is active. Rows with SKU count below 5 are hidden, even if their Status is selected.
@@ -1865,7 +1489,6 @@ export default function InventoryStatus() {
                 ) : null}
                 {inboundRowsForTable.map(({ row, rowKey }) => {
                   const createDisplay = row.create_time ?? formatInboundCreateTime(row.raw, row.inbound_at)
-                  const putawayDisplay = row.putaway_time ?? formatInboundPutawayTime(row.raw)
                   const arrivedDisplay = row.arrived_time ?? formatInboundArrivedTime(row.raw)
                   const defaultCreateYmd = defaultCreateYmdFromDisplay(createDisplay)
                   const createTimeOverride = createTimeOverrides[rowKey]
@@ -2003,6 +1626,62 @@ export default function InventoryStatus() {
           </>
         )}
       </section>
+          </>
+        }
+      />
+
+      <section className="bg-white rounded-lg border border-gray-200 p-4 mt-6">
+        <div className="flex flex-wrap items-end gap-2 mb-3">
+          <h2 className="text-lg font-semibold text-gray-800 mr-4">SKU mappings</h2>
+          <label className="text-sm text-gray-700">
+            SKU filter
+            <input
+              className="ml-2 rounded border border-gray-300 px-2 py-1"
+              value={skuFilter}
+              onChange={(e) => {
+                const v = e.target.value
+                setSkuFilter(v)
+                persistSkuFilter(v)
+              }}
+              placeholder="e.g. uke01"
+            />
+          </label>
+          <span className="text-sm text-gray-500">Rows: {summary?.mapping_count ?? 0}</span>
+        </div>
+        {mappingsQuery.isLoading ? (
+          <p className="text-sm text-gray-500">Loading mappings...</p>
+        ) : mappings.length === 0 ? (
+          <p className="text-sm text-gray-500">No mappings yet. Use <strong>Pull latest data</strong> above.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full text-sm border border-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-3 py-2 text-left">SKU</th>
+                  <th className="px-3 py-2 text-left">Seller SKU</th>
+                  <th className="px-3 py-2 text-left">Reference SKU</th>
+                  <th className="px-3 py-2 text-left">MFSKUID</th>
+                  <th className="px-3 py-2 text-left">Region</th>
+                  <th className="px-3 py-2 text-left">Synced</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mappings.map((row) => (
+                  <tr key={row.id} className="border-t border-gray-100">
+                    <td className="px-3 py-2">{row.sku_code}</td>
+                    <td className="px-3 py-2">{row.seller_skuid}</td>
+                    <td className="px-3 py-2">{row.reference_skuid}</td>
+                    <td className="px-3 py-2 font-mono">{row.mfskuid}</td>
+                    <td className="px-3 py-2">{row.service_region || '—'}</td>
+                    <td className="px-3 py-2">{new Date(row.last_synced_at).toLocaleString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
     </div>
   )
 }

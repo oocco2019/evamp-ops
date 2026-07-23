@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { stockAPI, type SKU } from '../services/api'
 
-export default function SKUManager() {
+export default function SKUManager({ embedded = false }: { embedded?: boolean } = {}) {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
   const [adding, setAdding] = useState(false)
@@ -13,7 +13,7 @@ export default function SKUManager() {
     postage_price: '',
   })
   const [editingCode, setEditingCode] = useState<string | null>(null)
-  const [editForm, setEditForm] = useState<Pick<SKU, 'title' | 'landed_cost' | 'postage_price'>>({})
+  const [editForm, setEditForm] = useState<Partial<Pick<SKU, 'title' | 'landed_cost' | 'postage_price'>>>({})
 
   const { data: skus, isLoading } = useQuery({
     queryKey: ['skus', search],
@@ -82,14 +82,13 @@ export default function SKUManager() {
   }
 
   return (
-    <div className="px-4 py-6 sm:px-0">
+    <div className={embedded ? '' : 'px-4 py-6 sm:px-0'}>
       <div className="bg-white shadow rounded-lg p-6">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
           <div>
-            <h1 className="text-3xl font-bold text-gray-900">SKU Manager</h1>
-            <p className="mt-2 text-gray-600">
-              Manage your product catalog with costs and profit calculations.
-            </p>
+            <h1 className={`font-bold text-gray-900 ${embedded ? 'text-xl' : 'text-3xl'}`}>
+              {embedded ? 'SKUs' : 'SKU Manager'}
+            </h1>
           </div>
           <div className="flex gap-2">
             <input

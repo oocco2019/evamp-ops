@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import { messagesAPI, settingsAPI, type ThreadSummary, type ThreadDetail, type MessageResp, type MessageMediaItem, type EmailTemplate } from '../services/api'
 import { getInstructionsDisplayValue } from '../utils/voiceInstructionsDisplay'
 
@@ -404,9 +405,9 @@ export default function MessageDashboard() {
       // Provide helpful guidance for common AI configuration issues
       let errorMsg = detail || baseMsg
       if (detail.includes('No default AI model')) {
-        errorMsg = 'AI not configured: Go to Settings > AI Models, add a model (e.g., Anthropic Claude), and set it as default.'
+        errorMsg = 'AI not configured: Go to Misc > AI Models, add a model (e.g., Anthropic Claude), and set it as default.'
       } else if (detail.includes('No API key found')) {
-        errorMsg = 'AI API key missing: Go to Settings > API Credentials and add your API key for the selected AI provider.'
+        errorMsg = 'AI API key missing: Go to Misc > API and add your API key for the selected AI provider.'
       } else if (status === 500 && detail.includes('internal error')) {
         errorMsg = 'AI service error. Check that your API key is valid and has available credits.'
       }
@@ -705,10 +706,15 @@ export default function MessageDashboard() {
 
   return (
     <div className="px-4 py-6 sm:px-0">
-      <h1 className="text-3xl font-bold text-gray-900 mb-4">Customer Service</h1>
-      <p className="text-gray-600 mb-6">
-        Manage eBay messages with AI-powered drafting. Sending is disabled until you enable it.
-      </p>
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-3xl font-bold text-gray-900">Customer Service</h1>
+        <Link
+          to="/ai-instructions"
+          className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+        >
+          AI Instructions
+        </Link>
+      </div>
 
       {error && (
         <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
@@ -742,11 +748,6 @@ export default function MessageDashboard() {
               </>
             )}
           </li>
-          {threads.length > 0 && (
-            <li className="text-gray-500 text-sm">
-              Thread list is from your database; sync fetches new messages from eBay.
-            </li>
-          )}
         </ul>
       </div>
 

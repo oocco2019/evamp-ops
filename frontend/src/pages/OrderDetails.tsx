@@ -47,6 +47,8 @@ export default function OrderDetails() {
   const [periodPreset, setPeriodPreset] = useState<PeriodPreset>('3m')
   const [country, setCountry] = useState('')
   const [sku, setSku] = useState('')
+  /** '' = all channels */
+  const [salesChannel, setSalesChannel] = useState<'' | 'ebay' | 'shopify'>('')
   const [filterOptions, setFilterOptions] = useState<{ countries: string[]; skus: string[] } | null>(null)
 
   useEffect(() => {
@@ -70,13 +72,14 @@ export default function OrderDetails() {
     error,
     refetch,
   } = useQuery({
-    queryKey: ['order-details', from, to, country, sku],
+    queryKey: ['order-details', from, to, country, sku, salesChannel],
     queryFn: async () => {
       const res = await stockAPI.getOrderDetails({
         from,
         to,
         ...(country ? { country } : {}),
         ...(sku ? { sku } : {}),
+        ...(salesChannel ? { sales_channel: salesChannel } : {}),
       })
       return res.data
     },
@@ -108,7 +111,7 @@ export default function OrderDetails() {
 
       <div className="bg-white shadow rounded-lg p-4 mb-6">
         <h2 className="text-lg font-semibold text-gray-800 mb-3">Filters</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Period</label>
             <select
@@ -116,7 +119,7 @@ export default function OrderDetails() {
               onChange={(e) => applyPeriodPreset(e.target.value as PeriodPreset)}
               className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
             >
-              <option value="today">Today</option>
+              <option value="yesterday">Yesterday</option>
               <option value="7d">Last 7 days</option>
               <option value="1m">Last month</option>
               <option value="3m">Last 3 months</option>
@@ -148,6 +151,18 @@ export default function OrderDetails() {
               }}
               className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
             />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Source</label>
+            <select
+              value={salesChannel}
+              onChange={(e) => setSalesChannel(e.target.value as '' | 'ebay' | 'shopify')}
+              className="w-full rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
+            >
+              <option value="">All</option>
+              <option value="ebay">eBay</option>
+              <option value="shopify">Shopify</option>
+            </select>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Country</label>
@@ -236,6 +251,7 @@ export default function OrderDetails() {
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="px-2 py-2 text-left font-medium text-gray-600 whitespace-nowrap">Date</th>
+                    <th className="px-2 py-2 text-left font-medium text-gray-600 whitespace-nowrap">Source</th>
                     <th className="px-2 py-2 text-left font-medium text-gray-600 whitespace-nowrap">Order</th>
                     <th className="px-2 py-2 text-left font-medium text-gray-600">CC</th>
                     <th className="px-2 py-2 text-left font-medium text-gray-600">SKU</th>
@@ -285,14 +301,17 @@ export default function OrderDetails() {
                 <tbody className="divide-y divide-gray-100 bg-white">
                   {data.rows.length === 0 ? (
                     <tr>
-                      <td colSpan={22} className="px-4 py-8 text-center text-gray-500">
+                      <td colSpan={23} className="px-4 py-8 text-center text-gray-500">
                         No rows for this range and filters.
                       </td>
                     </tr>
                   ) : (
                     data.rows.map((r, i) => (
-                      <tr key={`${r.ebay_order_id}-${r.sku}-${i}`} className="hover:bg-gray-50">
+                      <tr key={`${r.sales_channel}-${r.ebay_order_id}-${r.sku}-${i}`} className="hover:bg-gray-50">
                         <td className="px-2 py-1.5 whitespace-nowrap text-gray-800">{r.order_date}</td>
+                        <td className="px-2 py-1.5 whitespace-nowrap text-gray-800">
+                          {r.sales_channel === 'shopify' ? 'Shopify' : 'eBay'}
+                        </td>
                         <td className="px-2 py-1.5 font-mono text-[11px] text-gray-800">{r.ebay_order_id}</td>
                         <td className="px-2 py-1.5 text-gray-700">{r.country}</td>
                         <td className="px-2 py-1.5 text-gray-900 max-w-[140px] truncate" title={r.sku}>

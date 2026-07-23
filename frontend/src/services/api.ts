@@ -202,6 +202,8 @@ export interface StockForecastRow {
   days_until_reorder: number | null
   total_sales_in_window: number | null
   reorder_cost_gbp: number | null
+  sold_3m_units: number
+  sold_1m_units: number
 }
 
 export interface StockForecastBundle {
@@ -210,6 +212,55 @@ export interface StockForecastBundle {
   note: string
   from_date: string
   to_date: string
+}
+
+/** GET /api/inventory-status/stock-burn-trend — trailing 30/90/180 burn comparison. */
+export type StockBurnTrendVerdict =
+  | 'accelerating'
+  | 'stable'
+  | 'decaying'
+  | 'insufficient_volume'
+
+export interface StockBurnTrendRow {
+  seller_skuid: string
+  mfskuid: string
+  sku_name: string
+  current_available: number
+  current_in_transit: number
+  current_received: number
+  ordered_total: number
+  burn_30: number | null
+  burn_90: number | null
+  burn_180: number | null
+  in_stock_days_30: number
+  in_stock_days_90: number
+  in_stock_days_180: number
+  units_sold_30: number
+  units_sold_90: number
+  units_sold_180: number
+  ratio: number | null
+  ratio_source: number | null
+  verdict: StockBurnTrendVerdict | null
+  low_sample: boolean
+  cover_30: number | null
+  cover_180: number | null
+  cover_diverge: boolean
+  reorder_quantity: number | null
+  reorder_by_date: string | null
+  days_until_reorder: number | null
+  reorder_cost_gbp: number | null
+  reorder_suppressed: boolean
+  overstocked: boolean
+  is_dead: boolean
+}
+
+export interface StockBurnTrendBundle {
+  rows: StockBurnTrendRow[]
+  generated_at: string
+  note: string
+  to_date: string
+  windows: { d30: string; d90: string; d180: string }
+  reorder_lead_days: number
 }
 
 /** GET /api/inventory-status/debug-raw — StockSnapshot v2 + SKU query verbatim. */
@@ -453,6 +504,7 @@ export interface AnalyticsByCountryPoint {
 /** Matches GET /api/stock/analytics/order-details (same profit rules as by-sku). */
 export interface OrderDetailRow {
   ebay_order_id: string
+  sales_channel: string
   order_date: string
   country: string
   sku: string
@@ -641,6 +693,8 @@ export const stockAPI = {
     group_by?: 'day' | 'week' | 'month'
     country?: string
     sku?: string
+    sales_channel?: 'ebay' | 'shopify'
+    outcome?: 'all' | 'sales' | 'refunds'
   }) => api.get<AnalyticsSummary>('/api/stock/analytics/summary', { params }),
 
   getAnalyticsBySku: (params: {
@@ -648,12 +702,16 @@ export const stockAPI = {
     to: string
     country?: string
     sku?: string
+    sales_channel?: 'ebay' | 'shopify'
+    outcome?: 'all' | 'sales' | 'refunds'
   }) => api.get<AnalyticsBySkuPoint[]>('/api/stock/analytics/by-sku', { params }),
 
   getAnalyticsByCountry: (params: {
     from: string
     to: string
     sku?: string
+    sales_channel?: 'ebay' | 'shopify'
+    outcome?: 'all' | 'sales' | 'refunds'
   }) => api.get<AnalyticsByCountryPoint[]>('/api/stock/analytics/by-country', { params }),
 
   getAnalyticsMonthlyProfit: (params?: { year?: number }) =>
@@ -667,6 +725,7 @@ export const stockAPI = {
     to: string
     country?: string
     sku?: string
+    sales_channel?: 'ebay' | 'shopify'
   }) => api.get<OrderDetailsResponse>('/api/stock/analytics/order-details', { params }),
 
   getLenderSummary: (params: { from: string; to: string }) =>
@@ -1063,6 +1122,9 @@ export const inventoryStatusAPI = {
     api.get<StockForecastBundle>('/api/inventory-status/stock-forecast', {
       params: { from: params.from, to: params.to },
     }),
+  /** Trailing 30/90/180 burn rates ending yesterday (latest complete day). */
+  getStockBurnTrend: () =>
+    api.get<StockBurnTrendBundle>('/api/inventory-status/stock-burn-trend'),
   /** Stored movement lines (GET); fill with syncStockMovementFromOc first. */
   listStockMovement: (params: {
     from?: string

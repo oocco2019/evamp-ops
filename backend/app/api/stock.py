@@ -22,6 +22,8 @@ from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem
 from app.services.shopify_client import (
     fetch_shopify_orders_paginated,
     parse_shopify_order_to_import,
+    fetch_shopify_payments_settlement,
+    apply_shopify_payments_to_parsed,
 )
 from app.services.shopify_settings import (
     clear_shopify_credentials_db,
@@ -574,13 +576,22 @@ async def execute_shopify_order_import(db: AsyncSession, mode: str) -> ImportRes
             since = (max_modified or datetime(2000, 1, 1)) - timedelta(seconds=1)
             order_rows = await fetch_shopify_orders_paginated(shop, token, updated_at_min=since)
         else:
+            # Shopify Admin allows deeper history than eBay's 90-day window when
+            # read_orders / read_all_orders is granted. Keep a long lookback so
+            # sparse store orders (e.g. months-old) are not missed on first full sync.
             end_date = datetime.utcnow()
-            start_date = end_date - timedelta(days=90)
+            start_date = end_date - timedelta(days=730)
             order_rows = await fetch_shopify_orders_paginated(shop, token, created_at_min=start_date)
 
         for row in order_rows:
             try:
                 o = parse_shopify_order_to_import(row)
+                settlement = await fetch_shopify_payments_settlement(
+                    shop, token, o["ebay_order_id"]
+                )
+                if settlement is not None:
+                    fee_total, net_charged = settlement
+                    o = apply_shopify_payments_to_parsed(o, fee_total, net_charged)
             except Exception as e:
                 logger.warning("shopify import skip order: %s", e)
                 continue
@@ -789,6 +800,44 @@ def _not_canceled():
     return or_(Order.cancel_status.is_(None), Order.cancel_status != "CANCELED")
 
 
+def _normalize_sales_channel(sales_channel: Optional[str]) -> Optional[str]:
+    """Return ebay|shopify or None (all). Raises HTTPException for invalid values."""
+    if sales_channel is None or not str(sales_channel).strip():
+        return None
+    ch = str(sales_channel).strip().lower()
+    if ch not in ("ebay", "shopify"):
+        raise HTTPException(status_code=400, detail="sales_channel must be ebay, shopify, or omitted for all")
+    return ch
+
+
+def _normalize_outcome(outcome: Optional[str]) -> Optional[str]:
+    """
+    Sales Analytics outcome filter.
+
+    None / all / sales → include everything (sales and refunds; current default).
+    refunds → only clawback / refund rows (total_due_seller <= 0), same detection as profit refund mode.
+    There is intentionally no “sales excluding refunds” option.
+    """
+    if outcome is None or not str(outcome).strip():
+        return None
+    v = str(outcome).strip().lower()
+    if v in ("all", "sales"):
+        return None
+    if v == "refunds":
+        return "refunds"
+    raise HTTPException(
+        status_code=400,
+        detail="outcome must be all, sales, refunds, or omitted (all = sales and refunds)",
+    )
+
+
+def _apply_outcome_filter_sql(stmt, outcome: Optional[str]):
+    """Restrict SQLAlchemy select to refund orders when outcome == 'refunds'."""
+    if outcome == "refunds":
+        return stmt.where(Order.total_due_seller.isnot(None), Order.total_due_seller <= 0)
+    return stmt
+
+
 @router.get("/analytics/filter-options", response_model=AnalyticsFilterOptionsResponse)
 async def get_analytics_filter_options(db: AsyncSession = Depends(get_db)):
     """Return distinct countries and SKUs for analytics filter dropdowns. PR and VI merged into US. Cancelled orders excluded."""
@@ -900,6 +949,11 @@ async def get_analytics_summary(
     group_by: str = Query("day", description="Aggregation: day, week, or month"),
     country: Optional[str] = Query(None, description="Filter by order country (2-letter code)"),
     sku: Optional[str] = Query(None, description="Filter by line item SKU"),
+    sales_channel: Optional[str] = Query(None, description="ebay | shopify; omit for all"),
+    outcome: Optional[str] = Query(
+        None,
+        description="all|sales = sales and refunds (default); refunds = total_due_seller <= 0 only",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """Sales analytics: time series of order count and units sold, with optional filters (SM01)."""
@@ -907,6 +961,8 @@ async def get_analytics_summary(
         raise HTTPException(status_code=400, detail="group_by must be day, week, or month")
     if from_date > to_date:
         raise HTTPException(status_code=400, detail="from must be <= to")
+    channel = _normalize_sales_channel(sales_channel)
+    outcome_f = _normalize_outcome(outcome)
 
     period_expr = func.date_trunc(group_by, Order.date).label("period")
     stmt = (
@@ -919,6 +975,9 @@ async def get_analytics_summary(
         .join(LineItem, Order.order_id == LineItem.order_id)
         .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
     )
+    stmt = _apply_outcome_filter_sql(stmt, outcome_f)
+    if channel:
+        stmt = stmt.where(Order.sales_channel == channel)
     if country and country.strip():
         cc = country.strip().upper()[:2]
         if cc == "US":
@@ -999,6 +1058,7 @@ async def get_analytics_monthly_profit(
     for o in orders:
         line_cost_usd = Decimal(0)
         line_postage_usd = Decimal(0)
+        units = 0
         for li in o.line_items:
             s = sku_map.get(li.sku) if li.sku else None
             landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
@@ -1006,6 +1066,7 @@ async def get_analytics_monthly_profit(
             qty = li.quantity or 0
             line_cost_usd += (landed + postage) * qty
             line_postage_usd += postage * qty
+            units += qty
         order_profit = _order_profit_gbp(
             o.total_due_seller,
             o.total_due_seller_currency,
@@ -1016,6 +1077,8 @@ async def get_analytics_monthly_profit(
             line_cost_usd,
             line_postage_usd,
             usd_to_gbp,
+            sales_channel=o.sales_channel,
+            units=units,
         )
         if order_profit is None:
             continue
@@ -1094,6 +1157,24 @@ def _uk_vat_gbp(
     return inclusive_vat.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def _shopify_postage_surcharge_gbp(sales_channel: Optional[str], units: int) -> Decimal:
+    """
+    Extra outbound postage for Shopify units (GBP).
+
+    SKU postage_price reflects eBay-subsidised shipping; Shopify has no subsidy, so we add
+    SHOPIFY_POSTAGE_SURCHARGE_GBP per unit (default £1). See docs/ANALYTICS_PROFIT_LOGIC.md.
+    """
+    if (sales_channel or "").strip().lower() != "shopify":
+        return Decimal("0")
+    try:
+        per = Decimal(str(getattr(app_settings, "SHOPIFY_POSTAGE_SURCHARGE_GBP", 1.0)))
+    except Exception:
+        per = Decimal("1")
+    if per <= 0 or units <= 0:
+        return Decimal("0")
+    return (per * Decimal(int(units))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
 def _order_profit_gbp(
     total_due_seller: Optional[Decimal],
     total_due_seller_currency: Optional[str],
@@ -1104,16 +1185,20 @@ def _order_profit_gbp(
     line_cost_usd_total: Decimal,
     line_postage_usd_total: Decimal,
     usd_to_gbp: float,
+    sales_channel: Optional[str] = None,
+    units: int = 0,
 ) -> Optional[Decimal]:
     """
     Profit (GBP) = Total Due Seller (GBP) - cost (GBP) - (if UK: VAT in GBP).
 
     UK: eBay tax_total if present; else VAT extracted from VAT-inclusive price at UK_VAT_DEFAULT_RATE (default 20%).
 
-    Normal orders: cost = (landed+postage) USD converted to GBP.
+    Normal orders: cost = (landed+postage) USD converted to GBP
+    + Shopify postage surcharge (GBP × units) when sales_channel=shopify.
 
     Refund / clawback (total_due_seller <= 0): assume inventory is returned; landed COGS is not lost.
-    Cost = 2× outbound postage only (USD summed as line_postage_usd_total, then ×2, then to GBP).
+    Cost = 2× outbound postage only (USD summed as line_postage_usd_total, then ×2, then to GBP)
+    + 2× Shopify surcharge when applicable.
     UK VAT is not applied on these orders (refund reverses the sale for VAT purposes in this model).
     """
     td_gbp = _total_due_seller_gbp_amount(total_due_seller, total_due_seller_currency, order_currency)
@@ -1123,10 +1208,11 @@ def _order_profit_gbp(
     rate_d = Decimal(str(rate))
     price_gbp = (price_total or Decimal(0)) * rate_d
     usd_to_gbp_d = Decimal(str(usd_to_gbp))
+    surcharge = _shopify_postage_surcharge_gbp(sales_channel, units)
     if td_gbp <= 0:
-        cost_gbp = (Decimal("2") * line_postage_usd_total) * usd_to_gbp_d
+        cost_gbp = (Decimal("2") * line_postage_usd_total) * usd_to_gbp_d + (Decimal("2") * surcharge)
     else:
-        cost_gbp = line_cost_usd_total * usd_to_gbp_d
+        cost_gbp = line_cost_usd_total * usd_to_gbp_d + surcharge
     vat_gbp = _uk_vat_gbp(country, tax_total, price_gbp, rate_d)
     if td_gbp <= 0:
         vat_gbp = Decimal(0)
@@ -1153,17 +1239,27 @@ async def get_analytics_by_sku(
     to_date: date = Query(..., alias="to", description="End date (YYYY-MM-DD)"),
     country: Optional[str] = Query(None, description="Filter by order country (2-letter code)"),
     sku: Optional[str] = Query(None, description="Filter by line item SKU"),
+    sales_channel: Optional[str] = Query(None, description="ebay | shopify; omit for all"),
+    outcome: Optional[str] = Query(
+        None,
+        description="all|sales = sales and refunds (default); refunds = total_due_seller <= 0 only",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """Sales by SKU: quantity sold and profit. Profit = Total Due Seller (GBP) - (landed+postage USD->GBP) - UK VAT if GB."""
     if from_date > to_date:
         raise HTTPException(status_code=400, detail="from must be <= to")
+    channel = _normalize_sales_channel(sales_channel)
+    outcome_f = _normalize_outcome(outcome)
 
     stmt = (
         select(Order)
         .options(selectinload(Order.line_items))
         .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
     )
+    stmt = _apply_outcome_filter_sql(stmt, outcome_f)
+    if channel:
+        stmt = stmt.where(Order.sales_channel == channel)
     if country and country.strip():
         cc = country.strip().upper()[:2]
         if cc == "US":
@@ -1193,6 +1289,7 @@ async def get_analytics_by_sku(
         line_cost_usd = Decimal(0)
         line_postage_usd = Decimal(0)
         line_proportions = []
+        units = 0
         for li in o.line_items:
             if sku and li.sku != sku.strip():
                 continue
@@ -1202,6 +1299,7 @@ async def get_analytics_by_sku(
             qty = li.quantity or 0
             line_cost_usd += (landed + postage) * qty
             line_postage_usd += postage * qty
+            units += qty
             line_total = li.line_total or Decimal(0)
             line_proportions.append((li.sku or "", qty, line_total / price_total))
         if sku and not line_proportions:
@@ -1216,6 +1314,8 @@ async def get_analytics_by_sku(
             line_cost_usd,
             line_postage_usd,
             usd_to_gbp,
+            sales_channel=o.sales_channel,
+            units=units,
         )
         if order_profit is None:
             continue
@@ -1265,17 +1365,27 @@ async def get_analytics_by_country(
     from_date: date = Query(..., alias="from", description="Start date (YYYY-MM-DD)"),
     to_date: date = Query(..., alias="to", description="End date (YYYY-MM-DD)"),
     sku: Optional[str] = Query(None, description="Filter by line item SKU"),
+    sales_channel: Optional[str] = Query(None, description="ebay | shopify; omit for all"),
+    outcome: Optional[str] = Query(
+        None,
+        description="all|sales = sales and refunds (default); refunds = total_due_seller <= 0 only",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """Sales by country: quantity sold and profit. Profit = Total Due Seller (GBP) - costs - UK VAT if GB. PR/VI merged into US."""
     if from_date > to_date:
         raise HTTPException(status_code=400, detail="from must be <= to")
+    channel = _normalize_sales_channel(sales_channel)
+    outcome_f = _normalize_outcome(outcome)
 
     stmt = (
         select(Order)
         .options(selectinload(Order.line_items))
         .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
     )
+    stmt = _apply_outcome_filter_sql(stmt, outcome_f)
+    if channel:
+        stmt = stmt.where(Order.sales_channel == channel)
     result = await db.execute(stmt)
     orders = result.scalars().unique().all()
     if sku and sku.strip():
@@ -1318,6 +1428,8 @@ async def get_analytics_by_country(
             line_cost_usd,
             line_postage_usd,
             usd_to_gbp,
+            sales_channel=o.sales_channel,
+            units=qty_for_country,
         )
         if order_profit is None:
             continue
@@ -1345,6 +1457,7 @@ class OrderDetailRow(BaseModel):
     """One line item with order-level fee columns and allocated profit (same rules as /analytics/by-sku)."""
 
     ebay_order_id: str
+    sales_channel: str
     order_date: date
     country: str
     sku: str
@@ -1389,6 +1502,7 @@ async def get_analytics_order_details(
     to_date: date = Query(..., alias="to", description="End date (YYYY-MM-DD)"),
     country: Optional[str] = Query(None, description="Filter by order country (2-letter code)"),
     sku: Optional[str] = Query(None, description="Filter lines by SKU"),
+    sales_channel: Optional[str] = Query(None, description="ebay | shopify; omit for all"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1398,11 +1512,14 @@ async def get_analytics_order_details(
     """
     if from_date > to_date:
         raise HTTPException(status_code=400, detail="from must be <= to")
+    channel = _normalize_sales_channel(sales_channel)
     stmt = (
         select(Order)
         .options(selectinload(Order.line_items))
         .where(Order.date >= from_date, Order.date <= to_date, _not_canceled())
     )
+    if channel:
+        stmt = stmt.where(Order.sales_channel == channel)
     if country and country.strip():
         cc = country.strip().upper()[:2]
         if cc == "US":
@@ -1451,6 +1568,7 @@ async def get_analytics_order_details(
 
         line_cost_usd = Decimal(0)
         line_postage_usd = Decimal(0)
+        order_units = 0
         for li in o.line_items:
             s = sku_map.get(li.sku) if li.sku else None
             landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
@@ -1458,6 +1576,7 @@ async def get_analytics_order_details(
             qty = li.quantity or 0
             line_cost_usd += (landed + postage) * qty
             line_postage_usd += postage * qty
+            order_units += qty
 
         td_gbp_check = _total_due_seller_gbp_amount(
             o.total_due_seller, o.total_due_seller_currency, o.order_currency
@@ -1467,10 +1586,13 @@ async def get_analytics_order_details(
         rate_d = Decimal(str(rate))
         price_gbp = price_total * rate_d
         usd_to_gbp_d = Decimal(str(usd_to_gbp))
+        order_surcharge = _shopify_postage_surcharge_gbp(o.sales_channel, order_units)
         if refund_mode:
-            order_cost_gbp = (Decimal("2") * line_postage_usd) * usd_to_gbp_d
+            order_cost_gbp = (Decimal("2") * line_postage_usd) * usd_to_gbp_d + (
+                Decimal("2") * order_surcharge
+            )
         else:
-            order_cost_gbp = line_cost_usd * usd_to_gbp_d
+            order_cost_gbp = line_cost_usd * usd_to_gbp_d + order_surcharge
         vat_gbp = _uk_vat_gbp(o.country, o.tax_total, price_gbp, rate_d)
         if refund_mode:
             vat_gbp = Decimal(0)
@@ -1485,6 +1607,8 @@ async def get_analytics_order_details(
             line_cost_usd,
             line_postage_usd,
             usd_to_gbp,
+            sales_channel=o.sales_channel,
+            units=order_units,
         )
         if order_profit is None:
             continue
@@ -1496,12 +1620,15 @@ async def get_analytics_order_details(
             landed = (s.landed_cost or Decimal(0)) if s else Decimal(0)
             postage = (s.postage_price or Decimal(0)) if s else Decimal(0)
             qty = li.quantity or 0
+            line_surcharge = _shopify_postage_surcharge_gbp(o.sales_channel, qty)
             line_landed_gbp = landed * Decimal(qty) * usd_to_gbp_d
-            line_postage_gbp = postage * Decimal(qty) * usd_to_gbp_d
+            line_postage_gbp = postage * Decimal(qty) * usd_to_gbp_d + line_surcharge
             line_cost_gbp = line_landed_gbp + line_postage_gbp
             if refund_mode:
                 line_landed_gbp = Decimal(0)
-                line_postage_gbp = line_postage_gbp * Decimal("2")
+                line_postage_gbp = (
+                    postage * Decimal(qty) * usd_to_gbp_d + line_surcharge
+                ) * Decimal("2")
                 line_cost_gbp = line_postage_gbp
             line_total = li.line_total or Decimal(0)
             alloc = line_total / price_total if price_total > 0 else Decimal(0)
@@ -1512,6 +1639,7 @@ async def get_analytics_order_details(
             rows.append(
                 OrderDetailRow(
                     ebay_order_id=o.ebay_order_id,
+                    sales_channel=(o.sales_channel or "ebay").strip().lower() or "ebay",
                     order_date=o.date,
                     country=o.country or "",
                     sku=li.sku or "",
@@ -1687,7 +1815,7 @@ async def get_latest_orders(
     ]
 
 
-# === Stock Planning (SM04) ===
+# === Stock Order (SM04) ===
 
 class VelocityResponse(BaseModel):
     sku: str

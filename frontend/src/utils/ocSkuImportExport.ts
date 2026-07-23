@@ -1,5 +1,5 @@
 /**
- * OrangeConnex SKU import template export (Stock Planning → OC inbound upload).
+ * OrangeConnex SKU import template export (Stock Order → OC inbound upload).
  * Template: public/SKUImportTemplateV1_EN.xlsx — we replace the first sheet's data rows only.
  */
 import * as XLSX from 'xlsx'

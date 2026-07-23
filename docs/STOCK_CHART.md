@@ -6,18 +6,30 @@ This document describes how **Stock level by day** and **Stored movement lines**
 
 ## 1. What you see in the UI
 
-**Route:** Stock & movement (`InventoryMovement.tsx`).
+**Route:** `/inventory` (`StockMovementPanel` in `InventoryMovement.tsx`, embedded on the Inventory page).
 
 | Area | What it shows |
 |------|----------------|
-| **Filters** | Period presets, **From / To**, **SKU** (All or seller SKU from mappings). Same card pattern as Sales Analytics. |
-| **Stock level by day** | Line chart (Recharts): **Available** only — one series, blue (`#3b82f6`). INTRAN was removed from the chart (unreliable / not needed). |
+| **Filters** | Period presets, **From / To**, **SKU** (All or seller SKU from mappings). Same card pattern as Sales Analytics. Sync range / Incremental / Refresh live here. |
+| **Stock run-out forecast** | Per mapped SKU: burn rate, Ordered, run-out, reorder. See [`STOCK_FORECAST.md`](./STOCK_FORECAST.md). Short on-page AVL gloss only. |
+| **Stock level by day** | Line chart (Recharts): **Available** only — one series, blue (`#3b82f6`). INTRAN omitted. |
 | **Daily table** under the chart | Same daily series as the chart: local calendar day, forward-filled **available**. |
-| **KPI tiles** | Current stock from **`GET /inventory-status/inventory`** (last OC snapshot pull), filtered by SKU when not All. |
+| **KPI tiles** | Current stock from **`GET /inventory-status/inventory`** (last OC snapshot pull via Inventory → Pull latest data), filtered by SKU when not All. |
 | **Stored movement lines** | Raw rows from PostgreSQL **`oc_stock_movement_line`** (same date/SKU filters as the chart queries). |
-| **Stock run-out forecast** | Per mapped SKU: burn rate from eBay sales, **Ordered** (available + in transit), projected run-out. Uses the same **From / To** filter. See [`STOCK_FORECAST.md`](./STOCK_FORECAST.md). |
 
 The chart does **not** call OrangeConnex live. It reads **only** what is already in **`oc_stock_movement_line`**.
+
+**AVL (concise):** OrangeConnex available stock — `actual_count` for the **AVL** inventory-status bucket. Chart Available and forecast Available use that series; INTRAN is not charted.
+
+### Removed from the UI (behaviour unchanged)
+
+- Link **Inventory status (OC sync)** and the page intro about current stock living on Inventory status / chart using GetStockMovement / movement lines for audit.
+- Intro “Stock levels by day (from movement data in PostgreSQL…)”.
+- **Diagnostics** panel (verbatim OC JSON / DB stats). Debug endpoints remain: `GET /api/inventory-status/debug/stock-movement-db`, `GET /api/inventory-status/debug-raw`, `GET /api/inventory-status/debug/oc-movement-raw?mfskuid=…`.
+- Chart helper paragraph (Available from GetStockMovement / one point per day / chart point counts) and **SKU: All** sum blurb — aggregation rules are §3.1.
+- API `note` under the chart (`AVL: running sum per SKU/region…`) — still returned by `GET …/inventory-history`; logic is §3.1 / §5.
+- Movement footer note (`Rows read from EvampOps DB…` / line counts) — still on `GET …/stock-movement`; sync is §6.
+- Table **Stock levels (lowest first)** (snapshot sorted by available). KPI tiles remain for totals.
 
 ---
 
@@ -102,7 +114,7 @@ Using **`created_at`** as a fallback places the row on the timeline when the app
 
 ## 6. Sync and OC limits
 
-- Data enters PostgreSQL via **`sync-stock-movement`** (manual **Sync range** / **Incremental** on the page, or scheduler).
+- Data enters PostgreSQL via **`sync-stock-movement`** (page **Pull latest data** for ~last year, scheduler incremental, or API).
 - OC typically allows only about the **last 12 months** of movement queries; older windows may be **clamped** (see sync response and [`OC_GET_STOCK_MOVEMENT_HANDOFF.md`](./OC_GET_STOCK_MOVEMENT_HANDOFF.md)).
 - Rows already stored are **not** TTL-deleted by this app; long history depends on **running syncs** before events fall outside OC’s window.
 
@@ -125,8 +137,8 @@ Using **`created_at`** as a fallback places the row on the timeline when the app
 
 | Symptom | Things to check |
 |--------|-------------------|
-| Chart/table **empty** for a range | **From/To** actually overlaps when events exist (e.g. **Today** only has no lines if nothing moved today). Run **Sync range** for that window. Confirm **`oc_stock_movement_line`** row count for the connection. |
-| **Debug JSON** shows many rows but UI empty | Was often **NULL `update_time_utc`** before **coalesce** fix; ensure deployed backend includes **`COALESCE(..., created_at)`**. |
+| Chart/table **empty** for a range | **From/To** actually overlaps when events exist (e.g. **Today** only has no lines if nothing moved today). Use **Pull latest data**. Confirm **`oc_stock_movement_line`** row count for the connection. |
+| **Debug JSON** shows many rows but UI empty | Was often **NULL `update_time_utc`** before **coalesce** fix; hit debug endpoints directly (Diagnostics UI removed) or ensure deployed backend includes **`COALESCE(..., created_at)`**. |
 | Spike then cliff (historical bugs) | Fixed: **sum** of burst `actual_count` at same second; **sum at T** without carry-forward. Current logic is §3.1. |
 | “All” vs one SKU | **All** sums **carried-forward** levels across mapped MFSKUIDs; one SKU filters mappings for that seller SKU. |
 

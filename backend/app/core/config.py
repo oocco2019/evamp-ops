@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     UK_VAT_DEFAULT_RATE: float = 0.20
     # Profit in EUR: multiply GBP profit by this. E.g. 1.16 = 1 GBP = 1.16 EUR.
     GBP_TO_EUR_RATE: float = 1.16
+    # Shopify: add this many GBP per unit on top of SKU postage (eBay postage is subsidised).
+    SHOPIFY_POSTAGE_SURCHARGE_GBP: float = 1.0
+    # Stock reorder: supplier lead time + buffer (days). Effective lead = sum; used for qty ≈ burn × lead.
+    STOCK_REORDER_LEAD_TIME_DAYS: int = 90
+    STOCK_REORDER_BUFFER_DAYS: int = 0
 
     # Shopify Admin API (custom app: Admin API access token). Used for sales analytics import.
     SHOPIFY_SHOP: str = ""  # e.g. your-store.myshopify.com (with or without https)

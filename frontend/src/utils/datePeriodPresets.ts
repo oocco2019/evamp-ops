@@ -1,6 +1,6 @@
-export type PeriodPreset = 'today' | '7d' | '1m' | '3m' | '6m' | '1y' | 'custom'
+export type PeriodPreset = 'yesterday' | '7d' | '1m' | '3m' | '6m' | '1y' | 'custom'
 
-export const PERIOD_DAYS: Record<Exclude<PeriodPreset, 'today' | 'custom'>, number> = {
+export const PERIOD_DAYS: Record<Exclude<PeriodPreset, 'yesterday' | 'custom'>, number> = {
   '7d': 7,
   '1m': 30,
   '3m': 90,
@@ -43,9 +43,9 @@ export function completeDaysRange(n: number): { from: string; to: string } {
 
 export function periodPresetRange(preset: PeriodPreset): { from: string; to: string } | null {
   if (preset === 'custom') return null
-  if (preset === 'today') {
-    const t = todayIso()
-    return { from: t, to: t }
+  if (preset === 'yesterday') {
+    const y = latestCompleteDayIso()
+    return { from: y, to: y }
   }
   return completeDaysRange(PERIOD_DAYS[preset])
 }

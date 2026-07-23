@@ -25,10 +25,10 @@ describe('datePeriodPresets', () => {
     expect(completeDaysRange(90)).toEqual({ from: '2026-04-13', to: '2026-07-11' })
   })
 
-  it('today preset includes today only', () => {
+  it('yesterday preset is the last complete day only', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(2026, 6, 12, 9, 0, 0))
-    expect(periodPresetRange('today')).toEqual({ from: '2026-07-12', to: '2026-07-12' })
+    expect(periodPresetRange('yesterday')).toEqual({ from: '2026-07-11', to: '2026-07-11' })
   })
 
   it('rolling presets end yesterday', () => {

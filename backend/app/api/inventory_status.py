@@ -35,6 +35,7 @@ from app.services.oc_stock_movement_store import (
     persist_oc_stock_movement_lines,
 )
 from app.services.stock_forecast import build_stock_forecast_payload
+from app.services.stock_burn_trend import build_stock_burn_trend_payload
 from app.services.oc_client import (
     OCAPIError,
     OCConfigError,
@@ -159,6 +160,8 @@ class StockForecastRowResponse(BaseModel):
     days_until_reorder: Optional[float] = None
     total_sales_in_window: Optional[int] = None
     reorder_cost_gbp: Optional[float] = None
+    sold_3m_units: int = 0
+    sold_1m_units: int = 0
 
 
 class StockForecastBundleResponse(BaseModel):
@@ -167,6 +170,54 @@ class StockForecastBundleResponse(BaseModel):
     note: str
     from_date: str
     to_date: str
+
+
+class StockBurnTrendWindows(BaseModel):
+    d30: str
+    d90: str
+    d180: str
+
+
+class StockBurnTrendRowResponse(BaseModel):
+    seller_skuid: str
+    mfskuid: str
+    sku_name: str
+    current_available: int
+    current_in_transit: int
+    current_received: int
+    ordered_total: int
+    burn_30: Optional[float] = None
+    burn_90: Optional[float] = None
+    burn_180: Optional[float] = None
+    in_stock_days_30: int = 0
+    in_stock_days_90: int = 0
+    in_stock_days_180: int = 0
+    units_sold_30: int = 0
+    units_sold_90: int = 0
+    units_sold_180: int = 0
+    ratio: Optional[float] = None
+    ratio_source: Optional[int] = None
+    verdict: Optional[str] = None
+    low_sample: bool = False
+    cover_30: Optional[float] = None
+    cover_180: Optional[float] = None
+    cover_diverge: bool = False
+    reorder_quantity: Optional[int] = None
+    reorder_by_date: Optional[str] = None
+    days_until_reorder: Optional[float] = None
+    reorder_cost_gbp: Optional[float] = None
+    reorder_suppressed: bool = False
+    overstocked: bool = False
+    is_dead: bool = False
+
+
+class StockBurnTrendBundleResponse(BaseModel):
+    rows: List[StockBurnTrendRowResponse]
+    generated_at: str
+    note: str
+    to_date: str
+    windows: StockBurnTrendWindows
+    reorder_lead_days: int
 
 
 class OCSkuInventoryResponse(BaseModel):
@@ -1540,6 +1591,29 @@ async def get_stock_forecast(
         note=raw["note"],
         from_date=raw["from_date"],
         to_date=raw["to_date"],
+    )
+
+
+@router.get("/stock-burn-trend", response_model=StockBurnTrendBundleResponse)
+async def get_stock_burn_trend(
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Trailing 30/90/180-day burn rates ending at yesterday (latest complete calendar day).
+    Independent of the Stock & movement From/To filter.
+    """
+    cid = await _active_oc_connection_id(db)
+    if not cid:
+        raise HTTPException(status_code=400, detail="No active OC connection configured.")
+    eff_to = latest_complete_day()
+    raw = await build_stock_burn_trend_payload(db, cid, eff_to)
+    return StockBurnTrendBundleResponse(
+        rows=[StockBurnTrendRowResponse(**r) for r in raw["rows"]],
+        generated_at=raw["generated_at"],
+        note=raw["note"],
+        to_date=raw["to_date"],
+        windows=StockBurnTrendWindows(**raw["windows"]),
+        reorder_lead_days=raw["reorder_lead_days"],
     )
 
 

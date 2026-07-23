@@ -101,3 +101,57 @@ def test_refund_zero_payout_uses_postage_cost():
     assert gross is not None
     # cost = 2*10*1 = 20; UK VAT = 0 on refund clawback
     assert gross == Decimal("0") - Decimal("20")
+
+
+def test_shopify_postage_surcharge_reduces_gross():
+    from app.api.stock import _shopify_postage_surcharge_gbp
+
+    assert _shopify_postage_surcharge_gbp("ebay", 2) == Decimal("0")
+    assert _shopify_postage_surcharge_gbp("shopify", 2) == Decimal("2.00")
+
+    gross_ebay = _order_profit_gbp(
+        total_due_seller=Decimal("100"),
+        total_due_seller_currency="GBP",
+        price_total=Decimal("120"),
+        tax_total=Decimal("0"),
+        order_currency="GBP",
+        country="US",
+        line_cost_usd_total=Decimal("50"),
+        line_postage_usd_total=Decimal("5"),
+        usd_to_gbp=0.79,
+        sales_channel="ebay",
+        units=1,
+    )
+    gross_shopify = _order_profit_gbp(
+        total_due_seller=Decimal("100"),
+        total_due_seller_currency="GBP",
+        price_total=Decimal("120"),
+        tax_total=Decimal("0"),
+        order_currency="GBP",
+        country="US",
+        line_cost_usd_total=Decimal("50"),
+        line_postage_usd_total=Decimal("5"),
+        usd_to_gbp=0.79,
+        sales_channel="shopify",
+        units=1,
+    )
+    assert gross_ebay == Decimal("60.5")
+    assert gross_shopify == Decimal("59.5")  # −£1 surcharge
+
+
+def test_shopify_refund_doubles_surcharge():
+    gross = _order_profit_gbp(
+        total_due_seller=Decimal("-3.45"),
+        total_due_seller_currency="GBP",
+        price_total=Decimal("159.99"),
+        tax_total=Decimal("26.67"),
+        order_currency="GBP",
+        country="GB",
+        line_cost_usd_total=Decimal("80"),
+        line_postage_usd_total=Decimal("8"),
+        usd_to_gbp=0.79,
+        sales_channel="shopify",
+        units=1,
+    )
+    # cost = 2*8*0.79 + 2*1 = 12.64 + 2 = 14.64; profit = -3.45 - 14.64 = -18.09
+    assert gross == Decimal("-18.09")

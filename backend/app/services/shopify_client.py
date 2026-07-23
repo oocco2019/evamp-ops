@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs, unquote
 
 import httpx
@@ -266,3 +266,101 @@ async def fetch_shopify_orders_paginated(
             page_info = nxt
 
     return all_orders
+
+
+_ORDER_PAYMENTS_GQL = """
+query ($id: ID!) {
+  order(id: $id) {
+    transactions {
+      kind
+      status
+      amountSet { shopMoney { amount currencyCode } }
+      fees {
+        amount { amount currencyCode }
+      }
+    }
+  }
+}
+"""
+
+
+async def fetch_shopify_payments_settlement(
+    shop_domain: str,
+    access_token: str,
+    shopify_order_id: str,
+) -> Optional[Tuple[Decimal, Decimal]]:
+    """
+    Shopify Payments settlement for one order via Admin GraphQL.
+
+    Returns (fee_total, net_charged) in shop money:
+    - fee_total: sum of TransactionFee.amount on SUCCESS transactions
+    - net_charged: SUCCESS SALE/CAPTURE amounts minus SUCCESS REFUND amounts
+
+    None if the query fails or the order is missing (caller keeps price−tax proxy).
+    """
+    base = _base_url(shop_domain)
+    oid = str(shopify_order_id or "").strip()
+    if not base or not access_token or not oid:
+        return None
+    url = f"{base}/admin/api/{SHOPIFY_API_VERSION}/graphql.json"
+    headers = {
+        "X-Shopify-Access-Token": access_token.strip(),
+        "Content-Type": "application/json",
+    }
+    variables = {"id": f"gid://shopify/Order/{oid}"}
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.post(
+                url,
+                headers=headers,
+                json={"query": _ORDER_PAYMENTS_GQL, "variables": variables},
+            )
+            r.raise_for_status()
+            payload = r.json() or {}
+    except Exception:
+        return None
+    if payload.get("errors"):
+        return None
+    order = ((payload.get("data") or {}).get("order")) or None
+    if not order:
+        return None
+
+    fee_total = Decimal("0")
+    net = Decimal("0")
+    for tx in order.get("transactions") or []:
+        if str(tx.get("status") or "").upper() != "SUCCESS":
+            continue
+        kind = str(tx.get("kind") or "").upper()
+        amt = _dec(((tx.get("amountSet") or {}).get("shopMoney") or {}).get("amount"))
+        if amt is None:
+            amt = Decimal("0")
+        if kind in ("SALE", "CAPTURE"):
+            net += amt
+        elif kind == "REFUND":
+            net -= amt
+        for fee in tx.get("fees") or []:
+            money = fee.get("amount")
+            fa = _dec(money.get("amount")) if isinstance(money, dict) else _dec(money)
+            if fa:
+                fee_total += fa
+    return fee_total, net
+
+
+def apply_shopify_payments_to_parsed(
+    parsed: Dict[str, Any],
+    fee_total: Decimal,
+    net_charged: Decimal,
+) -> Dict[str, Any]:
+    """
+    Set fee_total and total_due_seller after Shopify Payments fees.
+
+    Due seller = net SUCCESS charges (sale/capture − refund) − processing fees.
+    That is cash after Shopify Payments takes its cut (before COGS / VAT model in analytics).
+    """
+    out = dict(parsed)
+    fees = fee_total if fee_total is not None else Decimal("0")
+    out["fee_total"] = fees
+    out["total_due_seller"] = (net_charged or Decimal("0")) - fees
+    if out.get("total_due_seller_currency") is None and out.get("order_currency"):
+        out["total_due_seller_currency"] = out["order_currency"]
+    return out
