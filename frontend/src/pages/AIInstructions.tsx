@@ -285,12 +285,7 @@ export default function AIInstructionsPage() {
 
       {/* Playbook */}
       <section className="bg-white shadow rounded-lg border border-gray-200 p-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-1">Playbook</h2>
-        <p className="text-xs text-gray-500 mb-4">
-          Symptom → resolution. SKU scope <span className="font-mono">*</span> = all SKUs;
-          comma list <span className="font-mono">dee01, dee02, uke01</span>; or prefix{" "}
-          <span className="font-mono">dee*</span>.
-        </p>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Playbook</h2>
 
         <form
           className="mb-6 bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-3"
