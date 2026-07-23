@@ -34,7 +34,18 @@ import httpx
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.models.messages import MessageThread, Message, MessageMediaBlob, AIInstruction, SyncMetadata, StyleProfile, Procedure, DraftFeedback
+from app.models.messages import (
+    MessageThread,
+    Message,
+    MessageMediaBlob,
+    SyncMetadata,
+    StyleProfile,
+    Procedure,
+    DraftFeedback,
+    ReplyPolicy,
+    ReplyPlaybookEntry,
+    ReplyInsight,
+)
 from app.models.stock import Order
 from app.services.ai_service import AIService
 from app.services.ebay_auth import get_ebay_access_token
@@ -504,7 +515,9 @@ async def draft_reply(
     body: DraftRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate an AI draft reply for the thread. Uses style profile and procedures if available."""
+    """Generate an AI draft reply using reply policies, playbook, and product context."""
+    from app.services.reply_compose import compose_draft_with_adherence
+
     ai = AIService(db)
     result = await db.execute(
         select(MessageThread)
@@ -519,88 +532,36 @@ async def draft_reply(
         {"role": m.sender_type, "content": (m.subject or "") + "\n" + (m.content or "")}
         for m in msgs
     ]
-    
-    # Load AI instructions (global + SKU if any)
-    global_result = await db.execute(
-        select(AIInstruction).where(AIInstruction.type == "global")
-    )
-    global_instructions = " ".join(
-        i.instructions for i in global_result.scalars().all() if i.instructions
-    )
-    sku_instructions = ""
-    if thread.sku:
-        sku_result = await db.execute(
-            select(AIInstruction).where(
-                AIInstruction.type == "sku",
-                AIInstruction.sku_code == thread.sku,
-            )
-        )
-        sku_row = sku_result.scalar_one_or_none()
-        if sku_row and sku_row.instructions:
-            sku_instructions = sku_row.instructions
-    
-    # Load approved style profile
-    style_profile_text = ""
-    style_result = await db.execute(
-        select(StyleProfile)
-        .where(StyleProfile.is_approved == True)
-        .order_by(StyleProfile.created_at.desc())
-        .limit(1)
-    )
-    style_profile = style_result.scalar_one_or_none()
-    if style_profile and style_profile.style_summary:
-        style_profile_text = f"""
-COMMUNICATION STYLE (mimic this exactly):
-{style_profile.style_summary}
 
-Greeting style: {style_profile.greeting_patterns or 'Use appropriate greeting'}
-Closing style: {style_profile.closing_patterns or 'Use appropriate sign-off'}
-Tone: {style_profile.tone_description or 'Professional and friendly'}
-"""
-    
-    # Load procedure if specified
-    procedure_text = ""
-    if body.procedure:
-        proc_result = await db.execute(
-            select(Procedure).where(Procedure.name == body.procedure)
-        )
-        procedure = proc_result.scalar_one_or_none()
-        if procedure:
-            procedure_text = f"""
-PROCEDURE TO FOLLOW ({procedure.display_name}):
-{procedure.steps}
-"""
-    
-    # Build the prompt
-    prompt = "Draft a reply to this customer message."
-    
-    if style_profile_text:
-        prompt += f"\n\n{style_profile_text}"
-    
-    if procedure_text:
-        prompt += f"\n\n{procedure_text}"
-    
-    if body.extra_instructions:
-        prompt += f"\n\nAdditional instructions: {body.extra_instructions}"
-    
-    if not style_profile_text:
-        prompt += "\n\nBe professional, helpful, and concise."
-    
-    context = {
-        "thread_history": thread_history,
-        "global_instructions": global_instructions or "",
-        "sku_instructions": sku_instructions,
-    }
+    ebay_order_id = thread.ebay_order_id
+    buyer_name = thread.buyer_username
+    if not buyer_name:
+        for m in msgs:
+            if m.sender_type == "buyer" and m.sender_username:
+                buyer_name = m.sender_username
+                break
+    if not ebay_order_id and buyer_name:
+        ebay_order_id = await _find_order_for_buyer(db, buyer_name)
+
+    async def _gen(prompt: str, context: dict) -> str:
+        return await ai.generate_message(prompt, context)
+
     try:
-        draft = await ai.generate_message(prompt, context)
+        draft, composition = await compose_draft_with_adherence(
+            db,
+            thread=thread,
+            thread_history=thread_history,
+            ebay_order_id=ebay_order_id,
+            extra_instructions=body.extra_instructions,
+            ai_generate=_gen,
+            max_revises=2,
+        )
     except ValueError as e:
-        # AI configuration errors (no model, no API key, etc.)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
+            detail=str(e),
+        ) from e
     except httpx.HTTPStatusError as e:
-        # AI provider API errors (invalid key, rate limit, etc.)
         logger.warning("AI provider error: %s %s", e.response.status_code, e.response.text[:200])
         detail = "AI provider error"
         try:
@@ -610,14 +571,22 @@ PROCEDURE TO FOLLOW ({procedure.display_name}):
             detail = e.response.text[:200] if e.response.text else str(e)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI provider error: {detail}"
-        )
+            detail=f"AI provider error: {detail}",
+        ) from e
     except Exception as e:
         logger.exception("Draft generation failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to generate draft: {e!s}"
-        )
+            detail=f"Failed to generate draft: {e!s}",
+        ) from e
+
+    meta_key = f"last_composition:{thread_id}"
+    meta = await db.get(SyncMetadata, meta_key)
+    if meta:
+        meta.value = str(composition.id)
+    else:
+        db.add(SyncMetadata(key=meta_key, value=str(composition.id)))
+    await db.commit()
     return DraftResponse(draft=draft)
 
 
@@ -787,12 +756,17 @@ async def send_reply(
             if m.sender_type != "seller" and (m.content or "").strip():
                 buyer_summary = (m.content or "").strip()[:500]
                 break
+        composition_id = None
+        meta = await db.get(SyncMetadata, f"last_composition:{thread_id}")
+        if meta and meta.value and meta.value.isdigit():
+            composition_id = int(meta.value)
         feedback = DraftFeedback(
             thread_id=thread_id,
             ai_draft=draft_text,
             final_message=content,
             was_edited=was_edited,
             buyer_message_summary=buyer_summary,
+            composition_id=composition_id,
         )
         db.add(feedback)
 
@@ -2060,207 +2034,264 @@ async def _do_sync_messages(db: AsyncSession, full_sync: bool = False):
     }
 
 
-# === AI Instructions CRUD (CS06) ===
+# === Reply policies & playbook ===
 
-class AIInstructionCreate(BaseModel):
-    type: str = Field(..., pattern="^(global|sku)$", description="global or sku")
-    sku_code: Optional[str] = Field(None, max_length=100)
-    item_details: Optional[str] = None
-    instructions: str = Field(..., min_length=1)
-
-
-class AIInstructionUpdate(BaseModel):
-    item_details: Optional[str] = None
-    instructions: Optional[str] = Field(None, min_length=1)
+class ReplyPolicyCreate(BaseModel):
+    body: str = Field(..., min_length=1)
+    enabled: bool = True
+    sort_order: int = 0
 
 
-class AIInstructionResponse(BaseModel):
+class ReplyPolicyUpdate(BaseModel):
+    body: Optional[str] = Field(None, min_length=1)
+    enabled: Optional[bool] = None
+    sort_order: Optional[int] = None
+
+
+class ReplyPolicyResponse(BaseModel):
     id: int
-    type: str
-    sku_code: Optional[str]
-    item_details: Optional[str]
-    instructions: str
+    body: str
+    enabled: bool
+    sort_order: int
     created_at: str
     updated_at: str
 
     model_config = {"from_attributes": True}
 
 
-@router.get("/ai-instructions", response_model=List[AIInstructionResponse])
-async def list_ai_instructions(
-    type: Optional[str] = None,
-    db: AsyncSession = Depends(get_db),
-):
-    """List all AI instructions, optionally filtered by type (global/sku)."""
-    query = select(AIInstruction).order_by(AIInstruction.type, AIInstruction.sku_code)
-    if type:
-        query = query.where(AIInstruction.type == type)
-    result = await db.execute(query)
-    rows = result.scalars().all()
-    return [
-        AIInstructionResponse(
-            id=r.id,
-            type=r.type,
-            sku_code=r.sku_code,
-            item_details=r.item_details,
-            instructions=r.instructions,
-            created_at=r.created_at.isoformat() if r.created_at else "",
-            updated_at=r.updated_at.isoformat() if r.updated_at else "",
-        )
-        for r in rows
-    ]
-
-
-@router.post("/ai-instructions", response_model=AIInstructionResponse, status_code=status.HTTP_201_CREATED)
-async def create_ai_instruction(
-    body: AIInstructionCreate,
-    db: AsyncSession = Depends(get_db),
-):
-    """Create a new AI instruction (global or SKU-specific)."""
-    # Validate: global instructions must not have sku_code
-    if body.type == "global" and body.sku_code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Global instructions must not have a sku_code",
-        )
-    # Validate: SKU instructions must have sku_code
-    if body.type == "sku" and not body.sku_code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="SKU instructions must have a sku_code",
-        )
-    # Check for duplicates
-    if body.type == "global":
-        existing = await db.execute(
-            select(AIInstruction).where(AIInstruction.type == "global")
-        )
-        if existing.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Global instructions already exist. Update or delete the existing one.",
-            )
-    else:
-        existing = await db.execute(
-            select(AIInstruction).where(
-                AIInstruction.type == "sku",
-                AIInstruction.sku_code == body.sku_code,
-            )
-        )
-        if existing.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Instructions for SKU '{body.sku_code}' already exist. Update or delete the existing one.",
-            )
-    
-    instruction = AIInstruction(
-        type=body.type,
-        sku_code=body.sku_code if body.type == "sku" else None,
-        item_details=body.item_details,
-        instructions=body.instructions,
+def _policy_resp(p: ReplyPolicy) -> ReplyPolicyResponse:
+    return ReplyPolicyResponse(
+        id=p.id,
+        body=p.body,
+        enabled=p.enabled,
+        sort_order=p.sort_order,
+        created_at=p.created_at.isoformat() if p.created_at else "",
+        updated_at=p.updated_at.isoformat() if p.updated_at else "",
     )
-    db.add(instruction)
+
+
+@router.get("/reply-policies", response_model=List[ReplyPolicyResponse])
+async def list_reply_policies(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(ReplyPolicy).order_by(ReplyPolicy.sort_order, ReplyPolicy.id)
+    )
+    return [_policy_resp(p) for p in result.scalars().all()]
+
+
+@router.post("/reply-policies", response_model=ReplyPolicyResponse, status_code=status.HTTP_201_CREATED)
+async def create_reply_policy(body: ReplyPolicyCreate, db: AsyncSession = Depends(get_db)):
+    row = ReplyPolicy(body=body.body.strip(), enabled=body.enabled, sort_order=body.sort_order)
+    db.add(row)
     await db.commit()
-    await db.refresh(instruction)
-    return AIInstructionResponse(
-        id=instruction.id,
-        type=instruction.type,
-        sku_code=instruction.sku_code,
-        item_details=instruction.item_details,
-        instructions=instruction.instructions,
-        created_at=instruction.created_at.isoformat() if instruction.created_at else "",
-        updated_at=instruction.updated_at.isoformat() if instruction.updated_at else "",
-    )
+    await db.refresh(row)
+    return _policy_resp(row)
 
 
-@router.get("/ai-instructions/{instruction_id}", response_model=AIInstructionResponse)
-async def get_ai_instruction(
-    instruction_id: int,
+@router.put("/reply-policies/{policy_id}", response_model=ReplyPolicyResponse)
+async def update_reply_policy(
+    policy_id: int,
+    body: ReplyPolicyUpdate,
     db: AsyncSession = Depends(get_db),
 ):
-    """Get a specific AI instruction by ID."""
-    instruction = await db.get(AIInstruction, instruction_id)
-    if not instruction:
-        raise HTTPException(status_code=404, detail="AI instruction not found")
-    return AIInstructionResponse(
-        id=instruction.id,
-        type=instruction.type,
-        sku_code=instruction.sku_code,
-        item_details=instruction.item_details,
-        instructions=instruction.instructions,
-        created_at=instruction.created_at.isoformat() if instruction.created_at else "",
-        updated_at=instruction.updated_at.isoformat() if instruction.updated_at else "",
-    )
-
-
-@router.put("/ai-instructions/{instruction_id}", response_model=AIInstructionResponse)
-async def update_ai_instruction(
-    instruction_id: int,
-    body: AIInstructionUpdate,
-    db: AsyncSession = Depends(get_db),
-):
-    """Update an existing AI instruction."""
-    instruction = await db.get(AIInstruction, instruction_id)
-    if not instruction:
-        raise HTTPException(status_code=404, detail="AI instruction not found")
-    
-    if body.item_details is not None:
-        instruction.item_details = body.item_details
-    if body.instructions is not None:
-        instruction.instructions = body.instructions
-    
+    row = await db.get(ReplyPolicy, policy_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    if body.body is not None:
+        row.body = body.body.strip()
+    if body.enabled is not None:
+        row.enabled = body.enabled
+    if body.sort_order is not None:
+        row.sort_order = body.sort_order
     await db.commit()
-    await db.refresh(instruction)
-    return AIInstructionResponse(
-        id=instruction.id,
-        type=instruction.type,
-        sku_code=instruction.sku_code,
-        item_details=instruction.item_details,
-        instructions=instruction.instructions,
-        created_at=instruction.created_at.isoformat() if instruction.created_at else "",
-        updated_at=instruction.updated_at.isoformat() if instruction.updated_at else "",
-    )
+    await db.refresh(row)
+    return _policy_resp(row)
 
 
-@router.delete("/ai-instructions/{instruction_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_ai_instruction(
-    instruction_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    """Delete an AI instruction."""
-    instruction = await db.get(AIInstruction, instruction_id)
-    if not instruction:
-        raise HTTPException(status_code=404, detail="AI instruction not found")
-    await db.delete(instruction)
+@router.delete("/reply-policies/{policy_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_reply_policy(policy_id: int, db: AsyncSession = Depends(get_db)):
+    row = await db.get(ReplyPolicy, policy_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    await db.delete(row)
     await db.commit()
 
 
-class GenerateGlobalInstructionResponse(BaseModel):
-    success: bool
-    message: str
-    instructions: Optional[str] = None
+class ReplyPlaybookCreate(BaseModel):
+    symptom: str = ""
+    resolution: str = Field(..., min_length=1)
+    sku_scope: str = Field(
+        default="*",
+        max_length=500,
+        description="* = all; exact; prefix dee*; or comma list dee01, dee02, uke01",
+    )
+    enabled: bool = True
 
 
-@router.post("/generate-global-instruction", response_model=GenerateGlobalInstructionResponse)
-async def generate_global_instruction_from_history_endpoint(
+class ReplyPlaybookUpdate(BaseModel):
+    symptom: Optional[str] = None
+    resolution: Optional[str] = Field(None, min_length=1)
+    sku_scope: Optional[str] = Field(None, max_length=500)
+    enabled: Optional[bool] = None
+
+
+class ReplyPlaybookResponse(BaseModel):
+    id: int
+    symptom: str
+    resolution: str
+    sku_scope: str
+    enabled: bool
+    created_at: str
+    updated_at: str
+
+    model_config = {"from_attributes": True}
+
+
+def _playbook_resp(e: ReplyPlaybookEntry) -> ReplyPlaybookResponse:
+    return ReplyPlaybookResponse(
+        id=e.id,
+        symptom=e.symptom or "",
+        resolution=e.resolution,
+        sku_scope=e.sku_scope or "*",
+        enabled=e.enabled,
+        created_at=e.created_at.isoformat() if e.created_at else "",
+        updated_at=e.updated_at.isoformat() if e.updated_at else "",
+    )
+
+
+@router.get("/reply-playbook", response_model=List[ReplyPlaybookResponse])
+async def list_reply_playbook(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(ReplyPlaybookEntry).order_by(ReplyPlaybookEntry.id))
+    return [_playbook_resp(e) for e in result.scalars().all()]
+
+
+@router.post("/reply-playbook", response_model=ReplyPlaybookResponse, status_code=status.HTTP_201_CREATED)
+async def create_reply_playbook(body: ReplyPlaybookCreate, db: AsyncSession = Depends(get_db)):
+    row = ReplyPlaybookEntry(
+        symptom=(body.symptom or "").strip(),
+        resolution=body.resolution.strip(),
+        sku_scope=(body.sku_scope or "*").strip() or "*",
+        trigger_keywords=None,
+        enabled=body.enabled,
+    )
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _playbook_resp(row)
+
+
+@router.put("/reply-playbook/{entry_id}", response_model=ReplyPlaybookResponse)
+async def update_reply_playbook(
+    entry_id: int,
+    body: ReplyPlaybookUpdate,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Generate the global AI instruction from your message history (seller messages
-    from up to 100 threads, plus draft feedback). Creates or updates the global
-    instruction. Result appears in Settings > AI Instructions.
-    """
-    from app.services.global_instruction_from_history import generate_global_instruction_from_history
-    out = await generate_global_instruction_from_history(db)
-    if not out["success"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=out["message"],
-        )
-    return GenerateGlobalInstructionResponse(
-        success=True,
-        message=out["message"],
-        instructions=out.get("instructions"),
+    row = await db.get(ReplyPlaybookEntry, entry_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Playbook entry not found")
+    if body.symptom is not None:
+        row.symptom = body.symptom.strip()
+    if body.resolution is not None:
+        row.resolution = body.resolution.strip()
+    if body.sku_scope is not None:
+        row.sku_scope = body.sku_scope.strip() or "*"
+    if body.enabled is not None:
+        row.enabled = body.enabled
+    await db.commit()
+    await db.refresh(row)
+    return _playbook_resp(row)
+
+
+@router.delete("/reply-playbook/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_reply_playbook(entry_id: int, db: AsyncSession = Depends(get_db)):
+    row = await db.get(ReplyPlaybookEntry, entry_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Playbook entry not found")
+    await db.delete(row)
+    await db.commit()
+
+
+# === Reply insights (pending review) ===
+
+class ReplyInsightResponse(BaseModel):
+    id: int
+    status: str
+    kind: str
+    title: Optional[str]
+    body: str
+    symptom: Optional[str]
+    sku_scope: str
+    source: str
+    occurrence_count: int
+    evidence: Optional[dict]
+    created_at: str
+    updated_at: str
+
+    model_config = {"from_attributes": True}
+
+
+def _insight_resp(i: ReplyInsight) -> ReplyInsightResponse:
+    return ReplyInsightResponse(
+        id=i.id,
+        status=i.status,
+        kind=i.kind,
+        title=i.title,
+        body=i.body,
+        symptom=i.symptom,
+        sku_scope=i.sku_scope or "*",
+        source=i.source,
+        occurrence_count=i.occurrence_count,
+        evidence=i.evidence,
+        created_at=i.created_at.isoformat() if i.created_at else "",
+        updated_at=i.updated_at.isoformat() if i.updated_at else "",
     )
+
+
+@router.get("/reply-insights/pending-count")
+async def reply_insights_pending_count(db: AsyncSession = Depends(get_db)):
+    from app.services.reply_insights import pending_insight_count
+
+    return {"count": await pending_insight_count(db)}
+
+
+@router.get("/reply-insights", response_model=List[ReplyInsightResponse])
+async def list_reply_insights(
+    status: Optional[str] = "pending",
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(ReplyInsight).order_by(ReplyInsight.updated_at.desc(), ReplyInsight.id.desc())
+    if status:
+        q = q.where(ReplyInsight.status == status)
+    result = await db.execute(q)
+    return [_insight_resp(i) for i in result.scalars().all()]
+
+
+@router.post("/reply-insights/{insight_id}/promote")
+async def promote_reply_insight(insight_id: int, db: AsyncSession = Depends(get_db)):
+    from app.services.reply_insights import promote_insight
+
+    row = await db.get(ReplyInsight, insight_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Insight not found")
+    try:
+        out = await promote_insight(db, row)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    await db.commit()
+    return {"success": True, **out, "insight": _insight_resp(row)}
+
+
+@router.post("/reply-insights/{insight_id}/dismiss", response_model=ReplyInsightResponse)
+async def dismiss_reply_insight(insight_id: int, db: AsyncSession = Depends(get_db)):
+    from datetime import datetime as dt
+
+    row = await db.get(ReplyInsight, insight_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Insight not found")
+    row.status = "dismissed"
+    row.reviewed_at = dt.utcnow()
+    await db.commit()
+    await db.refresh(row)
+    return _insight_resp(row)
 
 
 # === AI Learning: Style & Procedures ===

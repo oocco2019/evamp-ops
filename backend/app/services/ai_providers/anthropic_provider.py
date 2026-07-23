@@ -20,7 +20,30 @@ class AnthropicProvider(AIProvider):
             "You are a professional eBay seller customer service assistant.",
             "Your role is to draft helpful, polite, and professional responses to buyers.",
             "Keep responses concise but thorough. Be empathetic and solution-focused.",
+            "Do not invent timelines, refunds, or facts not supported by the thread or playbook.",
+            "Read the full conversation; do not re-ask questions the buyer already answered.",
         ]
+        policies = context.get("policies") or []
+        if policies:
+            parts.append("\n\nREPLY POLICIES (must follow):")
+            for i, p in enumerate(policies, 1):
+                body = p.get("body") if isinstance(p, dict) else str(p)
+                parts.append(f"{i}. {body}")
+        playbook = context.get("playbook_entries") or []
+        if playbook:
+            parts.append("\n\nPLAYBOOK ENTRIES (use when relevant):")
+            for i, e in enumerate(playbook, 1):
+                if isinstance(e, dict):
+                    sym = (e.get("symptom") or "").strip()
+                    res = (e.get("resolution") or "").strip()
+                    line = f"{i}. {res}" if not sym else f"{i}. Symptom: {sym} → {res}"
+                else:
+                    line = f"{i}. {e}"
+                parts.append(line)
+        product = (context.get("product_context") or "").strip()
+        if product:
+            parts.append(f"\n\nPRODUCT CONTEXT:\n{product}")
+        # Legacy fallbacks
         if context.get("global_instructions"):
             parts.append(f"\n\nGlobal instructions from the seller:\n{context['global_instructions']}")
         if context.get("sku_instructions"):

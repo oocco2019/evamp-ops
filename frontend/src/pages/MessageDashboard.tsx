@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import { messagesAPI, settingsAPI, type ThreadSummary, type ThreadDetail, type MessageResp, type MessageMediaItem, type EmailTemplate } from '../services/api'
 import { getInstructionsDisplayValue } from '../utils/voiceInstructionsDisplay'
 
@@ -134,6 +135,12 @@ export default function MessageDashboard() {
   useEffect(() => {
     liveTranscriptRef.current = liveTranscript
   }, [liveTranscript])
+
+  const { data: insightPendingCount } = useQuery({
+    queryKey: ['reply-insights-pending-count'],
+    queryFn: async () => (await messagesAPI.replyInsightsPendingCount()).data,
+    refetchInterval: 60_000,
+  })
 
   const toggleVoiceInstructions = useCallback(() => {
     const SpeechRecognitionAPI =
@@ -710,9 +717,17 @@ export default function MessageDashboard() {
         <h1 className="text-3xl font-bold text-gray-900">Customer Service</h1>
         <Link
           to="/ai-instructions"
-          className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+          className="relative inline-flex items-center px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
         >
           AI Instructions
+          {(insightPendingCount?.count ?? 0) > 0 ? (
+            <span
+              className="ml-1.5 inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full bg-amber-500 text-white text-xs font-bold"
+              title={`${insightPendingCount?.count} insight(s) to review`}
+            >
+              +
+            </span>
+          ) : null}
         </Link>
       </div>
 

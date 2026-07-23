@@ -818,12 +818,36 @@ export interface ThreadDetail {
   messages: MessageResp[]
 }
 
-export interface AIInstruction {
+export interface ReplyPolicy {
   id: number
-  type: 'global' | 'sku'
-  sku_code: string | null
-  item_details: string | null
-  instructions: string
+  body: string
+  enabled: boolean
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ReplyPlaybookEntry {
+  id: number
+  symptom: string
+  resolution: string
+  sku_scope: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface ReplyInsight {
+  id: number
+  status: string
+  kind: 'policy' | 'playbook' | string
+  title: string | null
+  body: string
+  symptom: string | null
+  sku_scope: string
+  source: string
+  occurrence_count: number
+  evidence: Record<string, unknown> | null
   created_at: string
   updated_at: string
 }
@@ -899,30 +923,46 @@ export const messagesAPI = {
       `/api/messages/threads/${threadId}/translate-all`
     ),
 
-  // AI Instructions (CS06)
-  listAIInstructions: (type?: 'global' | 'sku') =>
-    api.get<AIInstruction[]>('/api/messages/ai-instructions', {
-      params: type ? { type } : {},
-    }),
-  createAIInstruction: (data: {
-    type: 'global' | 'sku'
-    sku_code?: string
-    item_details?: string
-    instructions: string
-  }) => api.post<AIInstruction>('/api/messages/ai-instructions', data),
-  getAIInstruction: (id: number) =>
-    api.get<AIInstruction>(`/api/messages/ai-instructions/${id}`),
-  updateAIInstruction: (
+  // Reply policies & playbook (AI Instructions)
+  listReplyPolicies: () => api.get<ReplyPolicy[]>('/api/messages/reply-policies'),
+  createReplyPolicy: (data: { body: string; enabled?: boolean; sort_order?: number }) =>
+    api.post<ReplyPolicy>('/api/messages/reply-policies', data),
+  updateReplyPolicy: (
     id: number,
-    data: { item_details?: string; instructions?: string }
-  ) => api.put<AIInstruction>(`/api/messages/ai-instructions/${id}`, data),
-  deleteAIInstruction: (id: number) =>
-    api.delete(`/api/messages/ai-instructions/${id}`),
-  /** Generate global instruction from message history; result appears in list. */
-  generateGlobalInstruction: () =>
-    api.post<{ success: boolean; message: string; instructions?: string }>(
-      '/api/messages/generate-global-instruction'
+    data: { body?: string; enabled?: boolean; sort_order?: number }
+  ) => api.put<ReplyPolicy>(`/api/messages/reply-policies/${id}`, data),
+  deleteReplyPolicy: (id: number) => api.delete(`/api/messages/reply-policies/${id}`),
+
+  listReplyPlaybook: () => api.get<ReplyPlaybookEntry[]>('/api/messages/reply-playbook'),
+  createReplyPlaybook: (data: {
+    symptom?: string
+    resolution: string
+    sku_scope?: string
+    enabled?: boolean
+  }) => api.post<ReplyPlaybookEntry>('/api/messages/reply-playbook', data),
+  updateReplyPlaybook: (
+    id: number,
+    data: {
+      symptom?: string
+      resolution?: string
+      sku_scope?: string
+      enabled?: boolean
+    }
+  ) => api.put<ReplyPlaybookEntry>(`/api/messages/reply-playbook/${id}`, data),
+  deleteReplyPlaybook: (id: number) => api.delete(`/api/messages/reply-playbook/${id}`),
+
+  listReplyInsights: (status?: string) =>
+    api.get<ReplyInsight[]>('/api/messages/reply-insights', {
+      params: status ? { status } : {},
+    }),
+  replyInsightsPendingCount: () =>
+    api.get<{ count: number }>('/api/messages/reply-insights/pending-count'),
+  promoteReplyInsight: (id: number) =>
+    api.post<{ success: boolean; promoted_as: string; id: number }>(
+      `/api/messages/reply-insights/${id}/promote`
     ),
+  dismissReplyInsight: (id: number) =>
+    api.post<ReplyInsight>(`/api/messages/reply-insights/${id}/dismiss`),
 }
 
 // Get video ID from an eBay listing (item number or URL)

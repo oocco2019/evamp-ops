@@ -97,33 +97,64 @@ class OpenAIProvider(AIProvider):
         parts = [
             "You are a professional customer service assistant for an eBay seller.",
             "Your goal is to provide helpful, accurate, and courteous responses.",
+            "Do not invent timelines, refunds, or facts not supported by the thread or playbook.",
+            "Read the full conversation; do not re-ask questions the buyer already answered.",
         ]
-        
+
+        policies = context.get("policies") or []
+        if policies:
+            parts.append("\nREPLY POLICIES (must follow):")
+            for i, p in enumerate(policies, 1):
+                body = p.get("body") if isinstance(p, dict) else str(p)
+                parts.append(f"{i}. {body}")
+
+        playbook = context.get("playbook_entries") or []
+        if playbook:
+            parts.append("\nPLAYBOOK ENTRIES (use when relevant):")
+            for i, e in enumerate(playbook, 1):
+                if isinstance(e, dict):
+                    sym = (e.get("symptom") or "").strip()
+                    res = (e.get("resolution") or "").strip()
+                    line = f"{i}. {res}" if not sym else f"{i}. Symptom: {sym} → {res}"
+                else:
+                    line = f"{i}. {e}"
+                parts.append(line)
+
+        product = (context.get("product_context") or "").strip()
+        if product:
+            parts.append(f"\nPRODUCT CONTEXT:\n{product}")
+
         if context.get("global_instructions"):
             parts.append(f"\nGlobal Guidelines:\n{context['global_instructions']}")
-        
+
         if context.get("sku_instructions"):
             parts.append(f"\nProduct-Specific Information:\n{context['sku_instructions']}")
-        
+
         return "\n".join(parts)
-    
+
     def _build_user_message(self, prompt: str, context: Dict[str, Any]) -> str:
         """Build user message with context"""
         parts = []
-        
+
         if context.get("thread_history"):
             parts.append("Previous conversation:")
             for msg in context["thread_history"]:
-                sender = msg.get("sender", "Unknown")
+                role = msg.get("role") or msg.get("sender") or "Unknown"
+                if role == "buyer":
+                    sender = "Buyer"
+                elif role == "seller":
+                    sender = "Seller"
+                else:
+                    sender = str(role)
                 content = msg.get("content", "")
                 parts.append(f"{sender}: {content}")
             parts.append("")
-        
+
         if context.get("knowledge_base"):
             parts.append("Relevant past interactions:")
             parts.append(context["knowledge_base"])
             parts.append("")
-        
+
         parts.append(prompt)
-        
+
         return "\n".join(parts)

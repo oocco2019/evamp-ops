@@ -135,8 +135,8 @@ class MessageMediaBlob(Base):
 
 class AIInstruction(Base):
     """
-    Custom AI instructions for message drafting (CS06).
-    Global and SKU-specific instructions.
+    Legacy global/SKU instruction blobs. Kept for schema compatibility;
+    compose uses ReplyPolicy / ReplyPlaybookEntry instead.
     """
     __tablename__ = "ai_instructions"
     
@@ -173,6 +173,90 @@ class AIInstruction(Base):
         if self.type == "global":
             return "<AIInstruction global>"
         return f"<AIInstruction SKU={self.sku_code}>"
+
+
+class ReplyPolicy(Base):
+    """Durable reply-writing rules (style/liability). Injected when enabled."""
+    __tablename__ = "reply_policies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class ReplyPlaybookEntry(Base):
+    """Symptom → resolution knowledge, scoped by SKU and optional keywords."""
+    __tablename__ = "reply_playbook_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symptom: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    resolution: Mapped[str] = mapped_column(Text, nullable=False)
+    sku_scope: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+        default="*",
+        comment="*, exact, prefix dee*, or comma list dee01, dee02, uke01",
+    )
+    trigger_keywords: Mapped[Optional[list]] = mapped_column(
+        JSON, nullable=True, comment="Optional list of keyword strings"
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class AIComposition(Base):
+    """Log of each AI draft composition for learning / adherence review."""
+    __tablename__ = "ai_compositions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    thread_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    sku: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    prompt_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    policy_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    playbook_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    model_output: Mapped[str] = mapped_column(Text, nullable=False)
+    adherence_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ReplyInsight(Base):
+    """
+    Pending instruction candidates mined from repeated Instructions-for-AI prompts
+    and adherence patterns. Not injected into drafts until promoted to policy/playbook.
+    """
+    __tablename__ = "reply_insights"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", comment="pending|promoted|dismissed"
+    )
+    kind: Mapped[str] = mapped_column(
+        String(20), nullable=False, comment="policy|playbook"
+    )
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    symptom: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sku_scope: Mapped[str] = mapped_column(String(100), nullable=False, default="*")
+    source: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="extra_instructions"
+    )
+    occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    evidence: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class SyncMetadata(Base):
@@ -259,6 +343,13 @@ class DraftFeedback(Base):
     
     # Was the draft edited?
     was_edited: Mapped[bool] = mapped_column(Boolean, default=False)
+    
+    # Link to composition log when available
+    composition_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("ai_compositions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     
     # Procedure used (if any)
     procedure_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)

@@ -12,7 +12,7 @@ from app.models.settings import (
     OCInboundOrder,
 )
 from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem
-from app.models.messages import MessageThread, Message, AIInstruction, SyncMetadata
+from app.models.messages import MessageThread, Message, AIInstruction, SyncMetadata, ReplyPolicy, ReplyPlaybookEntry, AIComposition, ReplyInsight
 from app.models.listing_video import EbayListingSkuCache
 
 __all__ = [
@@ -35,6 +35,10 @@ __all__ = [
     "MessageThread",
     "Message",
     "AIInstruction",
+    "ReplyPolicy",
+    "ReplyPlaybookEntry",
+    "AIComposition",
+    "ReplyInsight",
     "SyncMetadata",
     "EbayListingSkuCache",
 ]
