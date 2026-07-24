@@ -19,6 +19,7 @@ from app.services.label_compose.layout import (
     LabelInput,
     Slot,
     layout_for_variant,
+    remap_slots_by_content_size,
     slots_from_overrides,
 )
 from app.services.label_compose.render import preview_png_base64, render_a4
@@ -162,28 +163,10 @@ async def compose_labels(
             raw_slots = cached.slots
             if isinstance(raw_slots, dict) and "slots" in raw_slots:
                 raw_slots = raw_slots["slots"]
-            slots = [Slot.from_dict(s) for s in raw_slots]
-            by_idx = {L.source_index: L for L in labels}
-            fixed: list[Slot] = []
-            for s in slots:
-                lab = by_idx.get(s.source_index)
-                if not lab:
-                    continue
-                fixed.append(
-                    Slot(
-                        source_index=s.source_index,
-                        x=s.x,
-                        y=s.y,
-                        width=s.width,
-                        height=s.height,
-                        scale=s.scale,
-                        crop_llx=lab.box.llx,
-                        crop_lly=lab.box.lly,
-                        crop_urx=lab.box.urx,
-                        crop_ury=lab.box.ury,
-                    )
-                )
-            if len(fixed) == len(labels):
+            cached_slots = [Slot.from_dict(s) for s in raw_slots]
+            # Match by content size: fingerprint is order-invariant, source_index is not.
+            fixed = remap_slots_by_content_size(cached_slots, labels)
+            if fixed is not None:
                 slots = fixed
                 cache_hit = True
                 pdf_bytes = render_a4(pdfs, slots)
