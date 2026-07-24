@@ -85,6 +85,10 @@ class Slot:
             crop_ury=float(crop.get("ury", 0)),
         )
 
+    @property
+    def crop_size_pt(self) -> tuple[float, float]:
+        return (abs(self.crop_urx - self.crop_llx), abs(self.crop_ury - self.crop_lly))
+
 
 def _place_base(
     label: LabelInput,
@@ -589,6 +593,65 @@ def layout_for_variant(labels: Sequence[LabelInput], variant: int) -> Optional[l
             return finalize_slots(found[1])
     best = generate_arrangements(labels)
     return best[0] if best else None
+
+
+def remap_slots_by_content_size(
+    cached_slots: Sequence[Slot],
+    labels: Sequence[LabelInput],
+) -> Optional[list[Slot]]:
+    """
+    Rebind cached slot geometry to the current upload order.
+
+    Fingerprints are order-invariant (sorted rounded content sizes), but cached
+    slots are stored with the original upload ``source_index``. Re-uploading the
+    same size mix in a different file order must match by content size — not by
+    index — or crops are stretched into the wrong slot.
+    """
+    from collections import defaultdict
+
+    from app.services.label_compose.fingerprint import box_size_mm, round_mm
+
+    if len(cached_slots) != len(labels):
+        return None
+
+    by_size: dict[tuple[int, int], list[LabelInput]] = defaultdict(list)
+    for lab in labels:
+        w_mm, h_mm = box_size_mm(lab.box)
+        by_size[(round_mm(w_mm), round_mm(h_mm))].append(lab)
+
+    used: set[int] = set()
+    fixed: list[Slot] = []
+    for slot in cached_slots:
+        cw_pt, ch_pt = slot.crop_size_pt
+        if cw_pt <= 0 or ch_pt <= 0:
+            return None
+        key = (round_mm(cw_pt / PT_PER_MM), round_mm(ch_pt / PT_PER_MM))
+        lab: Optional[LabelInput] = None
+        for candidate in by_size.get(key, []):
+            if candidate.source_index not in used:
+                lab = candidate
+                break
+        if lab is None:
+            return None
+        used.add(lab.source_index)
+        fixed.append(
+            Slot(
+                source_index=lab.source_index,
+                x=slot.x,
+                y=slot.y,
+                width=slot.width,
+                height=slot.height,
+                scale=slot.scale,
+                crop_llx=lab.box.llx,
+                crop_lly=lab.box.lly,
+                crop_urx=lab.box.urx,
+                crop_ury=lab.box.ury,
+            )
+        )
+
+    if len(fixed) != len(labels) or len(used) != len(labels):
+        return None
+    return fixed
 
 
 def slots_from_overrides(
