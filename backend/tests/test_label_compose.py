@@ -174,9 +174,14 @@ def _composed_ink_ratio(pdf_bytes: bytes) -> float:
     )
     out = render_a4({0: pdf_norm}, [slot])
     img = convert_from_bytes(out, dpi=72, first_page=1, last_page=1)[0].convert("RGB")
-    pixels = list(img.getdata())
-    nonwhite = sum(1 for r, g, b in pixels if r < 250 or g < 250 or b < 250)
-    return nonwhite / len(pixels)
+    # getdata() is deprecated in Pillow 14; flatten via tobytes + frombytes-sized walk.
+    raw = img.tobytes()
+    nonwhite = 0
+    total = img.size[0] * img.size[1]
+    for i in range(0, len(raw), 3):
+        if raw[i] < 250 or raw[i + 1] < 250 or raw[i + 2] < 250:
+            nonwhite += 1
+    return nonwhite / total
 
 
 def test_normalize_clears_page_rotate():

@@ -33,17 +33,28 @@ def normalize_pdf_for_compose(pdf_bytes: bytes) -> bytes:
     from pypdf import PdfReader, PdfWriter, Transformation
     from pypdf.generic import RectangleObject
 
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    if not reader.pages:
+    probe = PdfReader(io.BytesIO(pdf_bytes))
+    if not probe.pages:
         return pdf_bytes
 
-    writer = PdfWriter()
-    changed = False
-    for page in reader.pages:
+    needs_work = False
+    for page in probe.pages:
+        if int(page.get("/Rotate") or 0) % 360:
+            needs_work = True
+            break
+        mb = page.mediabox
+        if abs(float(mb.left)) > _MEDIABOX_ORIGIN_EPS or abs(float(mb.bottom)) > _MEDIABOX_ORIGIN_EPS:
+            needs_work = True
+            break
+    if not needs_work:
+        return pdf_bytes
+
+    # Clone into a writer first — transfer_rotation_to_content requires an attached page.
+    writer = PdfWriter(clone_from=io.BytesIO(pdf_bytes))
+    for page in writer.pages:
         rotate = int(page.get("/Rotate") or 0) % 360
         if rotate:
             page.transfer_rotation_to_content()
-            changed = True
 
         mb = page.mediabox
         left = float(mb.left)
@@ -72,11 +83,7 @@ def normalize_pdf_for_compose(pdf_bytes: bytes) -> bytes:
                     )
                 except Exception:
                     pass
-            changed = True
-        writer.add_page(page)
 
-    if not changed:
-        return pdf_bytes
     out = io.BytesIO()
     writer.write(out)
     return out.getvalue()
