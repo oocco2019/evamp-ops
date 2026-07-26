@@ -1,9 +1,19 @@
 """Unit tests for label compose detect / layout / fingerprint (no poppler required)."""
 
-from app.services.label_compose.detect import ContentBox, content_box_from_rgb
+import io
+
+from app.services.label_compose.detect import (
+    ContentBox,
+    content_box_from_rgb,
+    load_input_as_pdf_and_box,
+    normalize_pdf_for_compose,
+)
 from app.services.label_compose.fingerprint import fingerprint_from_boxes
-from app.services.label_compose.layout import LabelInput, generate_arrangements
+from app.services.label_compose.layout import LabelInput, Slot, generate_arrangements
+from app.services.label_compose.render import render_a4
 from PIL import Image, ImageDraw
+from pypdf import PageObject, PdfReader, PdfWriter
+from pypdf.generic import DecodedStreamObject, NameObject, NumberObject, RectangleObject
 
 
 def _box(w: float, h: float, x: float = 0, y: float = 0) -> ContentBox:
@@ -114,3 +124,101 @@ def test_single_label_arrangement():
     # Single label centered on the page
     assert abs(s.x - (595 - s.width) / 2) < 1.0
     assert abs(s.y - (842 - s.height) / 2) < 1.0
+
+
+def _make_ink_pdf(
+    *,
+    rotate: int = 0,
+    mediabox: list[float] | None = None,
+    content_rect: tuple[float, float, float, float] | None = None,
+) -> bytes:
+    """Minimal carrier-like PDF: black rect on an otherwise blank page."""
+    if mediabox is None:
+        mediabox = [0.0, 0.0, 200.0, 100.0]
+    llx, lly, urx, ury = mediabox
+    width, height = urx - llx, ury - lly
+    if content_rect is None:
+        content_rect = (llx + 20, lly + 20, llx + 120, lly + 70)
+    cx0, cy0, cx1, cy1 = content_rect
+    stream = DecodedStreamObject()
+    stream.set_data(
+        f"q\n0 0 0 rg\n{cx0} {cy0} {cx1 - cx0} {cy1 - cy0} re\nf\nQ\n".encode()
+    )
+    page = PageObject.create_blank_page(width=width, height=height)
+    page.mediabox = RectangleObject(mediabox)
+    page[NameObject("/Contents")] = stream
+    if rotate:
+        page[NameObject("/Rotate")] = NumberObject(rotate)
+    writer = PdfWriter()
+    writer.add_page(page)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def _composed_ink_ratio(pdf_bytes: bytes) -> float:
+    from pdf2image import convert_from_bytes
+
+    pdf_norm, box = load_input_as_pdf_and_box(pdf_bytes, "label.pdf", "application/pdf")
+    slot = Slot(
+        source_index=0,
+        x=50,
+        y=50,
+        width=box.width,
+        height=box.height,
+        scale=1.0,
+        crop_llx=box.llx,
+        crop_lly=box.lly,
+        crop_urx=box.urx,
+        crop_ury=box.ury,
+    )
+    out = render_a4({0: pdf_norm}, [slot])
+    img = convert_from_bytes(out, dpi=72, first_page=1, last_page=1)[0].convert("RGB")
+    pixels = list(img.getdata())
+    nonwhite = sum(1 for r, g, b in pixels if r < 250 or g < 250 or b < 250)
+    return nonwhite / len(pixels)
+
+
+def test_normalize_clears_page_rotate():
+    raw = _make_ink_pdf(rotate=90)
+    assert int(PdfReader(io.BytesIO(raw)).pages[0].get("/Rotate") or 0) == 90
+    normalized = normalize_pdf_for_compose(raw)
+    page = PdfReader(io.BytesIO(normalized)).pages[0]
+    assert int(page.get("/Rotate") or 0) % 360 == 0
+    # Visual page after 90° is portrait relative to the original landscape MediaBox.
+    assert float(page.mediabox.width) == 100.0
+    assert float(page.mediabox.height) == 200.0
+
+
+def test_normalize_shifts_nonzero_mediabox_origin():
+    raw = _make_ink_pdf(
+        mediabox=[1000.0, 2000.0, 1200.0, 2100.0],
+        content_rect=(1020.0, 2020.0, 1120.0, 2070.0),
+    )
+    mb = PdfReader(io.BytesIO(raw)).pages[0].mediabox
+    assert float(mb.left) == 1000.0
+    normalized = normalize_pdf_for_compose(raw)
+    page = PdfReader(io.BytesIO(normalized)).pages[0]
+    assert abs(float(page.mediabox.left)) < 1e-6
+    assert abs(float(page.mediabox.bottom)) < 1e-6
+    assert float(page.mediabox.width) == 200.0
+    assert float(page.mediabox.height) == 100.0
+
+
+def test_compose_preserves_ink_for_rotated_carrier_pdf():
+    baseline = _composed_ink_ratio(_make_ink_pdf(rotate=0))
+    assert baseline > 0.005
+    for rotate in (90, 180, 270):
+        ratio = _composed_ink_ratio(_make_ink_pdf(rotate=rotate))
+        assert ratio > baseline * 0.85, f"rotate={rotate} lost ink ({ratio} vs {baseline})"
+
+
+def test_compose_preserves_ink_for_nonzero_mediabox_origin():
+    baseline = _composed_ink_ratio(_make_ink_pdf(rotate=0))
+    ratio = _composed_ink_ratio(
+        _make_ink_pdf(
+            mediabox=[1000.0, 2000.0, 1200.0, 2100.0],
+            content_rect=(1020.0, 2020.0, 1120.0, 2070.0),
+        )
+    )
+    assert ratio > baseline * 0.85, f"nonzero MediaBox origin blanked label ({ratio})"

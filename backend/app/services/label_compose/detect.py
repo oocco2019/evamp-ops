@@ -15,6 +15,72 @@ from app.services.label_compose import (
     RASTER_DPI,
 )
 
+# MediaBox origin offsets below this (pt) are treated as already origin-aligned.
+_MEDIABOX_ORIGIN_EPS = 1e-6
+
+
+def normalize_pdf_for_compose(pdf_bytes: bytes) -> bytes:
+    """
+    Put each page into a coordinate space that matches pdf2image + CropBox render.
+
+    Carrier PDFs often set /Rotate and/or a non-zero MediaBox origin. pdf2image
+    rasters the *visual* page (after rotation, origin at 0,0), but pypdf CropBox
+    applies in unrotated user space with MediaBox offsets. Detecting a box from
+    the raster and cropping the raw page then yields blank or shifted labels.
+
+    Idempotent: already-normalized PDFs are returned unchanged in effect.
+    """
+    from pypdf import PdfReader, PdfWriter, Transformation
+    from pypdf.generic import RectangleObject
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    if not reader.pages:
+        return pdf_bytes
+
+    writer = PdfWriter()
+    changed = False
+    for page in reader.pages:
+        rotate = int(page.get("/Rotate") or 0) % 360
+        if rotate:
+            page.transfer_rotation_to_content()
+            changed = True
+
+        mb = page.mediabox
+        left = float(mb.left)
+        bottom = float(mb.bottom)
+        width = float(mb.width)
+        height = float(mb.height)
+        if abs(left) > _MEDIABOX_ORIGIN_EPS or abs(bottom) > _MEDIABOX_ORIGIN_EPS:
+            page.add_transformation(Transformation().translate(-left, -bottom))
+            page.mediabox = RectangleObject([0, 0, width, height])
+            for attr in ("cropbox", "trimbox", "bleedbox", "artbox"):
+                try:
+                    box = getattr(page, attr, None)
+                    if box is None:
+                        continue
+                    setattr(
+                        page,
+                        attr,
+                        RectangleObject(
+                            [
+                                float(box.left) - left,
+                                float(box.bottom) - bottom,
+                                float(box.right) - left,
+                                float(box.top) - bottom,
+                            ]
+                        ),
+                    )
+                except Exception:
+                    pass
+            changed = True
+        writer.add_page(page)
+
+    if not changed:
+        return pdf_bytes
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
 
 @dataclass(frozen=True)
 class ContentBox:
@@ -141,6 +207,7 @@ def rasterise_pdf_page(pdf_bytes: bytes, page_index: int = 0) -> tuple[Image.Ima
     from pdf2image import convert_from_bytes
     from pypdf import PdfReader
 
+    pdf_bytes = normalize_pdf_for_compose(pdf_bytes)
     reader = PdfReader(io.BytesIO(pdf_bytes))
     if page_index < 0 or page_index >= len(reader.pages):
         raise ValueError(f"PDF has no page index {page_index}")
@@ -193,10 +260,13 @@ def load_input_as_pdf_and_box(
         box, pdf_bytes = detect_content_box_png(data)
         return pdf_bytes, box
     if is_pdf or data[:4] == b"%PDF":
+        # Normalize before detect so returned PDF bytes match crop coordinates.
+        data = normalize_pdf_for_compose(data)
         return data, detect_content_box_pdf(data)
     # Try PNG then PDF
     try:
         box, pdf_bytes = detect_content_box_png(data)
         return pdf_bytes, box
     except Exception:
+        data = normalize_pdf_for_compose(data)
         return data, detect_content_box_pdf(data)
