@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from 'react'
+import { useState, useEffect, useRef, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -47,6 +47,52 @@ function formatProfitPair(totalGbp: number | null): ReactNode {
 type SkuSortKey = 'sku_code' | 'quantity_sold' | 'profit'
 type CountrySortKey = 'country' | 'quantity_sold' | 'profit'
 type ProfitViewMode = 'this_year' | 'last_year' | 'custom'
+
+/**
+ * Native date inputs fire React `onChange`/`input` while scrolling months (often day 1).
+ * Commit only on the browser `change` event, which fires when a day is chosen.
+ */
+function CommitOnDaySelectDateInput({
+  draft,
+  onDraft,
+  onCommit,
+  className,
+}: {
+  draft: string
+  onDraft: (v: string) => void
+  onCommit: (v: string) => void
+  className?: string
+}) {
+  const ref = useRef<HTMLInputElement>(null)
+  const onCommitRef = useRef(onCommit)
+  const onDraftRef = useRef(onDraft)
+  useEffect(() => {
+    onCommitRef.current = onCommit
+    onDraftRef.current = onDraft
+  }, [onCommit, onDraft])
+
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const handleChange = () => {
+      const v = el.value
+      onDraftRef.current(v)
+      onCommitRef.current(v)
+    }
+    el.addEventListener('change', handleChange)
+    return () => el.removeEventListener('change', handleChange)
+  }, [])
+
+  return (
+    <input
+      ref={ref}
+      type="date"
+      value={draft}
+      onChange={(e) => onDraft(e.target.value)}
+      className={className}
+    />
+  )
+}
 
 const parseISODate = (value: string): Date | null => {
   if (!value) return null
@@ -115,6 +161,9 @@ export default function SalesAnalytics() {
   const [profitViewMode, setProfitViewMode] = useState<ProfitViewMode>('this_year')
   const [profitCustomFrom, setProfitCustomFrom] = useState(() => `${new Date().getFullYear()}-01-01`)
   const [profitCustomTo, setProfitCustomTo] = useState(() => todayIso())
+  /** Draft dates while the picker is open; chart uses committed values only. */
+  const [profitFromDraft, setProfitFromDraft] = useState(() => `${new Date().getFullYear()}-01-01`)
+  const [profitToDraft, setProfitToDraft] = useState(() => todayIso())
   /** Default: apply PROFIT_TAX_RATE to profit (displayed "after tax" profit). */
   const [profitTaxIncluded, setProfitTaxIncluded] = useState(true)
 
@@ -427,7 +476,7 @@ export default function SalesAnalytics() {
               <option value="1m">Last month</option>
               <option value="3m">Last 3 months</option>
               <option value="6m">Last 6 months</option>
-              <option value="1y">Last year</option>
+              <option value="1y">Last 12 months</option>
               <option value="custom">Custom</option>
             </select>
           </div>
@@ -694,7 +743,14 @@ export default function SalesAnalytics() {
               <span className="font-medium whitespace-nowrap">View</span>
               <select
                 value={profitViewMode}
-                onChange={(e) => setProfitViewMode(e.target.value as ProfitViewMode)}
+                onChange={(e) => {
+                  const next = e.target.value as ProfitViewMode
+                  setProfitViewMode(next)
+                  if (next === 'custom') {
+                    setProfitFromDraft(profitCustomFrom)
+                    setProfitToDraft(profitCustomTo)
+                  }
+                }}
                 className="rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm min-w-[10rem]"
               >
                 <option value="this_year">This year</option>
@@ -707,19 +763,19 @@ export default function SalesAnalytics() {
               <>
                 <label className="flex items-center gap-2 text-sm text-gray-700 shrink-0">
                   <span className="font-medium whitespace-nowrap">From</span>
-                  <input
-                    type="date"
-                    value={profitCustomFrom}
-                    onChange={(e) => setProfitCustomFrom(e.target.value)}
+                  <CommitOnDaySelectDateInput
+                    draft={profitFromDraft}
+                    onDraft={setProfitFromDraft}
+                    onCommit={setProfitCustomFrom}
                     className="rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
                   />
                 </label>
                 <label className="flex items-center gap-2 text-sm text-gray-700 shrink-0">
                   <span className="font-medium whitespace-nowrap">To</span>
-                  <input
-                    type="date"
-                    value={profitCustomTo}
-                    onChange={(e) => setProfitCustomTo(e.target.value)}
+                  <CommitOnDaySelectDateInput
+                    draft={profitToDraft}
+                    onDraft={setProfitToDraft}
+                    onCommit={setProfitCustomTo}
                     className="rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
                   />
                 </label>
