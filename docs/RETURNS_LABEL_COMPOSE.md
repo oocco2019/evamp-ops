@@ -28,6 +28,9 @@ Compose any number of shipping label PDFs/PNGs onto a single A4 sheet for printi
 ## Safety valves
 
 - Max 100 files / ~80MB per request (not a product limit of “3 or 4”).
+- Detect rasters are capped at **4096px** on the long side before flood-fill / PNG→PDF
+  encode. A compressed phone screenshot can still be tens of megapixels under the byte
+  cap; without this bound, nested Python bool grids OOM the worker.
 - Always one A4 page — no multi-page spill in v1.
 
 ## Ops

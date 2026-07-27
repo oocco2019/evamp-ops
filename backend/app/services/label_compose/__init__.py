@@ -11,6 +11,9 @@ RASTER_DPI = 72
 BG_THRESHOLD = 245
 MIN_COMPONENT_PX = 4
 CONTENT_PAD_MM = 2.5
+# Flood-fill ink detection uses nested Python bool grids (~O(W*H) objects).
+# Cap the longest side so an 80MB-compressed PNG screenshot cannot OOM the worker.
+MAX_DETECT_SIDE = 4096
 
 # Layout — equal minimum clearance on all sides (sticky tape), then center the group
 SIDE_MARGIN_MM = 30.0  # 3cm

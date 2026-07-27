@@ -10,6 +10,7 @@ from PIL import Image
 from app.services.label_compose import (
     BG_THRESHOLD,
     CONTENT_PAD_MM,
+    MAX_DETECT_SIDE,
     MIN_COMPONENT_PX,
     PT_PER_MM,
     RASTER_DPI,
@@ -44,6 +45,19 @@ def _load_rgb(image: Image.Image) -> Image.Image:
         bg.paste(image, mask=image.split()[-1])
         return bg
     return image.convert("RGB")
+
+
+def _cap_raster_for_detect(
+    rgb: Image.Image, max_side: int | None = None
+) -> Image.Image:
+    """Downscale oversized rasters before flood-fill; keep aspect ratio."""
+    limit = MAX_DETECT_SIDE if max_side is None else max_side
+    w, h = rgb.size
+    if w <= 0 or h <= 0 or max(w, h) <= limit:
+        return rgb
+    out = rgb.copy()
+    out.thumbnail((limit, limit), Image.Resampling.LANCZOS)
+    return out
 
 
 def _ink_mask(rgb: Image.Image, threshold: int = BG_THRESHOLD) -> list[list[bool]]:
@@ -107,7 +121,10 @@ def content_box_from_rgb(
     if w_px <= 0 or h_px <= 0:
         return ContentBox(0, 0, page_width_pt, page_height_pt)
 
-    mask = _ink_mask(rgb, threshold=threshold)
+    # Detect on a capped raster; map ink bounds back to full page coordinates.
+    work = _cap_raster_for_detect(rgb)
+    ww, wh = work.size
+    mask = _ink_mask(work, threshold=threshold)
     components = _component_bboxes(mask)
     if not components:
         # Empty / all white — use full page
@@ -119,8 +136,8 @@ def content_box_from_rgb(
     max_y = max(c[3] for c in components)
 
     # Raster origin is top-left; PDF origin is bottom-left
-    sx = page_width_pt / w_px
-    sy = page_height_pt / h_px
+    sx = page_width_pt / ww
+    sy = page_height_pt / wh
     llx = min_x * sx
     urx = (max_x + 1) * sx
     ury = page_height_pt - min_y * sy
@@ -169,9 +186,10 @@ def detect_content_box_pdf(pdf_bytes: bytes, page_index: int = 0) -> ContentBox:
 def detect_content_box_png(png_bytes: bytes) -> tuple[ContentBox, bytes]:
     """
     Detect content on a PNG and return (box, single-page PDF bytes).
-    PDF page size matches the image pixel size at 72 DPI (1 px = 1 pt).
+    PDF page size matches the (capped) image pixel size at 72 DPI (1 px = 1 pt).
+    Oversized screenshots are downscaled before detect + PDF encode to bound memory.
     """
-    rgb = _load_rgb(Image.open(io.BytesIO(png_bytes)))
+    rgb = _cap_raster_for_detect(_load_rgb(Image.open(io.BytesIO(png_bytes))))
     page_w, page_h = float(rgb.size[0]), float(rgb.size[1])
     box = content_box_from_rgb(rgb, page_w, page_h)
     pdf_buf = io.BytesIO()

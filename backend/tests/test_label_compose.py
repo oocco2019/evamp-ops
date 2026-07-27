@@ -1,6 +1,13 @@
 """Unit tests for label compose detect / layout / fingerprint (no poppler required)."""
 
-from app.services.label_compose.detect import ContentBox, content_box_from_rgb
+import io
+
+from app.services.label_compose.detect import (
+    ContentBox,
+    _cap_raster_for_detect,
+    content_box_from_rgb,
+    detect_content_box_png,
+)
 from app.services.label_compose.fingerprint import fingerprint_from_boxes
 from app.services.label_compose.layout import LabelInput, generate_arrangements
 from PIL import Image, ImageDraw
@@ -19,6 +26,57 @@ def test_content_box_ignores_white_margins():
     assert box.height < 150
     assert box.llx < 40
     assert box.ury > 150  # near top of page in PDF coords
+
+
+def test_cap_raster_downscales_long_side():
+    img = Image.new("RGB", (800, 600), (255, 255, 255))
+    capped = _cap_raster_for_detect(img, max_side=400)
+    assert max(capped.size) == 400
+    assert capped.size[0] / capped.size[1] == img.size[0] / img.size[1]
+
+
+def test_content_box_maps_capped_raster_to_full_page():
+    """Ink on a large page must map to page coords even when detect downscales."""
+    w, h = 800, 600
+    img = Image.new("RGB", (w, h), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    # Black block in the lower half of the raster (PDF coords flip Y).
+    draw.rectangle([40, 300, 200, 500], fill=(0, 0, 0))
+    box = content_box_from_rgb(img, float(w), float(h), pad_mm=0)
+    # Same image with forced tiny detect side should yield a similar box
+    import app.services.label_compose.detect as detect_mod
+
+    original = detect_mod.MAX_DETECT_SIDE
+    try:
+        detect_mod.MAX_DETECT_SIDE = 200
+        box_capped = content_box_from_rgb(img, float(w), float(h), pad_mm=0)
+    finally:
+        detect_mod.MAX_DETECT_SIDE = original
+
+    assert abs(box_capped.llx - box.llx) < 15
+    assert abs(box_capped.lly - box.lly) < 15
+    assert abs(box_capped.urx - box.urx) < 15
+    assert abs(box_capped.ury - box.ury) < 15
+    assert box_capped.width > 50
+    assert box_capped.height > 50
+
+
+def test_detect_content_box_png_caps_before_pdf_encode(monkeypatch):
+    """PNG path must downscale before encode so huge screenshots cannot OOM."""
+    import app.services.label_compose.detect as detect_mod
+
+    monkeypatch.setattr(detect_mod, "MAX_DETECT_SIDE", 128)
+    img = Image.new("RGB", (400, 300), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([50, 40, 200, 180], fill=(10, 10, 10))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    box, pdf_bytes = detect_content_box_png(buf.getvalue())
+    assert pdf_bytes[:4] == b"%PDF"
+    assert box.width > 20
+    assert box.height > 20
+    # Encoded page matches capped raster (longest side <= 128)
+    assert max(box.urx, box.ury) <= 128 + 1e-6
 
 
 def test_fingerprint_stable_under_reorder():
