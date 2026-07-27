@@ -89,6 +89,12 @@ class Settings(BaseSettings):
     # eBay import + OC SKU/inventory + OC stock movement + inbound cache. 0 = disabled (browser "Pull latest data" still works).
     INVENTORY_REFRESH_INTERVAL_MINUTES: int = 15
 
+    # Reply draft compose (Messages → Draft reply). Adherence = extra LLM pass(es); off by default for speed.
+    REPLY_DRAFT_ADHERENCE_ENABLED: bool = False
+    REPLY_DRAFT_MAX_REVISES: int = 0
+    REPLY_DRAFT_MAX_THREAD_MESSAGES: int = 24
+    REPLY_DRAFT_MAX_TOKENS: int = 700
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

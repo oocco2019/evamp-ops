@@ -77,3 +77,7 @@ tmp/*.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Local message exports (buyer PII / conversation content)
+backend/exports/
+docs/exports/

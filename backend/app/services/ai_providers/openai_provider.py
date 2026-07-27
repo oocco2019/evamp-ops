@@ -32,7 +32,7 @@ class OpenAIProvider(AIProvider):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message}
             ],
-            max_tokens=self.max_tokens,
+            max_tokens=int(context.get("max_tokens") or self.max_tokens),
             temperature=self.temperature
         )
         

@@ -18,6 +18,7 @@ from app.services.inventory_refresh_scheduler import (
 from app.api import settings as settings_api
 from app.api import stock as stock_api
 from app.api import messages as messages_api
+from app.api import messages_test as messages_test_api
 from app.api import listing_video as listing_video_api
 from app.api import inventory_status as inventory_status_api
 from app.api import lender_summary as lender_summary_api
@@ -125,6 +126,11 @@ app.include_router(
     messages_api.router,
     prefix="/api/messages",
     tags=["messages"]
+)
+app.include_router(
+    messages_test_api.router,
+    prefix="/api/messages-test",
+    tags=["messages-test"]
 )
 app.include_router(
     listing_video_api.router,

@@ -1,7 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { messagesAPI, settingsAPI, type ThreadSummary, type ThreadDetail, type MessageResp, type MessageMediaItem, type EmailTemplate } from '../services/api'
+import {
+  messagesAPI,
+  messagesTestAPI,
+  settingsAPI,
+  type ThreadSummary,
+  type ThreadDetail,
+  type MessageResp,
+  type MessageMediaItem,
+  type EmailTemplate,
+  type RouterDraftResult,
+} from '../services/api'
 import { getInstructionsDisplayValue } from '../utils/voiceInstructionsDisplay'
 
 /** eBay CDN: replace _1 or _12 with _57 in image URL to get full-size (zoomed) image. See eBay KB 2194. */
@@ -92,10 +102,18 @@ function getStoredHeight(key: string): number {
   return BOX_HEIGHT_DEFAULT
 }
 
-export default function MessageDashboard() {
+export type MessageComposeMode = 'legacy' | 'router'
+
+export default function MessageDashboard({
+  composeMode = 'legacy',
+}: {
+  composeMode?: MessageComposeMode
+}) {
+  const isRouter = composeMode === 'router'
   const [threads, setThreads] = useState<ThreadSummary[]>([])
   const [selectedThread, setSelectedThread] = useState<ThreadDetail | null>(null)
   const [_draft, setDraft] = useState('')
+  const [routerDraftMeta, setRouterDraftMeta] = useState<RouterDraftResult | null>(null)
   const [replyContent, setReplyContent] = useState('')
   const [replyAttachments, setReplyAttachments] = useState<MessageMediaItem[]>([])
   const [uploadingAttachment, setUploadingAttachment] = useState(false)
@@ -153,6 +171,7 @@ export default function MessageDashboard() {
     queryKey: ['reply-insights-pending-count'],
     queryFn: async () => (await messagesAPI.replyInsightsPendingCount()).data,
     refetchInterval: 60_000,
+    enabled: !isRouter,
   })
 
   const toggleVoiceInstructions = useCallback(() => {
@@ -298,6 +317,7 @@ export default function MessageDashboard() {
         setLoading(true)
         setError(null)
         setDraft('')
+        setRouterDraftMeta(null)
         setReplyContent('')
       }
       try {
@@ -410,12 +430,28 @@ export default function MessageDashboard() {
       recognitionRef.current.stop()
     }
     try {
-      const res = await messagesAPI.draftReply(
-        selectedThread.thread_id,
-        instructionsForDraft || undefined
-      )
-      setDraft(res.data.draft)
-      setReplyContent(res.data.draft)
+      if (isRouter) {
+        const res = await messagesTestAPI.draft(
+          selectedThread.thread_id,
+          instructionsForDraft || undefined
+        )
+        setRouterDraftMeta(res.data)
+        if (res.data.tier === 3) {
+          setDraft('')
+          setReplyContent('')
+        } else if (res.data.draft) {
+          setDraft(res.data.draft)
+          setReplyContent(res.data.draft)
+        }
+      } else {
+        const res = await messagesAPI.draftReply(
+          selectedThread.thread_id,
+          instructionsForDraft || undefined
+        )
+        setRouterDraftMeta(null)
+        setDraft(res.data.draft)
+        setReplyContent(res.data.draft)
+      }
     } catch (e: unknown) {
       const ax = e as { response?: { status?: number; data?: { detail?: string } } }
       const detail = ax.response?.data?.detail || ''
@@ -533,6 +569,7 @@ export default function MessageDashboard() {
       )
       setReplyContent('')
       setDraft('')
+      setRouterDraftMeta(null)
       setReplyAttachments([])
       const threadId = selectedThread.thread_id
       loadThread(threadId)
@@ -747,21 +784,36 @@ export default function MessageDashboard() {
   return (
     <div className="px-4 py-6 sm:px-0">
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-3xl font-bold text-gray-900">Customer Service</h1>
-        <Link
-          to="/ai-instructions"
-          className="relative inline-flex items-center px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
-        >
-          AI Instructions
-          {(insightPendingCount?.count ?? 0) > 0 ? (
-            <span
-              className="ml-1.5 inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full bg-amber-500 text-white text-xs font-bold"
-              title={`${insightPendingCount?.count} insight(s) to review`}
-            >
-              +
-            </span>
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">
+            {isRouter ? 'Messages-Test' : 'Customer Service'}
+          </h1>
+          {isRouter ? (
+            <p className="text-sm text-gray-600 mt-1">
+              Same UI as Messages; drafts use the CS router. Legacy compose stays on{' '}
+              <Link to="/messages" className="text-blue-600 hover:underline">
+                Messages
+              </Link>
+              .
+            </p>
           ) : null}
-        </Link>
+        </div>
+        {!isRouter ? (
+          <Link
+            to="/ai-instructions"
+            className="relative inline-flex items-center px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+          >
+            AI Instructions
+            {(insightPendingCount?.count ?? 0) > 0 ? (
+              <span
+                className="ml-1.5 inline-flex items-center justify-center min-w-[1.25rem] h-5 px-1 rounded-full bg-amber-500 text-white text-xs font-bold"
+                title={`${insightPendingCount?.count} insight(s) to review`}
+              >
+                +
+              </span>
+            ) : null}
+          </Link>
+        ) : null}
       </div>
 
       {error && (
@@ -1057,16 +1109,66 @@ export default function MessageDashboard() {
                 ))}
               </div>
               <div className="p-4 border-t border-gray-200 flex flex-col flex-shrink-0">
+                {isRouter && routerDraftMeta?.router ? (
+                  <div className="mb-2 flex flex-wrap gap-2 text-xs items-center">
+                    <span className="font-medium text-gray-700">Route:</span>
+                    <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-900">
+                      Tier {routerDraftMeta.router.tier}
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-gray-100">{routerDraftMeta.router.intent}</span>
+                    <span className="px-2 py-0.5 rounded bg-gray-100">{routerDraftMeta.router.language}</span>
+                    <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900">
+                      {routerDraftMeta.router.stage}
+                    </span>
+                    {routerDraftMeta.router.known_issue_id ? (
+                      <span className="px-2 py-0.5 rounded bg-green-100 text-green-900">
+                        {routerDraftMeta.router.known_issue_id}
+                      </span>
+                    ) : null}
+                    {routerDraftMeta.tier === 3 ? (
+                      <button
+                        type="button"
+                        className="text-blue-600 hover:underline"
+                        onClick={() => {
+                          setRouterDraftMeta(null)
+                          setDraft('')
+                          setReplyContent('')
+                        }}
+                      >
+                        Clear routing
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+                {isRouter && routerDraftMeta?.tier === 3 && routerDraftMeta.escalation ? (
+                  <div className="mb-3 border border-red-200 bg-red-50 rounded-lg p-3 text-sm text-red-900">
+                    <p className="font-semibold mb-1">Tier 3 — no resolutive draft</p>
+                    <p className="mb-1">{routerDraftMeta.escalation.summary}</p>
+                    {routerDraftMeta.escalation.suggested_next_step ? (
+                      <p className="mb-1">
+                        <span className="font-medium">Suggested: </span>
+                        {routerDraftMeta.escalation.suggested_next_step}
+                      </p>
+                    ) : null}
+                    <p className="text-xs text-red-700 mt-1">
+                      Resolutive draft disabled. Type a manual reply below if you still want to send.
+                    </p>
+                  </div>
+                ) : null}
                 {/* Upper box: AI prompt instructions → Draft reply uses this as extra_instructions. Top-edge drag to resize. */}
                 <div className="mb-1 flex items-center gap-2">
                   <button
                     type="button"
                     onClick={handleDraft}
-                    disabled={loading}
+                    disabled={loading || (isRouter && routerDraftMeta?.tier === 3)}
                     className="px-3 py-2 bg-gray-100 text-gray-800 rounded hover:bg-gray-200 disabled:opacity-50 text-sm font-medium"
-                    title="Generate draft in the reply box below using instructions above"
+                    title={
+                      isRouter && routerDraftMeta?.tier === 3
+                        ? 'Tier 3 — no resolutive draft'
+                        : 'Generate draft in the reply box below using instructions above'
+                    }
                   >
-                    {loading ? '...' : 'Generate draft'}
+                    {loading ? '...' : isRouter ? 'Draft' : 'Generate draft'}
                   </button>
                   <button
                     type="button"

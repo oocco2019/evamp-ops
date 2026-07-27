@@ -228,6 +228,41 @@ class AIComposition(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class KnownIssue(Base):
+    """Known product-fault register for CS router (stage skip / collapse)."""
+
+    __tablename__ = "known_issues"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    issue_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    symptom_keywords: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    applies_to_sku: Mapped[str] = mapped_column(String(500), nullable=False, default="*")
+    diagnosis: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")
+    skip_to_action: Mapped[str] = mapped_column(String(40), nullable=False, default="none")
+    evidence_required: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
+    disposal_note: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    batch_safe: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    requires_image: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class ReplyStageTemplate(Base):
+    """Stage instruction text for CS router drafts (editable)."""
+
+    __tablename__ = "reply_stage_templates"
+
+    stage_key: Mapped[str] = mapped_column(String(60), primary_key=True)
+    instruction: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class ReplyInsight(Base):
     """
     Pending instruction candidates mined from repeated Instructions-for-AI prompts

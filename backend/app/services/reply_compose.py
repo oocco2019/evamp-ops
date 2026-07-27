@@ -4,13 +4,16 @@ Reply policy / playbook helpers for AI message composition.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings as app_settings
 from app.models.messages import (
     AIComposition,
     MessageThread,
@@ -18,6 +21,8 @@ from app.models.messages import (
     ReplyPolicy,
 )
 from app.models.stock import LineItem, Order, SKU
+
+logger = logging.getLogger(__name__)
 
 
 def sku_matches_scope(sku: Optional[str], scope: str) -> bool:
@@ -69,6 +74,28 @@ def thread_text_from_history(thread_history: List[Dict[str, Any]]) -> str:
     for msg in thread_history:
         parts.append((msg.get("content") or "").strip())
     return "\n".join(parts)
+
+
+def truncate_thread_history(
+    thread_history: List[Dict[str, Any]],
+    *,
+    max_messages: int = 24,
+    max_chars: int = 12000,
+) -> List[Dict[str, Any]]:
+    """Keep the most recent messages; cap count and total character volume for faster LLM calls."""
+    if not thread_history:
+        return []
+    tail = thread_history[-max(1, max_messages) :]
+    out: List[Dict[str, Any]] = []
+    total = 0
+    for msg in reversed(tail):
+        content = (msg.get("content") or "").strip()
+        total += len(content)
+        if total > max_chars and out:
+            break
+        out.append(msg)
+    out.reverse()
+    return out
 
 
 async def resolve_product_context(
@@ -159,21 +186,12 @@ def build_compose_prompt_parts(
     product_context_text: str,
     extra_instructions: Optional[str],
 ) -> Tuple[str, Dict[str, Any]]:
-    """User-side compose instruction (system prompt carries policies/playbook too)."""
-    prompt = "Draft a reply to this customer message."
-    if product_context_text:
-        prompt += f"\n\nPRODUCT CONTEXT:\n{product_context_text}"
-    if playbook:
-        prompt += "\n\nRELEVANT PLAYBOOK (use when it applies; do not invent conflicting facts):"
-        for i, e in enumerate(playbook, 1):
-            sym = (e.symptom or "").strip()
-            res = (e.resolution or "").strip()
-            block = f"\n{i}. "
-            if sym:
-                block += f"Symptom: {sym}\n   Resolution: {res}"
-            else:
-                block += res
-            prompt += block
+    """User-side compose instruction. Policies/playbook/product live in the system prompt only."""
+    prompt = (
+        "Draft the next seller reply for this conversation. "
+        "Write one short message for this stage of the thread — do not dump every troubleshooting "
+        "step or policy into a single wall of text."
+    )
     if extra_instructions and extra_instructions.strip():
         prompt += f"\n\nAdditional instructions: {extra_instructions.strip()}"
     snapshot = {
@@ -334,19 +352,33 @@ async def compose_draft_with_adherence(
     ebay_order_id: Optional[str],
     extra_instructions: Optional[str],
     ai_generate,
-    max_revises: int = 2,
+    max_revises: Optional[int] = None,
+    run_adherence: Optional[bool] = None,
+    max_thread_messages: Optional[int] = None,
+    draft_max_tokens: Optional[int] = None,
 ) -> Tuple[str, AIComposition]:
     """
-    Full compose: resolve product, policies, playbook, generate, adhere ≤ max_revises.
+    Full compose: resolve product, policies, playbook, generate, optional adhere ≤ max_revises.
     Persists AIComposition and returns (draft, composition).
     """
+    t0 = time.perf_counter()
+    if max_revises is None:
+        max_revises = int(getattr(app_settings, "REPLY_DRAFT_MAX_REVISES", 0))
+    if run_adherence is None:
+        run_adherence = bool(getattr(app_settings, "REPLY_DRAFT_ADHERENCE_ENABLED", False))
+    if max_thread_messages is None:
+        max_thread_messages = int(getattr(app_settings, "REPLY_DRAFT_MAX_THREAD_MESSAGES", 24))
+    if draft_max_tokens is None:
+        draft_max_tokens = int(getattr(app_settings, "REPLY_DRAFT_MAX_TOKENS", 700))
+
+    thread_history = truncate_thread_history(thread_history, max_messages=max_thread_messages)
+
     product = await resolve_product_context(db, thread, ebay_order_id)
     policies = await load_enabled_policies(db)
     text = thread_text_from_history(thread_history)
     playbook = await retrieve_playbook_entries(
         db, skus=product["skus"] or ([product["primary_sku"]] if product["primary_sku"] else []), thread_text=text
     )
-    # Broad playbook with no keywords and sku * should match; also match label-related when keywords empty.
     prompt, snapshot = build_compose_prompt_parts(
         policies, playbook, product["product_context_text"], extra_instructions
     )
@@ -356,30 +388,47 @@ async def compose_draft_with_adherence(
         playbook=playbook,
         product_context_text=product["product_context_text"],
     )
+    ctx["max_tokens"] = draft_max_tokens
+
     draft = (await ai_generate(prompt, ctx)).strip()
+    logger.info(
+        "reply_compose: initial draft in %.2fs (messages=%s policies=%s playbook=%s)",
+        time.perf_counter() - t0,
+        len(thread_history),
+        len(policies),
+        len(playbook),
+    )
 
     adherence_rounds: List[Dict[str, Any]] = []
     revise_count = 0
     last_adh: Dict[str, Any] = {"results": [], "all_passed": True}
 
-    for _ in range(max_revises + 1):
-        last_adh = await run_adherence_check(ai_generate, draft=draft, policies=policies)
-        adherence_rounds.append({**last_adh, "revise_count": revise_count})
-        if last_adh["all_passed"]:
-            break
-        if revise_count >= max_revises:
-            break
-        failures = [r for r in last_adh["results"] if not r["pass"]]
-        draft = await revise_draft_for_violations(
-            ai_generate,
-            draft=draft,
-            thread_history=thread_history,
-            policies=policies,
-            playbook=playbook,
-            product_context_text=product["product_context_text"],
-            failures=failures,
+    if run_adherence and policies:
+        t_adh = time.perf_counter()
+        for _ in range(max_revises + 1):
+            last_adh = await run_adherence_check(ai_generate, draft=draft, policies=policies)
+            adherence_rounds.append({**last_adh, "revise_count": revise_count})
+            if last_adh["all_passed"]:
+                break
+            if revise_count >= max_revises:
+                break
+            failures = [r for r in last_adh["results"] if not r["pass"]]
+            draft = await revise_draft_for_violations(
+                ai_generate,
+                draft=draft,
+                thread_history=thread_history,
+                policies=policies,
+                playbook=playbook,
+                product_context_text=product["product_context_text"],
+                failures=failures,
+            )
+            revise_count += 1
+        logger.info(
+            "reply_compose: adherence done in %.2fs (revises=%s passed=%s)",
+            time.perf_counter() - t_adh,
+            revise_count,
+            last_adh.get("all_passed"),
         )
-        revise_count += 1
 
     composition = AIComposition(
         thread_id=thread.thread_id,
@@ -404,4 +453,5 @@ async def compose_draft_with_adherence(
         composition=composition,
         extra_instructions=extra_instructions,
     )
+    logger.info("reply_compose: total %.2fs thread=%s", time.perf_counter() - t0, thread.thread_id)
     return draft, composition

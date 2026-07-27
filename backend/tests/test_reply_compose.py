@@ -7,6 +7,7 @@ from app.services.reply_compose import (
     _parse_adherence_json,
     playbook_matches_keywords,
     sku_matches_scope,
+    truncate_thread_history,
 )
 
 
@@ -80,3 +81,18 @@ def test_parse_adherence_json_garbage_treats_as_pass():
     out = _parse_adherence_json("not json", [_Pol(9)])
     assert out["all_passed"] is True
     assert out["results"][0]["policy_id"] == 9
+
+
+def test_truncate_thread_history_keeps_tail():
+    hist = [{"role": "buyer", "content": f"m{i}"} for i in range(30)]
+    out = truncate_thread_history(hist, max_messages=10, max_chars=100000)
+    assert len(out) == 10
+    assert out[0]["content"] == "m20"
+    assert out[-1]["content"] == "m29"
+
+
+def test_truncate_thread_history_respects_char_budget():
+    hist = [{"role": "buyer", "content": "x" * 5000} for _ in range(5)]
+    out = truncate_thread_history(hist, max_messages=10, max_chars=6000)
+    assert len(out) <= 2
+    assert out[-1]["content"] == "x" * 5000

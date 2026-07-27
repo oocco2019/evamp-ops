@@ -9,6 +9,7 @@ const Settings = lazy(() => import('./pages/Settings'))
 const SalesAnalytics = lazy(() => import('./pages/SalesAnalytics'))
 const StockPlanning = lazy(() => import('./pages/StockPlanning'))
 const MessageDashboard = lazy(() => import('./pages/MessageDashboard'))
+const MessageTest = lazy(() => import('./pages/MessageTest'))
 const InventoryStatus = lazy(() => import('./pages/InventoryStatus'))
 const OrderDetails = lazy(() => import('./pages/OrderDetails'))
 const AIInstructions = lazy(() => import('./pages/AIInstructions'))
@@ -36,6 +37,9 @@ function App() {
                 </Link>
                 <Link to="/messages" className={NAV_LINK}>
                   Messages
+                </Link>
+                <Link to="/messages-test" className={NAV_LINK}>
+                  Messages-Test
                 </Link>
                 <Link to="/inventory" className={NAV_LINK}>
                   Inventory
@@ -69,6 +73,7 @@ function App() {
               <Route path="/inventory-status" element={<Navigate to="/inventory" replace />} />
               <Route path="/inventory-movement" element={<Navigate to="/inventory" replace />} />
               <Route path="/messages" element={<MessageDashboard />} />
+              <Route path="/messages-test" element={<MessageTest />} />
               <Route path="/ai-instructions" element={<AIInstructions />} />
               <Route path="/listing-video" element={<Navigate to="/settings?tab=video" replace />} />
               <Route path="/settings" element={<Settings />} />

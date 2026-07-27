@@ -77,7 +77,7 @@ Draft a response to the buyer. Do not include any preamble or explanation - just
 
         payload = {
             "model": self.model_name,
-            "max_tokens": self.max_tokens,
+            "max_tokens": int(context.get("max_tokens") or self.max_tokens),
             "temperature": float(self.temperature),
             "system": system,
             "messages": [{"role": "user", "content": user_content}],

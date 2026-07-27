@@ -554,7 +554,6 @@ async def draft_reply(
             ebay_order_id=ebay_order_id,
             extra_instructions=body.extra_instructions,
             ai_generate=_gen,
-            max_revises=2,
         )
     except ValueError as e:
         raise HTTPException(

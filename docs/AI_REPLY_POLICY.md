@@ -2,6 +2,18 @@
 
 Management UI: `/ai-instructions` (linked from Messages). Messages dashboard draft UX is unchanged; compose improvements run in the backend on `POST /api/messages/threads/{id}/draft`.
 
+## Messages-Test (CS router)
+
+Experimental surface: **`/messages-test`** (nav **Messages-Test**). Same Messages UI (including **voice instructions**); drafts use the CS router. Does **not** change legacy Messages compose.
+
+- Rule router: language → intent → known-issue → tier/stage (`backend/app/services/reply_router.py`).
+- One LLM stage draft (`POST /api/messages-test/threads/{id}/draft`); playbook frozen on this path.
+- Tier 3: escalation card, no resolutive draft (safety / DE return / OOW / eBay case / melted_plug / **seller already decided with no new buyer material**).
+- Known issues + stage templates in DB (migration `035`); `white_glue_cover.batch_safe` defaults **false** → refund until flipped via `PATCH /api/messages-test/known-issues/{id}`.
+- Spec: [`AI_CS_ROUTER_SPEC.md`](AI_CS_ROUTER_SPEC.md).
+
+For a **handoff brief** on making drafts faster and more conversational (stage-based support flow, options/trade-offs), see [AI_MESSAGING_EXPERIENCE_HANDOFF.md](AI_MESSAGING_EXPERIENCE_HANDOFF.md).
+
 ## Two stores
 
 ### Policies (`reply_policies`)
@@ -35,8 +47,10 @@ Starter seed: suggest printing labels on A4 paper (`sku_scope=*`).
 3. Retrieve matching playbook entries (SKU scope; `*` = all).
 4. Build prompt: policies + playbook + product context + full chronological thread + compose instruction (+ Messages “Instructions for AI” if set).
 5. Generate draft.
-6. **Adherence:** second LLM pass scores each active policy; up to **2** automatic revisions on failure; then return the draft (Messages UI unchanged).
+6. **Adherence (optional):** when `REPLY_DRAFT_ADHERENCE_ENABLED=true`, a second LLM pass scores each active policy; up to `REPLY_DRAFT_MAX_REVISES` automatic revisions on failure. **Default is off** for faster drafts (one LLM call).
 7. Persist `ai_compositions` (prompt snapshot, policy/playbook IDs, output, adherence). On send, `draft_feedback.composition_id` links when available.
+
+Draft speed defaults (override in `.env`): `REPLY_DRAFT_ADHERENCE_ENABLED=false`, `REPLY_DRAFT_MAX_REVISES=0`, `REPLY_DRAFT_MAX_THREAD_MESSAGES=24`, `REPLY_DRAFT_MAX_TOKENS=700`. Backend logs `reply_compose:` timings when diagnosing slow drafts.
 
 Legacy global/SKU `AIInstruction` blobs and **Generate global from history** are retired (rows cleared; endpoints removed). Style profile / procedure tables remain but are no longer injected into draft.
 

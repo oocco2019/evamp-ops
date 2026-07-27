@@ -2,6 +2,8 @@
 
 UI: `/messages` → `frontend/src/pages/MessageDashboard.tsx`.
 
+**Messages-Test** (`/messages-test`): same Messages UI with CS **rule router + stage drafter** (and voice instructions). See [AI_REPLY_POLICY.md](AI_REPLY_POLICY.md#messages-test-cs-router). If it wins, the plan is to replace/rename over Messages later.
+
 On-page explanatory blurbs were removed; behaviour is documented here and in the related message docs.
 
 ## What the page does
@@ -14,6 +16,7 @@ On-page explanatory blurbs were removed; behaviour is documented here and in the
 ## Related docs
 
 - [AI_REPLY_POLICY.md](AI_REPLY_POLICY.md) – reply policies, playbook, compose + adherence  
+- [AI_MESSAGING_EXPERIENCE_HANDOFF.md](AI_MESSAGING_EXPERIENCE_HANDOFF.md) – brief for discussing better draft UX / conversation staging (paste to another model)  
 - [MESSAGE_TRANSLATION.md](MESSAGE_TRANSLATION.md) – local translation / DE compose  
 - [MESSAGE_ATTACHMENTS.md](MESSAGE_ATTACHMENTS.md) – attachments  
 - [MESSAGE_SYNC_REVIEW.md](MESSAGE_SYNC_REVIEW.md) – sync behaviour review notes  
