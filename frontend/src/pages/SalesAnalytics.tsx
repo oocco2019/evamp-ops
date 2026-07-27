@@ -46,6 +46,7 @@ function formatProfitPair(totalGbp: number | null): ReactNode {
 
 type SkuSortKey = 'sku_code' | 'quantity_sold' | 'profit'
 type CountrySortKey = 'country' | 'quantity_sold' | 'profit'
+type ProfitViewMode = 'this_year' | 'last_year' | 'custom'
 
 const parseISODate = (value: string): Date | null => {
   if (!value) return null
@@ -110,8 +111,12 @@ export default function SalesAnalytics() {
   const [tableSort, setTableSort] = useState<{ key: SkuSortKey; dir: 'asc' | 'desc' }>(loadSkuSort)
   const [countrySort, setCountrySort] = useState<{ key: CountrySortKey; dir: 'asc' | 'desc' }>(loadCountrySort)
   const [filterOptions, setFilterOptions] = useState<{ countries: string[]; skus: string[] } | null>(null)
-  /** null = rolling last 12 calendar months; number = Jan–Dec that year */
-  const [profitChartYear, setProfitChartYear] = useState<number | null>(null)
+  /** Profit-by-month view: this calendar year (default), last calendar year, or custom from/to. */
+  const [profitViewMode, setProfitViewMode] = useState<ProfitViewMode>('this_year')
+  const [profitCustomFrom, setProfitCustomFrom] = useState(() => `${new Date().getFullYear()}-01-01`)
+  const [profitCustomTo, setProfitCustomTo] = useState(() => todayIso())
+  /** Default: apply PROFIT_TAX_RATE to profit (displayed "after tax" profit). */
+  const [profitTaxIncluded, setProfitTaxIncluded] = useState(true)
 
   useEffect(() => {
     let cancelled = false
@@ -191,21 +196,29 @@ export default function SalesAnalytics() {
     },
   })
 
-  const { data: monthlyProfitYearsRes } = useQuery({
-    queryKey: ['analytics-monthly-profit-years'],
-    queryFn: async () => (await stockAPI.getAnalyticsMonthlyProfitYears()).data,
-  })
-
   const {
     data: monthlyProfitRows,
     isLoading: loadingMonthlyProfit,
     error: monthlyProfitError,
   } = useQuery({
-    queryKey: ['analytics-monthly-profit', profitChartYear],
+    queryKey: ['analytics-monthly-profit', profitViewMode, profitCustomFrom, profitCustomTo, profitTaxIncluded],
     queryFn: async () => {
-      const params = profitChartYear != null ? { year: profitChartYear } : {}
+      const y = new Date().getFullYear()
+      const params =
+        profitViewMode === 'this_year'
+          ? { year: y, profit_tax_included: profitTaxIncluded }
+          : profitViewMode === 'last_year'
+            ? { year: y - 1, profit_tax_included: profitTaxIncluded }
+            : {
+                from: profitCustomFrom,
+                to: profitCustomTo,
+                profit_tax_included: profitTaxIncluded,
+              }
       return (await stockAPI.getAnalyticsMonthlyProfit(params)).data
     },
+    enabled:
+      profitViewMode !== 'custom' ||
+      (!!profitCustomFrom && !!profitCustomTo && profitCustomFrom <= profitCustomTo),
   })
 
   const monthlyProfitChartData =
@@ -219,14 +232,9 @@ export default function SalesAnalytics() {
     0,
   )
 
-  const profitYearChoices = monthlyProfitYearsRes?.years ?? []
-
-  useEffect(() => {
-    if (profitChartYear == null || monthlyProfitYearsRes?.years === undefined) return
-    if (!monthlyProfitYearsRes.years.includes(profitChartYear)) {
-      setProfitChartYear(null)
-    }
-  }, [profitChartYear, monthlyProfitYearsRes])
+  const totalProfitLabel = profitTaxIncluded ? 'Total EUR after tax:' : 'Total EUR before tax:'
+  const tooltipLabel = profitTaxIncluded ? 'Profit (after tax)' : 'Profit (pre-tax)'
+  const barName = profitTaxIncluded ? 'Profit (EUR, after tax)' : 'Profit (EUR, pre-tax)'
 
   const data = analyticsData?.data ?? null
   const bySku = analyticsData?.bySku ?? null
@@ -673,7 +681,7 @@ export default function SalesAnalytics() {
           <div>
             <h2 className="text-lg font-semibold text-gray-800">Profit by month</h2>
             <p className="text-sm text-gray-700 mt-1 tabular-nums">
-              Total EUR after tax:{' '}
+              {totalProfitLabel}{' '}
               {loadingMonthlyProfit
                 ? '…'
                 : monthlyProfitChartData.length === 0
@@ -681,24 +689,67 @@ export default function SalesAnalytics() {
                   : `€${monthlyProfitTotalEur.toFixed(2)}`}
             </p>
           </div>
-          <label className="flex items-center gap-2 text-sm text-gray-700 shrink-0">
-            <span className="font-medium whitespace-nowrap">View</span>
-            <select
-              value={profitChartYear === null ? '' : String(profitChartYear)}
-              onChange={(e) => {
-                const v = e.target.value
-                setProfitChartYear(v === '' ? null : Number(v))
-              }}
-              className="rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm min-w-[10rem]"
+          <div className="flex flex-wrap items-center gap-3 justify-end">
+            <label className="flex items-center gap-2 text-sm text-gray-700 shrink-0">
+              <span className="font-medium whitespace-nowrap">View</span>
+              <select
+                value={profitViewMode}
+                onChange={(e) => setProfitViewMode(e.target.value as ProfitViewMode)}
+                className="rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm min-w-[10rem]"
+              >
+                <option value="this_year">This year</option>
+                <option value="last_year">Last year</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+
+            {profitViewMode === 'custom' ? (
+              <>
+                <label className="flex items-center gap-2 text-sm text-gray-700 shrink-0">
+                  <span className="font-medium whitespace-nowrap">From</span>
+                  <input
+                    type="date"
+                    value={profitCustomFrom}
+                    onChange={(e) => setProfitCustomFrom(e.target.value)}
+                    className="rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-sm text-gray-700 shrink-0">
+                  <span className="font-medium whitespace-nowrap">To</span>
+                  <input
+                    type="date"
+                    value={profitCustomTo}
+                    onChange={(e) => setProfitCustomTo(e.target.value)}
+                    className="rounded border border-gray-300 bg-white text-gray-900 px-3 py-2 text-sm"
+                  />
+                </label>
+              </>
+            ) : null}
+
+            <label
+              className="inline-flex items-center gap-2 cursor-pointer select-none shrink-0"
+              title="On: profit after 30% tax. Off: profit before tax."
             >
-              <option value="">Last 12 months</option>
-              {profitYearChoices.map((y) => (
-                <option key={y} value={y}>
-                  Year {y}
-                </option>
-              ))}
-            </select>
-          </label>
+              <span className="text-sm font-medium text-gray-700">Tax</span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={profitTaxIncluded}
+                onClick={() => setProfitTaxIncluded((prev) => !prev)}
+                className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-1 ${
+                  profitTaxIncluded
+                    ? 'border-indigo-600 bg-indigo-600'
+                    : 'border-gray-300 bg-gray-200'
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${
+                    profitTaxIncluded ? 'translate-x-5' : 'translate-x-0.5'
+                  } mt-px`}
+                />
+              </button>
+            </label>
+          </div>
         </div>
         {loadingMonthlyProfit ? (
           <p className="text-gray-500 text-sm py-12 text-center">Loading monthly profit…</p>
@@ -709,17 +760,17 @@ export default function SalesAnalytics() {
             <BarChart
               data={monthlyProfitChartData}
               margin={{ top: 10, right: 10, left: 8, bottom: 0 }}
-              barSize={profitChartYear === null ? 24 : 20}
-              barCategoryGap={profitChartYear === null ? '12%' : '18%'}
+              barSize={profitViewMode === 'custom' ? 20 : 24}
+              barCategoryGap={profitViewMode === 'custom' ? '18%' : '12%'}
             >
               <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
               <XAxis dataKey="label" tick={{ fontSize: 11 }} interval={0} angle={-35} textAnchor="end" height={72} />
               <YAxis tick={{ fontSize: 12 }} tickFormatter={(v) => `€${v}`} />
               <Tooltip
-                formatter={(value: number) => [`€${Number(value).toFixed(2)}`, 'Profit']}
+                formatter={(value: number) => [`€${Number(value).toFixed(2)}`, tooltipLabel]}
                 labelFormatter={(label) => String(label)}
               />
-              <Bar dataKey="profit" name="Profit (EUR)" radius={[4, 4, 0, 0]} isAnimationActive={false}>
+              <Bar dataKey="profit" name={barName} radius={[4, 4, 0, 0]} isAnimationActive={false}>
                 {monthlyProfitChartData.map((entry) => (
                   <Cell key={entry.period} fill={entry.is_partial ? '#93c5fd' : '#2563eb'} />
                 ))}

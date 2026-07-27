@@ -877,7 +877,7 @@ class AnalyticsSummaryResponse(BaseModel):
 
 
 class AnalyticsMonthlyProfitPoint(BaseModel):
-    """One calendar month bucket; company-wide totals (no country/SKU filter). After profit tax."""
+    """One calendar month bucket; company-wide totals (no country/SKU filter). Profit values may be before/after profit tax."""
 
     period: str
     label: str
@@ -1015,12 +1015,18 @@ async def get_analytics_summary(
 
 @router.get("/analytics/monthly-profit", response_model=List[AnalyticsMonthlyProfitPoint])
 async def get_analytics_monthly_profit(
-    year: Optional[int] = Query(None, ge=2000, le=2100, description="Calendar year (Jan–Dec). Omit for rolling last 12 months."),
+    year: Optional[int] = Query(None, ge=2000, le=2100, description="Calendar year (Jan–Dec). Takes precedence over from/to."),
+    from_date: Optional[date] = Query(None, alias="from", description="Custom range start (YYYY-MM-DD). Used with to when year is omitted."),
+    to_date: Optional[date] = Query(None, alias="to", description="Custom range end (YYYY-MM-DD). Used with from when year is omitted."),
+    profit_tax_included: bool = Query(
+        True,
+        description="When true (default), apply PROFIT_TAX_RATE to profit (displayed 'after tax' profit). When false, return profit before that tax.",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Monthly profit (after PROFIT_TAX): company-wide totals (same rules as analytics profit).
-    Always returns 12 rows: selected calendar year or rolling last 12 calendar months ending this month.
+    Monthly profit: company-wide totals (same rules as analytics profit), optionally before/after PROFIT_TAX_RATE.
+    Returns one row per calendar month in range: year (Jan–Dec), custom from/to, or rolling last 12 months.
     """
     today = date.today()
     latest = latest_complete_day()
@@ -1028,6 +1034,22 @@ async def get_analytics_monthly_profit(
         month_keys = [date(year, m, 1) for m in range(1, 13)]
         from_date = date(year, 1, 1)
         to_date = min(date(year, 12, 31), latest)
+    elif from_date is not None or to_date is not None:
+        if from_date is None or to_date is None:
+            raise HTTPException(status_code=400, detail="Provide both from and to for a custom range")
+        if from_date > to_date:
+            raise HTTPException(status_code=400, detail="from must be <= to")
+        to_date = min(to_date, latest)
+        first = _month_start(from_date)
+        last = _month_start(to_date)
+        month_keys = []
+        cur = first
+        # Cap to avoid runaway ranges
+        for _ in range(240):
+            month_keys.append(cur)
+            if cur >= last:
+                break
+            cur = _add_months(cur, 1)
     else:
         first_this = _month_start(today)
         month_keys = [_add_months(first_this, i) for i in range(-11, 1)]
@@ -1082,9 +1104,9 @@ async def get_analytics_monthly_profit(
         )
         if order_profit is None:
             continue
-        net_profit = _profit_after_tax(order_profit)
+        profit = _profit_for_display(order_profit, profit_tax_included=profit_tax_included)
         mk = _month_start(o.date)
-        month_profit[mk] = month_profit.get(mk, Decimal(0)) + net_profit
+        month_profit[mk] = month_profit.get(mk, Decimal(0)) + profit
 
     out: List[AnalyticsMonthlyProfitPoint] = []
     for mk in month_keys:
@@ -1223,6 +1245,13 @@ def _profit_after_tax(gross_profit: Decimal) -> Decimal:
     """Apply profit tax (e.g. 30%): displayed profit = gross * (1 - rate). See docs/ANALYTICS_PROFIT_LOGIC.md."""
     rate = getattr(app_settings, "PROFIT_TAX_RATE", 0.30)
     return gross_profit * Decimal(str(1.0 - rate))
+
+
+def _profit_for_display(gross_profit: Decimal, *, profit_tax_included: bool) -> Decimal:
+    """If profit tax is included: displayed profit = gross * (1 - rate). If excluded: return gross profit."""
+    if profit_tax_included:
+        return _profit_after_tax(gross_profit)
+    return gross_profit
 
 
 class AnalyticsBySkuPoint(BaseModel):

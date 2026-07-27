@@ -58,6 +58,11 @@ export default function AIInstructionsPage() {
     onSuccess: invalidateAll,
   })
 
+  const scanSellerStyle = useMutation({
+    mutationFn: () => messagesAPI.scanSellerStyleInsights(2),
+    onSuccess: invalidateAll,
+  })
+
   const createPolicy = useMutation({
     mutationFn: messagesAPI.createReplyPolicy,
     onSuccess: () => {
@@ -135,7 +140,34 @@ export default function AIInstructionsPage() {
 
       {/* Insights */}
       <section className="bg-white shadow rounded-lg border border-amber-200 p-6 mb-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Insights to review</h2>
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <h2 className="text-lg font-semibold text-gray-900">Insights to review</h2>
+          <button
+            type="button"
+            disabled={scanSellerStyle.isPending}
+            onClick={() => scanSellerStyle.mutate()}
+            className="text-xs px-3 py-1.5 border border-amber-300 bg-white text-amber-900 rounded hover:bg-amber-50 disabled:opacity-50"
+          >
+            {scanSellerStyle.isPending
+              ? 'Scanning seller messages…'
+              : 'Scan seller messages (2 months)'}
+          </button>
+        </div>
+        {scanSellerStyle.isError ? (
+          <p className="text-sm text-red-600 mb-3">
+            {scanSellerStyle.error instanceof Error
+              ? scanSellerStyle.error.message
+              : 'Scan failed'}
+          </p>
+        ) : null}
+        {scanSellerStyle.isSuccess ? (
+          <p className="text-xs text-gray-600 mb-3">
+            Added {scanSellerStyle.data.data.created} style suggestion
+            {scanSellerStyle.data.data.created === 1 ? '' : 's'} from{' '}
+            {scanSellerStyle.data.data.messages_sampled} sampled messages
+            ({scanSellerStyle.data.data.messages_in_window} in window).
+          </p>
+        ) : null}
         {insightsLoading ? (
           <p className="text-sm text-gray-500">Loading…</p>
         ) : !insights?.length ? (

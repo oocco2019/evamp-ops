@@ -42,11 +42,22 @@ Legacy global/SKU `AIInstruction` blobs and **Generate global from history** are
 
 ## Insights (pending review)
 
-Table `reply_insights`. When the same **Instructions-for-AI** text is used on ≥2 drafts (whatever you submitted in that box when you hit Generate draft — typed or already transcribed voice) — or the same adherence failure reason repeats — a **pending** insight is created. Insights are **not** injected into drafts until you **Promote** them to a policy or playbook (or **Dismiss**).
+Table `reply_insights`. A **weekly Sunday scan** (Europe/Vilnius 09:00, with catch-up if the
+machine was off) reads recent **Instructions-for-AI** prompts from compositions. Themes that
+appear in **≥3** submissions (exact or same intent) are distilled by the LLM into a **short
+rule** (e.g. “Do not use dashes in customer replies”) — not the full case transcript.
 
-Messages shows a small **+** badge on the AI Instructions button when any insights are pending.
+The same **≥3** threshold applies to repeated adherence-failure reasons after compose.
 
-After you **Promote** or **Dismiss** an insight, that fingerprint (and near-duplicate wording) is not suggested again.
+**On-demand seller style scan:** From AI Instructions, **Scan seller messages (2 months)**
+loads your outbound seller messages from the last two months and asks the LLM for short
+writing-style policy suggestions (tone, punctuation habits, greetings, etc.). Those appear
+as pending insights with source `seller_style_scan`.
+
+Insights are **not** injected into drafts until you **Promote** them to a policy or playbook
+(or **Dismiss**). Messages shows a **+** badge on AI Instructions when any are pending.
+
+After **Promote** or **Dismiss**, that fingerprint (and near-duplicate wording) is not suggested again.
 
 ## Playbook SKU scope
 

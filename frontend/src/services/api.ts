@@ -755,8 +755,12 @@ export const stockAPI = {
     outcome?: 'all' | 'sales' | 'refunds'
   }) => api.get<AnalyticsByCountryPoint[]>('/api/stock/analytics/by-country', { params }),
 
-  getAnalyticsMonthlyProfit: (params?: { year?: number }) =>
-    api.get<AnalyticsMonthlyProfitPoint[]>('/api/stock/analytics/monthly-profit', { params }),
+  getAnalyticsMonthlyProfit: (params?: {
+    year?: number
+    from?: string
+    to?: string
+    profit_tax_included?: boolean
+  }) => api.get<AnalyticsMonthlyProfitPoint[]>('/api/stock/analytics/monthly-profit', { params }),
 
   getAnalyticsMonthlyProfitYears: () =>
     api.get<{ years: number[] }>('/api/stock/analytics/monthly-profit-years'),
@@ -1004,6 +1008,17 @@ export const messagesAPI = {
     ),
   dismissReplyInsight: (id: number) =>
     api.post<ReplyInsight>(`/api/messages/reply-insights/${id}/dismiss`),
+  scanSellerStyleInsights: (months = 2) =>
+    api.post<{
+      success: boolean
+      created: number
+      skipped: number
+      messages_in_window: number
+      messages_sampled: number
+      months: number
+    }>('/api/messages/reply-insights/scan-seller-style', null, {
+      params: { months },
+    }),
 }
 
 // Get video ID from an eBay listing (item number or URL)

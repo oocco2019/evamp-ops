@@ -228,6 +228,14 @@ def start_inventory_refresh_scheduler() -> None:
     scheduler.start()
     _scheduler = scheduler
 
+    # Weekly Instructions-for-AI → distilled insights (Sunday catch-up)
+    try:
+        from app.services.reply_insights_scheduler import start_reply_insights_scheduler
+
+        start_reply_insights_scheduler(scheduler)
+    except Exception:
+        logger.exception("Failed to attach reply-insights weekly scan job")
+
 
 def shutdown_inventory_refresh_scheduler() -> None:
     global _scheduler

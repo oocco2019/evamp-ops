@@ -2265,6 +2265,30 @@ async def list_reply_insights(
     return [_insight_resp(i) for i in result.scalars().all()]
 
 
+@router.post("/reply-insights/scan-seller-style")
+async def scan_seller_style_insights(
+    months: int = 2,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    One-shot: scan seller messages from the last N months and create pending
+    Insights to review with short writing-style policy suggestions.
+    """
+    from app.services.reply_insights import run_seller_style_insight_scan
+
+    try:
+        summary = await run_seller_style_insight_scan(db, months=months)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("Seller style insight scan failed")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Style scan failed: {e}",
+        ) from e
+    return {"success": True, **summary}
+
+
 @router.post("/reply-insights/{insight_id}/promote")
 async def promote_reply_insight(insight_id: int, db: AsyncSession = Depends(get_db)):
     from app.services.reply_insights import promote_insight

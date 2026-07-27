@@ -66,6 +66,18 @@ const BOX_HEIGHT_MAX = 320
 const BOX_HEIGHT_DEFAULT = 120
 const REPLY_HEIGHT_STORAGE_KEY = 'evamp_reply_height'
 const AI_PROMPT_HEIGHT_STORAGE_KEY = 'evamp_ai_prompt_height'
+const ALLOWED_IMAGE_EXTENSIONS = new Set([
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.png',
+  '.bmp',
+  '.tiff',
+  '.tif',
+  '.avif',
+  '.heic',
+  '.webp',
+])
 
 function getStoredHeight(key: string): number {
   try {
@@ -87,6 +99,7 @@ export default function MessageDashboard() {
   const [replyContent, setReplyContent] = useState('')
   const [replyAttachments, setReplyAttachments] = useState<MessageMediaItem[]>([])
   const [uploadingAttachment, setUploadingAttachment] = useState(false)
+  const uploadingAttachmentRef = useRef(false)
   const [attachError, setAttachError] = useState<string | null>(null)
   const attachErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [replyDragOver, setReplyDragOver] = useState(false)
@@ -457,9 +470,19 @@ export default function MessageDashboard() {
   const handleReplyDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault()
     e.stopPropagation()
+    if (uploadingAttachmentRef.current) return
     setReplyDragOver(false)
     const allFiles = Array.from(e.dataTransfer.files)
-    const files = allFiles.filter((f) => f.type.startsWith('image/'))
+    const files = allFiles.filter((f) => {
+      // Some browsers/OSes can provide `type=""` for dropped images (especially HEIC).
+      // Backend validates by filename extension, so accept by both.
+      const byMime = (f.type || '').startsWith('image/')
+      const name = (f.name || '').toLowerCase()
+      const dot = name.lastIndexOf('.')
+      const ext = dot >= 0 ? name.slice(dot) : ''
+      const byExt = ALLOWED_IMAGE_EXTENSIONS.has(ext)
+      return byMime || byExt
+    })
     if (files.length === 0) {
       if (allFiles.length > 0) {
         setAttachError('File type not supported. Use JPG, PNG, GIF, etc.')
@@ -468,20 +491,30 @@ export default function MessageDashboard() {
       return
     }
     setAttachError(null)
+    uploadingAttachmentRef.current = true
     setUploadingAttachment(true)
     setError(null)
     const added: MessageMediaItem[] = []
-    for (const file of files) {
-      if (added.length >= 5) break
-      try {
-        const res = await messagesAPI.uploadMessageMedia(file)
-        added.push(res.data)
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Upload failed')
+    try {
+      for (const file of files) {
+        if (added.length >= 5) break
+        try {
+          const res = await messagesAPI.uploadMessageMedia(file)
+          added.push(res.data)
+        } catch (err) {
+          // Upload failures should not prevent other images in the same drop.
+          // Use the attachment-specific error, not the global banner.
+          setAttachError(err instanceof Error ? err.message : 'Upload failed')
+          clearAttachErrorAfterDelay()
+        }
       }
+      if (added.length > 0) {
+        setReplyAttachments((a) => (a.length + added.length <= 5 ? [...a, ...added] : [...a.slice(0, 5 - added.length), ...added]))
+      }
+    } finally {
+      uploadingAttachmentRef.current = false
+      setUploadingAttachment(false)
     }
-    if (added.length > 0) setReplyAttachments((a) => (a.length + added.length <= 5 ? [...a, ...added] : [...a.slice(0, 5 - added.length), ...added]))
-    setUploadingAttachment(false)
   }, [clearAttachErrorAfterDelay])
 
   const handleSend = async () => {
@@ -1182,6 +1215,7 @@ export default function MessageDashboard() {
                       if (!file || replyAttachments.length >= 5) return
                       e.target.value = ''
                       setAttachError(null)
+                      uploadingAttachmentRef.current = true
                       setUploadingAttachment(true)
                       try {
                         const res = await messagesAPI.uploadMessageMedia(file)
@@ -1194,6 +1228,7 @@ export default function MessageDashboard() {
                           clearAttachErrorAfterDelay()
                         }
                       } finally {
+                        uploadingAttachmentRef.current = false
                         setUploadingAttachment(false)
                       }
                     }}
