@@ -81,3 +81,12 @@ Thumbs.db
 # Local message exports (buyer PII / conversation content)
 backend/exports/
 docs/exports/
+
+# Postgres dumps (local backups — do not commit)
+backups/daily/
+backups/monthly/
+backups/logs/
+backups/*.dump
+backups/*.sql
+backups/*.sql.gz
+

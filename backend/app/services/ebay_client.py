@@ -3,6 +3,7 @@ eBay API client: OAuth 2.0 and Sell Fulfillment API (orders).
 """
 import base64
 import secrets
+import re
 from decimal import Decimal
 from urllib.parse import urlencode
 from datetime import datetime, date, timedelta, timezone
@@ -494,6 +495,403 @@ def parse_orders_to_import(api_response: Dict[str, Any]) -> List[Dict[str, Any]]
             "raw_payload": o,
         })
     return result
+
+
+def _extract_buyer_vehicle_string(buyer_checkout_notes: Optional[str]) -> Optional[str]:
+    """
+    eBay buyerCheckoutNotes format examples:
+    - EN: "Buyer's Vehicle: Tesla Model 3 2021 Electric Motor Saloon ..."
+    - DE: "Fahrzeug des Käufers: Jeep Wrangler IV 2023 JL 2.0 4xe Plug-in-Hybrid ..."
+    """
+
+    if not buyer_checkout_notes:
+        return None
+
+    m = re.search(r"Buyer's Vehicle:\s*([^\n\r]+)", buyer_checkout_notes, flags=re.IGNORECASE)
+    if m:
+        return (m.group(1) or "").strip()
+
+    m = re.search(r"Fahrzeug des Käufers:\s*([^\n\r]+)", buyer_checkout_notes, flags=re.IGNORECASE)
+    if m:
+        return (m.group(1) or "").strip()
+
+    return None
+
+
+def _parse_year_from_text(s: Optional[str]) -> Optional[int]:
+    if not s:
+        return None
+    # Keep it conservative to reduce accidental matches.
+    m = re.search(r"\b(19\d{2}|20\d{2}|2030)\b", s)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _vehicle_type_from_text(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return None
+    hay = s.lower()
+    if any(k in hay for k in ("plug-in hybrid", "plug in hybrid", "phev", "plug-in")):
+        return "PHEV"
+    if "electric" in hay and "hybrid" in hay:
+        return "PHEV"
+    if "ev" in hay or "electric" in hay:
+        return "EV"
+    if "hybrid" in hay:
+        return "Hybrid"
+    return None
+
+
+def _clean_vehicle_fragment(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return None
+    # Drop some common separators used in eBay strings.
+    out = str(s)
+    out = out.replace("--", " ")
+    out = re.sub(r"\s+", " ", out).strip()
+    # Avoid over-stripping hyphenated makes like "Mercedes-Benz".
+    return out or None
+
+
+# Standalone generation markers only (space-separated), not hyphenated like V-Class / E-Class.
+_ROMAN_GENERATION_TOKEN_RE = re.compile(
+    r"(?i)^(VIII|VII|III|II|IV|IX|VI|V|X|I)$"
+)
+
+# Tokens that should keep a specific casing after title-case.
+_MODEL_TOKEN_CASING = {
+    "ev": "EV",
+    "phev": "PHEV",
+    "e-tron": "e-tron",
+    "e-tech": "E-Tech",
+    "id.": None,  # handled below for ID.3 / ID.4 style
+    "sw": "SW",
+    "suv": "SUV",
+    "awd": "AWD",
+    "mk": "MK",
+}
+
+
+def _title_token(tok: str) -> str:
+    low = tok.lower()
+    if low in _MODEL_TOKEN_CASING and _MODEL_TOKEN_CASING[low]:
+        return _MODEL_TOKEN_CASING[low]
+    if low.startswith("id.") and len(low) > 3:
+        return "ID." + tok[3:]
+    # EV / EQ family and short letter+digit codes: XC60, V60, C40, EQB, EV6, EQA
+    if re.fullmatch(r"(?i)eq[a-z0-9.-]*", tok) or re.fullmatch(r"(?i)ev\d*", tok):
+        return tok.upper()
+    m = re.fullmatch(r"([A-Za-z]{1,5})(\d+[A-Za-z0-9]*)", tok)
+    if m:
+        return m.group(1).upper() + m.group(2)
+    if re.fullmatch(r"[A-Za-z]{2,5}\d*", tok) and any(c.isdigit() for c in tok):
+        return tok.upper()
+    if low in ("zs", "nx", "rz", "hs", "cla", "slk", "mg", "mx"):
+        return tok.upper()
+    if low.startswith("mg") and len(tok) <= 5:
+        # MG 4 / MG5 style handled as separate tokens; MGS5 etc.
+        return tok.upper() if tok.isalpha() else tok[:2].upper() + tok[2:]
+    # Hyphenated names (E-Class, V-Class, MX-30). Known e-tron/e-tech already
+    # returned from _MODEL_TOKEN_CASING above — do not special-case all e-* here
+    # or E-Class becomes E-class.
+    if "-" in tok:
+        return "-".join(_title_token(p) if p else p for p in tok.split("-"))
+    return tok[:1].upper() + tok[1:].lower() if tok else tok
+
+
+def normalize_vehicle_make(make: Optional[str]) -> Optional[str]:
+    cleaned = _clean_vehicle_fragment(make)
+    if not cleaned:
+        return None
+    low = cleaned.lower()
+    if low in ("mercedes benz", "mercedes-benz", "mercedes"):
+        return "Mercedes-Benz"
+    if low in ("land rover",):
+        return "Land Rover"
+    if low in ("alfa romeo",):
+        return "Alfa Romeo"
+    if low == "vw":
+        return "VW"
+    if low == "bmw":
+        return "BMW"
+    if low == "kia":
+        return "Kia"
+    if low == "mg":
+        return "MG"
+    if low == "byd":
+        return "BYD"
+    if low == "gmc":
+        return "GMC"
+    if low == "ds":
+        return "DS"
+    if low in ("mini",):
+        return "MINI"
+    return " ".join(_title_token(t) for t in cleaned.split())
+
+
+def normalize_vehicle_model(model: Optional[str]) -> Optional[str]:
+    """
+    Canonical model for stats: strip Roman generation suffixes and normalize casing.
+
+    Outlander III → Outlander, Kuga III → Kuga, Golf VIII → Golf, V60 II → V60.
+    Keeps hyphenated names (V-Class, E-Class). Arabic numbers (Model 3, 208, ID.3) kept.
+    Trailing body tokens like SUV are dropped (Enyaq SUV → Enyaq).
+    """
+    cleaned = _clean_vehicle_fragment(model)
+    if not cleaned:
+        return None
+    tokens = [t for t in cleaned.split() if not _ROMAN_GENERATION_TOKEN_RE.match(t)]
+    while tokens and tokens[-1].lower() in ("suv",):
+        tokens.pop()
+    if not tokens:
+        return None
+    return " ".join(_title_token(t) for t in tokens)
+
+
+# Product-title tokens that end the make/model prefix on EV/PHEV cable listings.
+_LISTING_TITLE_STOP_TOKENS = frozenset(
+    {
+        "ev",
+        "phev",
+        "hev",
+        "charging",
+        "charger",
+        "ladekabel",
+        "ladegerät",
+        "ladegerat",
+        "ladegeraet",
+        "cable",
+        "lead",
+        "typ",
+        "type",
+        "level",
+        "home",
+        "portable",
+        "mains",
+        "schuko",
+        "nema",
+        "elektroauto",
+        "hybrid",
+        "plug-in",
+        "plugin",
+    }
+)
+
+_LISTING_TITLE_MULTI_WORD_MAKES = (
+    ("land rover", 2),
+    ("alfa romeo", 2),
+    ("mercedes benz", 2),
+    ("mercedes-benz", 1),
+)
+
+_LISTING_TITLE_YEAR_RANGE_RE = re.compile(r"^\d{4}(-\d{4}|-on)$", re.IGNORECASE)
+_LISTING_TITLE_MODEL_CODE_RE = re.compile(r"^[A-Za-z]{1,4}\d+[A-Za-z0-9]*$", re.IGNORECASE)
+
+
+def _simplify_listing_title_model_tokens(tokens: List[str]) -> List[str]:
+    """Prefer a single model when the title lists several fitments (2008 3008, EX60 XC60)."""
+    if len(tokens) >= 2 and all(t.isdigit() for t in tokens):
+        return tokens[:1]
+    if len(tokens) >= 2 and all(_LISTING_TITLE_MODEL_CODE_RE.match(t) for t in tokens):
+        return tokens[:1]
+    return tokens
+
+
+def _parse_vehicle_from_listing_title(title: Optional[str]) -> Dict[str, Optional[str]]:
+    """
+    Infer make/model from a vehicle-branded listing title when checkout has no buyer vehicle.
+
+    Examples:
+      HYUNDAI INSTER EV Ladekabel ... → Hyundai / Inster
+      SKODA ENYAQ IV EV Charging ... → Skoda / Enyaq
+      LAND ROVER RANGE ROVER EVOQUE PHEV ... → Land Rover / Range Rover Evoque
+    """
+    cleaned = _clean_vehicle_fragment(title)
+    if not cleaned:
+        return {"vehicle_make": None, "vehicle_model": None, "vehicle_raw": None}
+
+    # Only treat charger / cable style titles as vehicle indicators.
+    hay = cleaned.lower()
+    if not any(
+        k in hay
+        for k in (
+            " ev ",
+            "phev",
+            "ladekabel",
+            "charging",
+            "charger",
+            "ladegerät",
+            "ladegerat",
+            "ladegeraet",
+        )
+    ):
+        # Leading "MAKE MODEL EV ..." has no trailing space after EV when EV is last before more words;
+        # also allow title start patterns via token scan below, but require an EV/PHEV/cable keyword.
+        if not re.search(r"(?i)\b(ev|phev|ladekabel|charging|charger|ladegerät|ladegerat|ladegeraet)\b", cleaned):
+            return {"vehicle_make": None, "vehicle_model": None, "vehicle_raw": None}
+
+    tokens = cleaned.replace(",", " ").split()
+    if len(tokens) < 2:
+        return {"vehicle_make": None, "vehicle_model": None, "vehicle_raw": None}
+
+    low_tokens = [t.lower() for t in tokens]
+    make_token_count = 1
+    joined2 = " ".join(low_tokens[:2]) if len(low_tokens) >= 2 else ""
+    for make_key, n in _LISTING_TITLE_MULTI_WORD_MAKES:
+        if make_key == joined2 or (n == 1 and low_tokens[0] == make_key):
+            make_token_count = n
+            break
+        if n == 1 and low_tokens[0].replace(" ", "") == make_key.replace(" ", ""):
+            make_token_count = 1
+            break
+
+    make_raw = " ".join(tokens[:make_token_count])
+    if make_raw.lower() in _LISTING_TITLE_STOP_TOKENS or make_raw.upper() == "EV":
+        return {"vehicle_make": None, "vehicle_model": None, "vehicle_raw": None}
+
+    model_tokens: List[str] = []
+    for tok in tokens[make_token_count:]:
+        low = tok.lower()
+        if low in _LISTING_TITLE_STOP_TOKENS or _LISTING_TITLE_YEAR_RANGE_RE.match(tok):
+            break
+        model_tokens.append(tok)
+
+    model_tokens = _simplify_listing_title_model_tokens(model_tokens)
+    if not model_tokens:
+        return {"vehicle_make": None, "vehicle_model": None, "vehicle_raw": None}
+
+    make = normalize_vehicle_make(make_raw)
+    model = normalize_vehicle_model(" ".join(model_tokens))
+    if make and model and model.lower() == make.lower():
+        model = None
+    if not (make and model):
+        return {"vehicle_make": None, "vehicle_model": None, "vehicle_raw": None}
+
+    return {
+        "vehicle_make": make,
+        "vehicle_model": model,
+        "vehicle_raw": f"{make_raw} {' '.join(model_tokens)}".strip(),
+    }
+
+
+def extract_customer_vehicle_details_from_ebay_order(raw_order: Dict[str, Any]) -> Dict[str, Optional[object]]:
+    """
+    Best-effort extraction of vehicle make/model/year/type from a raw eBay Fulfillment order.
+
+    Primary source: raw_order.lineItems[].compatibilityProperties (structured).
+    Fallback source: raw_order.buyerCheckoutNotes (free text).
+    Last resort: line item listing title (vehicle-branded charger listings).
+
+    Output keys:
+      - vehicle_make, vehicle_model, vehicle_year, vehicle_type
+      - vehicle_raw: the raw extracted vehicle string when available
+      - vehicle_source: "compatibilityProperties", "buyerCheckoutNotes", or "listingTitle"
+    """
+
+    raw_order = raw_order or {}
+
+    buyer_notes = raw_order.get("buyerCheckoutNotes")
+    buyer_vehicle = _extract_buyer_vehicle_string(buyer_notes)
+
+    compat_props: Optional[List[Dict[str, Any]]] = None
+    for li in raw_order.get("lineItems") or []:
+        cps = li.get("compatibilityProperties") or []
+        if cps:
+            compat_props = cps
+            break
+
+    compat_map: Dict[str, Optional[str]] = {}
+    if compat_props:
+        for p in compat_props:
+            name = (p.get("propertyName") or "").strip().lower()
+            if not name:
+                continue
+            compat_map[name] = p.get("propertyValue")
+
+    compat_make = _clean_vehicle_fragment(compat_map.get("make"))
+    compat_model = _clean_vehicle_fragment(compat_map.get("model"))
+    compat_year = _parse_year_from_text(str(compat_map.get("year") or ""))
+    compat_type = _vehicle_type_from_text(compat_map.get("type"))
+
+    note_year = _parse_year_from_text(buyer_vehicle)
+
+    # Parse make/model from buyer vehicle string by taking:
+    # - make = first word token
+    # - model = remaining tokens before the year token
+    note_make: Optional[str] = None
+    note_model: Optional[str] = None
+    if buyer_vehicle and (note_year is not None):
+        note_clean = _clean_vehicle_fragment(buyer_vehicle) or ""
+        pre_year = note_clean.split(str(note_year))[0].strip()
+        pre_year = pre_year.replace(",", " ").strip()
+        tokens = pre_year.split()
+        if len(tokens) >= 2:
+            note_make = tokens[0]
+            note_model = " ".join(tokens[1:])
+
+    # Merge: keep structured fields when present, fill gaps from note.
+    vehicle_make = normalize_vehicle_make(compat_make or note_make)
+    vehicle_model = normalize_vehicle_model(compat_model or note_model)
+    # Drop redundant make prefix in model ("MG HS" → "HS" when make is MG).
+    # Keep numeric lines like "MG 4" / "MG 5" as the full model string.
+    if vehicle_make and vehicle_model:
+        make_low = vehicle_make.lower()
+        model_low = vehicle_model.lower()
+        if model_low == make_low:
+            vehicle_model = None
+        elif model_low.startswith(make_low + " "):
+            remainder = vehicle_model[len(vehicle_make) :].strip()
+            if remainder and not remainder[0].isdigit():
+                vehicle_model = normalize_vehicle_model(remainder)
+    vehicle_year = compat_year or note_year
+
+    note_type = _vehicle_type_from_text(buyer_vehicle)
+    # Prefer the note when it implies a stronger classification (PHEV vs generic Hybrid).
+    vehicle_type = note_type or compat_type
+
+    vehicle_raw = _clean_vehicle_fragment(buyer_vehicle) or (
+        " ".join([x for x in [vehicle_make, vehicle_model, str(vehicle_year) if vehicle_year else None] if x]).strip() or None
+    )
+
+    if compat_make or compat_model or compat_year:
+        vehicle_source: Optional[str] = "compatibilityProperties"
+    elif note_make or note_model or note_year:
+        vehicle_source = "buyerCheckoutNotes"
+    else:
+        vehicle_source = None
+
+    # No buyer/compat vehicle → infer from vehicle-branded listing title.
+    if not vehicle_make and not vehicle_model:
+        title = None
+        for li in raw_order.get("lineItems") or []:
+            t = (li.get("title") or "").strip()
+            if t:
+                title = t
+                break
+        from_title = _parse_vehicle_from_listing_title(title)
+        if from_title.get("vehicle_make") and from_title.get("vehicle_model"):
+            vehicle_make = from_title["vehicle_make"]
+            vehicle_model = from_title["vehicle_model"]
+            vehicle_raw = from_title.get("vehicle_raw") or title
+            if not vehicle_type:
+                vehicle_type = _vehicle_type_from_text(title)
+            vehicle_source = "listingTitle"
+
+    if not (vehicle_make or vehicle_model or vehicle_year):
+        vehicle_source = None
+
+    return {
+        "vehicle_make": vehicle_make,
+        "vehicle_model": vehicle_model,
+        "vehicle_year": vehicle_year,
+        "vehicle_type": vehicle_type,
+        "vehicle_raw": vehicle_raw,
+        "vehicle_source": vehicle_source,
+    }
 
 
 async def fetch_all_orders(

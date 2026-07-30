@@ -529,7 +529,11 @@ async def draft_reply(
         raise HTTPException(status_code=404, detail="Thread not found")
     msgs = sorted(thread.messages, key=lambda m: m.ebay_created_at)
     thread_history = [
-        {"role": m.sender_type, "content": (m.subject or "") + "\n" + (m.content or "")}
+        {
+            "role": m.sender_type,
+            "content": (m.subject or "") + "\n" + (m.content or ""),
+            "ebay_created_at": m.ebay_created_at.isoformat() if m.ebay_created_at else None,
+        }
         for m in msgs
     ]
 

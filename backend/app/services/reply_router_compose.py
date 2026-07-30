@@ -20,7 +20,7 @@ from app.models.messages import (
     SyncMetadata,
 )
 from app.models.stock import Order
-from app.services.reply_compose import resolve_product_context, truncate_thread_history
+from app.services.reply_compose import resolve_product_context, sanitize_messaging_punctuation, truncate_thread_history
 from app.services.reply_router import (
     STYLE_PACK,
     RouterResult,
@@ -96,12 +96,13 @@ async def compose_router_draft(
         messages=messages,
         skus=skus,
         order_date=order_date,
+        extra_instructions=extra_instructions,
     )
     if force_stage:
         router.stage = force_stage
         router.reasons = list(router.reasons) + [f"force_stage:{force_stage}"]
-        if router.tier == 3 and force_stage in {"follow_up", "courier_chase"}:
-            # Allow nudge drafts even on escalated threads when explicitly requested
+        if router.tier == 3 and force_stage in {"follow_up", "courier_chase", "safety", "reassurance"}:
+            # Allow nudge / safety / reassurance drafts even when otherwise escalated
             router.tier = 2
 
     if router.tier == 3 and not force_stage:
@@ -161,6 +162,14 @@ async def compose_router_draft(
         system_parts.append("PRODUCT CONTEXT:")
         system_parts.append(product_text)
 
+    if router.flags.get("seller_greeted_today"):
+        system_parts.append("")
+        system_parts.append(
+            "GREETING RULE (hard): The seller already greeted this buyer earlier today. "
+            "Do NOT start with Hi, Hello, Hey, Good morning/afternoon/evening, or similar. "
+            "Start directly with the substance of the reply."
+        )
+
     extra = (extra_instructions or "").strip()
     if extra:
         system_parts.append("")
@@ -174,7 +183,8 @@ async def compose_router_draft(
         "Conversation history:\n\n"
         f"{_format_history(hist)}\n\n"
         "---\n"
-        "Draft the seller's next message only. No preamble."
+        "Draft the seller's next message in English only. No preamble. "
+        "Do not write German or any other language — English only."
     )
 
     max_tokens = int(getattr(app_settings, "REPLY_DRAFT_MAX_TOKENS", 700))
@@ -192,6 +202,7 @@ async def compose_router_draft(
             },
         )
     ).strip()
+    draft = sanitize_messaging_punctuation(draft)
 
     composition = AIComposition(
         thread_id=thread.thread_id,

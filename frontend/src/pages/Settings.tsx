@@ -4,6 +4,7 @@ import { settingsAPI, stockAPI, inventoryStatusAPI, type AIModelSetting, type AP
 import VideoManagement from './VideoManagement'
 import LenderSummary from './LenderSummary'
 import SKUManager from './SKUManager'
+import { formatLocalDate, todayIso } from '../utils/datePeriodPresets'
 
 type SettingsTab =
   | 'credentials'
@@ -16,6 +17,7 @@ type SettingsTab =
   | 'skus'
   | 'video'
   | 'lender'
+  | 'customer-vehicles'
 
 const SETTINGS_TABS: SettingsTab[] = [
   'credentials',
@@ -28,6 +30,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   'skus',
   'video',
   'lender',
+  'customer-vehicles',
 ]
 
 function tabFromSearch(): SettingsTab {
@@ -104,6 +107,7 @@ export default function Settings() {
           {tabBtn('skus', 'SKUs')}
           {tabBtn('video', 'Video ID getter')}
           {tabBtn('lender', 'Lender summary')}
+          {tabBtn('customer-vehicles', 'Customer Vehicle Details')}
         </nav>
       </div>
 
@@ -117,6 +121,195 @@ export default function Settings() {
       {activeTab === 'skus' && <SKUManager embedded />}
       {activeTab === 'video' && <VideoManagement embedded />}
       {activeTab === 'lender' && <LenderSummary embedded />}
+      {activeTab === 'customer-vehicles' && <CustomerVehicleDetailsTab />}
+    </div>
+  )
+}
+
+function CustomerVehicleDetailsTab() {
+  const defaultTo = todayIso()
+  const defaultFrom = (() => {
+    const d = new Date()
+    d.setMonth(d.getMonth() - 12)
+    return formatLocalDate(d)
+  })()
+
+  const [from, setFrom] = useState(defaultFrom)
+  const [to, setTo] = useState(defaultTo)
+  const [limit, setLimit] = useState(200)
+  const [sortMakeModelKey, setSortMakeModelKey] = useState<'purchases' | 'make' | 'model'>('purchases')
+  const [sortMakeModelDir, setSortMakeModelDir] = useState<'asc' | 'desc'>('desc')
+  const [sortYearKey, setSortYearKey] = useState<'purchases' | 'year'>('purchases')
+  const [sortYearDir, setSortYearDir] = useState<'asc' | 'desc'>('desc')
+
+  const statsQuery = useQuery({
+    queryKey: ['customer-vehicle-stats', from, to, limit],
+    queryFn: async () => {
+      const res = await stockAPI.getCustomerVehicleStats({ from, to, limit })
+      return res.data
+    },
+  })
+
+  const sortedMakeModelRows = [...(statsQuery.data?.make_model_rows ?? [])].sort((a, b) => {
+    const mult = sortMakeModelDir === 'asc' ? 1 : -1
+    if (sortMakeModelKey === 'purchases') return mult * (a.purchases - b.purchases)
+    if (sortMakeModelKey === 'make') return mult * a.vehicle_make.localeCompare(b.vehicle_make)
+    return mult * a.vehicle_model.localeCompare(b.vehicle_model)
+  })
+
+  const sortedYearRows = [...(statsQuery.data?.year_rows ?? [])].sort((a, b) => {
+    const mult = sortYearDir === 'asc' ? 1 : -1
+    if (sortYearKey === 'purchases') return mult * (a.purchases - b.purchases)
+    return mult * (a.vehicle_year - b.vehicle_year)
+  })
+
+  const setMakeModelSort = (key: typeof sortMakeModelKey) => {
+    if (sortMakeModelKey === key) {
+      setSortMakeModelDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortMakeModelKey(key)
+      setSortMakeModelDir(key === 'purchases' ? 'desc' : 'asc')
+    }
+  }
+
+  const setYearSort = (key: typeof sortYearKey) => {
+    if (sortYearKey === key) {
+      setSortYearDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortYearKey(key)
+      setSortYearDir(key === 'purchases' ? 'desc' : 'asc')
+    }
+  }
+
+  return (
+    <div className="bg-white shadow rounded-lg p-6">
+      <h2 className="text-xl font-semibold mb-2">Customer Vehicle Details</h2>
+      <p className="text-sm text-gray-600 mb-6">
+        Ranked purchases by customer vehicle make+model and by vehicle year. Prefers eBay buyer notes /
+        compatibility properties when present; otherwise uses the vehicle name from the listing title.
+        Cancelled orders are included.
+      </p>
+
+      <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">From</label>
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">To</label>
+            <input
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Top rows</label>
+            <input
+              type="number"
+              min={1}
+              max={1000}
+              value={limit}
+              onChange={(e) => setLimit(Number(e.target.value))}
+              className="w-full rounded border border-gray-300 bg-white px-3 py-2 text-sm"
+            />
+          </div>
+        </div>
+      </div>
+
+      {statsQuery.isLoading ? (
+        <p className="text-sm text-gray-500">Loading vehicle stats…</p>
+      ) : statsQuery.isError ? (
+        <p className="text-sm text-red-700">{statsQuery.error instanceof Error ? statsQuery.error.message : 'Failed to load'}</p>
+      ) : (
+        <>
+          <div className="mb-6 text-sm text-gray-600">
+            Records in range: <span className="font-medium text-gray-900 tabular-nums">{statsQuery.data?.records_in_range ?? 0}</span>
+          </div>
+
+          <div className="bg-white shadow rounded-lg p-4 overflow-x-auto mb-6">
+            <h3 className="text-lg font-semibold text-gray-800 mb-3">Purchases by Make + Model</h3>
+            {sortedMakeModelRows.length === 0 ? (
+              <p className="text-sm text-gray-500">No data for the selected range.</p>
+            ) : (
+              <table className="min-w-full divide-y divide-gray-200 text-sm table-fixed">
+                <thead>
+                  <tr className="bg-gray-50">
+                    <th
+                      className="px-4 py-2 text-left font-medium text-gray-700 cursor-pointer hover:text-gray-900"
+                      onClick={() => setMakeModelSort('make')}
+                    >
+                      Make {sortMakeModelKey === 'make' && (sortMakeModelDir === 'asc' ? '▲' : '▼')}
+                    </th>
+                    <th
+                      className="px-4 py-2 text-left font-medium text-gray-700 cursor-pointer hover:text-gray-900"
+                      onClick={() => setMakeModelSort('model')}
+                    >
+                      Model {sortMakeModelKey === 'model' && (sortMakeModelDir === 'asc' ? '▲' : '▼')}
+                    </th>
+                    <th
+                      className="px-4 py-2 text-right font-medium text-gray-700 cursor-pointer hover:text-gray-900"
+                      onClick={() => setMakeModelSort('purchases')}
+                    >
+                      Purchases {sortMakeModelKey === 'purchases' && (sortMakeModelDir === 'asc' ? '▲' : '▼')}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {sortedMakeModelRows.map((r) => (
+                    <tr key={`${r.vehicle_make}|${r.vehicle_model}`} className="hover:bg-gray-50">
+                      <td className="px-4 py-2 font-medium text-gray-900 break-words">{r.vehicle_make}</td>
+                      <td className="px-4 py-2 text-gray-700 break-words">{r.vehicle_model}</td>
+                      <td className="px-4 py-2 text-right text-gray-700 tabular-nums">{r.purchases}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          <div className="bg-white shadow rounded-lg p-4 overflow-x-auto">
+            <h3 className="text-lg font-semibold text-gray-800 mb-3">Purchases by Vehicle Year</h3>
+            {sortedYearRows.length === 0 ? (
+              <p className="text-sm text-gray-500">No data for the selected range.</p>
+            ) : (
+              <table className="min-w-full divide-y divide-gray-200 text-sm table-fixed">
+                <thead>
+                  <tr className="bg-gray-50">
+                    <th
+                      className="px-4 py-2 text-left font-medium text-gray-700 cursor-pointer hover:text-gray-900"
+                      onClick={() => setYearSort('year')}
+                    >
+                      Year {sortYearKey === 'year' && (sortYearDir === 'asc' ? '▲' : '▼')}
+                    </th>
+                    <th
+                      className="px-4 py-2 text-right font-medium text-gray-700 cursor-pointer hover:text-gray-900"
+                      onClick={() => setYearSort('purchases')}
+                    >
+                      Purchases {sortYearKey === 'purchases' && (sortYearDir === 'asc' ? '▲' : '▼')}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200">
+                  {sortedYearRows.map((r) => (
+                    <tr key={r.vehicle_year} className="hover:bg-gray-50">
+                      <td className="px-4 py-2 font-medium text-gray-900 tabular-nums">{r.vehicle_year}</td>
+                      <td className="px-4 py-2 text-right text-gray-700 tabular-nums">{r.purchases}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
     </div>
   )
 }

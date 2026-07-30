@@ -137,7 +137,7 @@ Using **`created_at`** as a fallback places the row on the timeline when the app
 
 | Symptom | Things to check |
 |--------|-------------------|
-| Chart/table **empty** for a range | **From/To** actually overlaps when events exist (e.g. **Today** only has no lines if nothing moved today). Use **Pull latest data**. Confirm **`oc_stock_movement_line`** row count for the connection. |
+| Chart/table **empty** for a range | **From/To** actually overlaps when events exist (e.g. **Today** only has no lines if nothing moved today). Use **Pull latest data**. Confirm **`oc_stock_movement_line`** row count for the connection. If **`oc_sku_mappings`** is empty, chart falls back to distinct `mfskuid`s from movement lines; an empty OC SKU sync must **not** wipe mappings (sync keeps existing rows when OC returns 0). |
 | **Debug JSON** shows many rows but UI empty | Was often **NULL `update_time_utc`** before **coalesce** fix; hit debug endpoints directly (Diagnostics UI removed) or ensure deployed backend includes **`COALESCE(..., created_at)`**. |
 | Spike then cliff (historical bugs) | Fixed: **sum** of burst `actual_count` at same second; **sum at T** without carry-forward. Current logic is §3.1. |
 | “All” vs one SKU | **All** sums **carried-forward** levels across mapped MFSKUIDs; one SKU filters mappings for that seller SKU. |

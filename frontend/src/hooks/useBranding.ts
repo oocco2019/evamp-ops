@@ -14,9 +14,14 @@ export function useBranding() {
 
   const branding = query.data
   const appName = branding?.app_name?.trim() || DEFAULT_APP_NAME
+  // Prefer stored DB icon (favicon or logo); fall back to static SVG only when none uploaded.
   const faviconUrl =
-    branding?.has_favicon && branding.favicon_url ? branding.favicon_url : DEFAULT_FAVICON
-  const faviconMime = branding?.favicon_mime ?? null
+    branding?.has_favicon && branding.favicon_url
+      ? branding.favicon_url
+      : branding?.has_logo && branding.logo_url
+        ? branding.logo_url
+        : DEFAULT_FAVICON
+  const faviconMime = branding?.has_favicon ? branding.favicon_mime ?? null : null
 
   useEffect(() => {
     document.title = appName

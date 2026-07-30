@@ -6,6 +6,7 @@ import pytest
 from app.services.reply_compose import (
     _parse_adherence_json,
     playbook_matches_keywords,
+    sanitize_messaging_punctuation,
     sku_matches_scope,
     truncate_thread_history,
 )
@@ -96,3 +97,12 @@ def test_truncate_thread_history_respects_char_budget():
     out = truncate_thread_history(hist, max_messages=10, max_chars=6000)
     assert len(out) <= 2
     assert out[-1]["content"] == "x" * 5000
+
+
+def test_sanitize_messaging_punctuation():
+    assert "—" not in sanitize_messaging_punctuation("Sorry — I will check")
+    assert ", and" not in sanitize_messaging_punctuation("Thanks, and let me know")
+    assert " and" in sanitize_messaging_punctuation("Thanks, and let me know")
+    # Keep word hyphens
+    assert "Wi-Fi" in sanitize_messaging_punctuation("Try another Wi-Fi network")
+    assert " - " not in sanitize_messaging_punctuation("Ok - I will send a label")

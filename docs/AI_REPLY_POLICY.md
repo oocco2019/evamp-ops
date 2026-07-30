@@ -7,7 +7,7 @@ Management UI: `/ai-instructions` (linked from Messages). Messages dashboard dra
 Experimental surface: **`/messages-test`** (nav **Messages-Test**). Same Messages UI (including **voice instructions**); drafts use the CS router. Does **not** change legacy Messages compose.
 
 - Rule router: language → intent → known-issue → tier/stage (`backend/app/services/reply_router.py`).
-- One LLM stage draft (`POST /api/messages-test/threads/{id}/draft`); playbook frozen on this path.
+- One LLM stage draft (`POST /api/messages-test/threads/{id}/draft`); playbook frozen on this path. **Drafts are always English** (buyer language is for routing only; use DE to translate before send).
 - Tier 3: escalation card, no resolutive draft (safety / DE return / OOW / eBay case / melted_plug / **seller already decided with no new buyer material**).
 - Known issues + stage templates in DB (migration `035`); `white_glue_cover.batch_safe` defaults **false** → refund until flipped via `PATCH /api/messages-test/known-issues/{id}`.
 - Spec: [`AI_CS_ROUTER_SPEC.md`](AI_CS_ROUTER_SPEC.md).

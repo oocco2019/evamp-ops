@@ -675,6 +675,27 @@ async def upload_favicon(
     return _branding_to_response(row)
 
 
+@router.post("/branding/icon", response_model=BrandingResponse)
+async def upload_app_icon(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    One-shot upload: same image becomes nav logo and browser favicon.
+    Stored in PostgreSQL so it survives container rebuilds (as long as the DB volume is kept).
+    """
+    allowed = ALLOWED_LOGO_MIMES | ALLOWED_FAVICON_MIMES
+    data, mime = await _read_upload(file, LOGO_MAX_BYTES, allowed)
+    row = await _get_or_create_branding(db)
+    row.logo_data = data
+    row.logo_mime = mime
+    row.favicon_data = data
+    row.favicon_mime = mime
+    await db.commit()
+    await db.refresh(row)
+    return _branding_to_response(row)
+
+
 @router.delete("/branding/logo", response_model=BrandingResponse)
 async def delete_logo(db: AsyncSession = Depends(get_db)):
     row = await _get_or_create_branding(db)

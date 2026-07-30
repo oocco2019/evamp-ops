@@ -24,6 +24,25 @@ from app.models.stock import LineItem, Order, SKU
 
 logger = logging.getLogger(__name__)
 
+# Clause dashes people do not type in casual messaging (keep word-hyphens like Wi-Fi).
+_CLAUSE_DASH_RE = re.compile(r"\s*[—–]\s*|\s+-\s+")
+_COMMA_AND_RE = re.compile(r",\s+and\b", re.I)
+
+
+def sanitize_messaging_punctuation(text: str) -> str:
+    """
+    Strip stiff punctuation models love: em/en dashes, spaced hyphen pauses, ', and'.
+    Does not touch hyphens inside words (e.g. Wi-Fi, order-id fragments without spaces).
+    """
+    if not text:
+        return text
+    out = _CLAUSE_DASH_RE.sub(". ", text)
+    out = _COMMA_AND_RE.sub(" and", out)
+    out = re.sub(r"\.{2,}", ".", out)
+    out = re.sub(r" +", " ", out)
+    out = re.sub(r" +\n", "\n", out)
+    return out.strip()
+
 
 def sku_matches_scope(sku: Optional[str], scope: str) -> bool:
     """
@@ -185,18 +204,28 @@ def build_compose_prompt_parts(
     playbook: Sequence[ReplyPlaybookEntry],
     product_context_text: str,
     extra_instructions: Optional[str],
+    *,
+    seller_greeted_today: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
     """User-side compose instruction. Policies/playbook/product live in the system prompt only."""
     prompt = (
-        "Draft the next seller reply for this conversation. "
+        "Draft the next seller reply for this conversation in English only "
+        "(even if the buyer wrote in German or another language). "
         "Write one short message for this stage of the thread — do not dump every troubleshooting "
         "step or policy into a single wall of text."
     )
+    if seller_greeted_today:
+        prompt += (
+            "\n\nGREETING RULE (hard): The seller already greeted this buyer earlier today. "
+            "Do NOT start with Hi, Hello, Hey, Good morning/afternoon/evening, or similar. "
+            "Start directly with the substance of the reply."
+        )
     if extra_instructions and extra_instructions.strip():
         prompt += f"\n\nAdditional instructions: {extra_instructions.strip()}"
     snapshot = {
         "prompt": prompt,
         "extra_instructions": (extra_instructions or "").strip() or None,
+        "seller_greeted_today": seller_greeted_today,
         "policy_bodies": [p.body for p in policies],
         "playbook": [
             {"id": e.id, "symptom": e.symptom, "resolution": e.resolution, "sku_scope": e.sku_scope}
@@ -379,8 +408,15 @@ async def compose_draft_with_adherence(
     playbook = await retrieve_playbook_entries(
         db, skus=product["skus"] or ([product["primary_sku"]] if product["primary_sku"] else []), thread_text=text
     )
+    from app.services.reply_router import seller_greeted_today as _seller_greeted_today
+
+    greeted_today = _seller_greeted_today(thread_history)
     prompt, snapshot = build_compose_prompt_parts(
-        policies, playbook, product["product_context_text"], extra_instructions
+        policies,
+        playbook,
+        product["product_context_text"],
+        extra_instructions,
+        seller_greeted_today=greeted_today,
     )
     ctx = build_provider_context(
         thread_history=thread_history,
@@ -391,6 +427,7 @@ async def compose_draft_with_adherence(
     ctx["max_tokens"] = draft_max_tokens
 
     draft = (await ai_generate(prompt, ctx)).strip()
+    draft = sanitize_messaging_punctuation(draft)
     logger.info(
         "reply_compose: initial draft in %.2fs (messages=%s policies=%s playbook=%s)",
         time.perf_counter() - t0,
@@ -429,6 +466,8 @@ async def compose_draft_with_adherence(
             revise_count,
             last_adh.get("all_passed"),
         )
+
+    draft = sanitize_messaging_punctuation(draft)
 
     composition = AIComposition(
         thread_id=thread.thread_id,

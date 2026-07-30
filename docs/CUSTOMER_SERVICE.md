@@ -8,7 +8,7 @@ On-page explanatory blurbs were removed; behaviour is documented here and in the
 
 ## What the page does
 
-- Manage **eBay** buyer/seller message threads with **AI-powered drafting** (including **DE** German compose).
+- Manage **eBay** buyer/seller message threads with **AI-powered drafting** (drafts always in **English**; use **DE** to translate before send).
 - **AI Instructions** (`/ai-instructions`): **policies** (how replies are written) and **playbook** (product/issue knowledge). See [AI_REPLY_POLICY.md](AI_REPLY_POLICY.md).
 - **Sending** to eBay is gated until send is enabled in app/settings behaviour (drafting can still work when send is off).
 - The **thread list** is loaded from the **local database**. **Sync** buttons fetch new/updated messages from eBay into that DB (Quick sync / deeper sync options on the page).

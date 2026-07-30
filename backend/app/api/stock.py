@@ -18,7 +18,7 @@ from app.core.config import settings as app_settings
 from app.core.security import encryption_service
 from app.utils.date_ranges import latest_complete_day
 from app.models.settings import APICredential, Warehouse
-from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem
+from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem, CustomerVehicleDetails
 from app.services.shopify_client import (
     fetch_shopify_orders_paginated,
     parse_shopify_order_to_import,
@@ -44,6 +44,7 @@ from app.services.ebay_client import (
     parse_net_order_earnings_from_transactions,
     parse_ad_fees_from_transactions,
     _parse_total_due_seller,
+    extract_customer_vehicle_details_from_ebay_order,
 )
 from app.services.ebay_auth import get_ebay_access_token
 
@@ -405,6 +406,64 @@ class ImportResponse(BaseModel):
     error: Optional[str] = None
 
 
+async def _upsert_customer_vehicle_details_for_ebay_order(
+    db: AsyncSession,
+    *,
+    order_id: int,
+    ebay_order_id: str,
+    order_date: date,
+    raw_ebay_order_payload: dict,
+) -> int:
+    """
+    Upsert one row into `customer_vehicle_details`.
+    Returns 1 when a row was inserted/updated, 0 when extraction yielded no useful fields.
+    """
+
+    extracted = extract_customer_vehicle_details_from_ebay_order(raw_ebay_order_payload)
+    vehicle_make = extracted.get("vehicle_make")
+    vehicle_model = extracted.get("vehicle_model")
+    vehicle_year = extracted.get("vehicle_year")
+
+    if not (vehicle_make or vehicle_model or vehicle_year):
+        return 0
+
+    result = await db.execute(
+        select(CustomerVehicleDetails).where(CustomerVehicleDetails.order_id == order_id)
+    )
+    existing = result.scalar_one_or_none()
+
+    if existing:
+        existing.sales_channel = "ebay"
+        existing.ebay_order_id = ebay_order_id
+        existing.order_date = order_date
+        existing.vehicle_make = vehicle_make  # type: ignore[assignment]
+        existing.vehicle_model = vehicle_model  # type: ignore[assignment]
+        existing.vehicle_year = vehicle_year  # type: ignore[assignment]
+        existing.vehicle_type = extracted.get("vehicle_type")  # type: ignore[assignment]
+        existing.vehicle_raw = extracted.get("vehicle_raw")  # type: ignore[assignment]
+        existing.vehicle_source = extracted.get("vehicle_source")  # type: ignore[assignment]
+        existing.updated_at = datetime.utcnow()
+        await db.flush()
+        return 1
+
+    db.add(
+        CustomerVehicleDetails(
+            order_id=order_id,
+            sales_channel="ebay",
+            ebay_order_id=ebay_order_id,
+            order_date=order_date,
+            vehicle_make=vehicle_make,  # type: ignore[arg-type]
+            vehicle_model=vehicle_model,  # type: ignore[arg-type]
+            vehicle_year=vehicle_year,  # type: ignore[arg-type]
+            vehicle_type=extracted.get("vehicle_type"),  # type: ignore[arg-type]
+            vehicle_raw=extracted.get("vehicle_raw"),  # type: ignore[arg-type]
+            vehicle_source=extracted.get("vehicle_source"),  # type: ignore[arg-type]
+        )
+    )
+    await db.flush()
+    return 1
+
+
 async def execute_order_import(db: AsyncSession, mode: str) -> ImportResponse:
     """
     Core order import (also used by scheduled inventory refresh). mode: 'full' | 'incremental'.
@@ -474,6 +533,7 @@ async def execute_order_import(db: AsyncSession, mode: str) -> ImportResponse:
                         getattr(existing_order, k, None) != payload.get(k)
                         for k in payload
                     )
+                    order_should_upsert_vehicle = bool(order_changed)
                     if order_changed:
                         for k, v in payload.items():
                             setattr(existing_order, k, v)
@@ -493,6 +553,7 @@ async def execute_order_import(db: AsyncSession, mode: str) -> ImportResponse:
                     orders_added += 1
                     order_id = new_order.order_id
                     existing_items = {}
+                    order_should_upsert_vehicle = True
 
                 for li in o["line_items"]:
                     eid = li["ebay_line_item_id"]
@@ -521,6 +582,15 @@ async def execute_order_import(db: AsyncSession, mode: str) -> ImportResponse:
                             **line_payload,
                         ))
                         line_items_added += 1
+
+                if order_should_upsert_vehicle:
+                    await _upsert_customer_vehicle_details_for_ebay_order(
+                        db,
+                        order_id=order_id,
+                        ebay_order_id=o["ebay_order_id"],
+                        order_date=o["date"],
+                        raw_ebay_order_payload=o.get("raw_payload") or {},
+                    )
 
         await db.commit()
     except Exception as e:
@@ -780,6 +850,183 @@ async def backfill_order_earnings(
         await db.rollback()
         logger.exception("Backfill order earnings failed")
         return BackfillOrderEarningsResponse(orders_updated=0, orders_skipped=0, error=str(e))
+
+
+class CustomerVehicleStatsMakeModelRow(BaseModel):
+    vehicle_make: str
+    vehicle_model: str
+    purchases: int
+
+
+class CustomerVehicleStatsYearRow(BaseModel):
+    vehicle_year: int
+    purchases: int
+
+
+class CustomerVehicleStatsResponse(BaseModel):
+    from_date: date
+    to_date: date
+    records_in_range: int
+    make_model_rows: List[CustomerVehicleStatsMakeModelRow]
+    year_rows: List[CustomerVehicleStatsYearRow]
+
+
+class CustomerVehicleBackfillResponse(BaseModel):
+    processed: int
+    inserted: int
+    skipped: int
+    error: Optional[str] = None
+
+
+@router.post("/customer-vehicles/backfill", response_model=CustomerVehicleBackfillResponse)
+async def backfill_customer_vehicle_details(
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(500, ge=1, le=2000, description="Max orders to process per run"),
+):
+    """
+    One-time backfill for `customer_vehicle_details` from existing orders.
+
+    Usually you will run this once after deploying this feature.
+    """
+
+    try:
+        # Only eBay orders for now.
+        stmt = (
+            select(Order)
+            .outerjoin(
+                CustomerVehicleDetails,
+                CustomerVehicleDetails.order_id == Order.order_id,
+            )
+            .where(
+                Order.sales_channel == "ebay",
+                CustomerVehicleDetails.order_id.is_(None),
+                Order.raw_payload.isnot(None),
+            )
+            .order_by(Order.date.asc())
+            .limit(limit)
+        )
+        result = await db.execute(stmt)
+        orders = result.scalars().all()
+
+        processed = len(orders)
+        inserted = 0
+        skipped = 0
+        for o in orders:
+            inserted_or_not = await _upsert_customer_vehicle_details_for_ebay_order(
+                db,
+                order_id=o.order_id,
+                ebay_order_id=o.ebay_order_id,
+                order_date=o.date,
+                raw_ebay_order_payload=o.raw_payload or {},
+            )
+            if inserted_or_not:
+                inserted += 1
+            else:
+                skipped += 1
+
+        await db.commit()
+        return CustomerVehicleBackfillResponse(
+            processed=processed,
+            inserted=inserted,
+            skipped=skipped,
+        )
+    except Exception as e:
+        await db.rollback()
+        return CustomerVehicleBackfillResponse(
+            processed=0,
+            inserted=0,
+            skipped=0,
+            error=str(e),
+        )
+
+
+@router.get("/customer-vehicles/stats", response_model=CustomerVehicleStatsResponse)
+async def get_customer_vehicle_stats(
+    from_date: date = Query(..., alias="from", description="Start date (YYYY-MM-DD)"),
+    to_date: date = Query(..., alias="to", description="End date (YYYY-MM-DD)"),
+    limit: int = Query(200, ge=1, le=1000, description="Max rows per table"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Ranked customer vehicle stats:
+      - purchases by make+model
+      - purchases by vehicle year
+    """
+
+    if from_date > to_date:
+        raise HTTPException(status_code=400, detail="from must be <= to")
+
+    records_stmt = (
+        select(func.count())
+        .select_from(CustomerVehicleDetails)
+        .where(
+            CustomerVehicleDetails.sales_channel == "ebay",
+            CustomerVehicleDetails.order_date >= from_date,
+            CustomerVehicleDetails.order_date <= to_date,
+        )
+    )
+    records = await db.execute(records_stmt)
+    records_in_range = int(records.scalar_one() or 0)
+
+    make_model_stmt = (
+        select(
+            CustomerVehicleDetails.vehicle_make,
+            CustomerVehicleDetails.vehicle_model,
+            func.count().label("purchases"),
+        )
+        .where(
+            CustomerVehicleDetails.sales_channel == "ebay",
+            CustomerVehicleDetails.order_date >= from_date,
+            CustomerVehicleDetails.order_date <= to_date,
+            CustomerVehicleDetails.vehicle_make.isnot(None),
+            CustomerVehicleDetails.vehicle_model.isnot(None),
+        )
+        .group_by(CustomerVehicleDetails.vehicle_make, CustomerVehicleDetails.vehicle_model)
+        .order_by(func.count().desc())
+        .limit(limit)
+    )
+    make_model_rows_raw = await db.execute(make_model_stmt)
+    make_model_rows = [
+        CustomerVehicleStatsMakeModelRow(
+            vehicle_make=r[0] or "",
+            vehicle_model=r[1] or "",
+            purchases=int(r[2] or 0),
+        )
+        for r in make_model_rows_raw.all()
+    ]
+
+    year_stmt = (
+        select(
+            CustomerVehicleDetails.vehicle_year,
+            func.count().label("purchases"),
+        )
+        .where(
+            CustomerVehicleDetails.sales_channel == "ebay",
+            CustomerVehicleDetails.order_date >= from_date,
+            CustomerVehicleDetails.order_date <= to_date,
+            CustomerVehicleDetails.vehicle_year.isnot(None),
+        )
+        .group_by(CustomerVehicleDetails.vehicle_year)
+        .order_by(func.count().desc())
+        .limit(limit)
+    )
+    year_rows_raw = await db.execute(year_stmt)
+    year_rows = [
+        CustomerVehicleStatsYearRow(
+            vehicle_year=int(r[0]),
+            purchases=int(r[1] or 0),
+        )
+        for r in year_rows_raw.all()
+        if r[0] is not None
+    ]
+
+    return CustomerVehicleStatsResponse(
+        from_date=from_date,
+        to_date=to_date,
+        records_in_range=records_in_range,
+        make_model_rows=make_model_rows,
+        year_rows=year_rows,
+    )
 
 
 # === Analytics (SM01) ===

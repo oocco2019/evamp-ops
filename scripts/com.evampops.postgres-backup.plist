@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent: daily EvampOps Postgres backup at 03:15 local time.
+  Install:
+    cp scripts/com.evampops.postgres-backup.plist ~/Library/LaunchAgents/
+    # Edit WorkingDirectory / script path if the repo is not at /Users/marius/evamp-ops
+    launchctl unload ~/Library/LaunchAgents/com.evampops.postgres-backup.plist 2>/dev/null || true
+    launchctl load ~/Library/LaunchAgents/com.evampops.postgres-backup.plist
+  Run once now:
+    launchctl start com.evampops.postgres-backup
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.evampops.postgres-backup</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/marius/evamp-ops</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/marius/evamp-ops/scripts/backup-postgres.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>15</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/marius/evamp-ops/backups/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/marius/evamp-ops/backups/logs/launchd.err.log</string>
+</dict>
+</plist>

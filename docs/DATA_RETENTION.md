@@ -7,6 +7,12 @@ data queryable 10+ years out. See the always-applied rule `.cursor/rules/data-re
 This document records what is durably persisted today, and the known gaps where data we receive
 is *not* fully retained. Keep it updated when ingestion changes.
 
+## Backups
+
+Local Postgres dumps live under `backups/` (gitignored). Run `bash scripts/backup-postgres.sh`
+(or the macOS LaunchAgent `scripts/com.evampops.postgres-backup.plist`). Retention: **7 daily**
++ **1 monthly**. See `backups/README.md`.
+
 ## Durably persisted (safe)
 
 | Data | Table(s) | Pattern | Notes |

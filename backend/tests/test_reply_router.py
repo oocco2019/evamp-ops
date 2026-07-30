@@ -80,7 +80,7 @@ def test_white_glue_batch_safe_false_refunds():
     assert r.stage == "resolve_refund"
 
 
-def test_melted_plug_always_tier3():
+def test_melted_plug_routes_to_safety_stage_draft():
     issue = SimpleNamespace(
         issue_id="melted_plug",
         skip_to_action="request_photo",
@@ -102,8 +102,21 @@ def test_melted_plug_always_tier3():
         out_of_warranty=False,
         ebay_case=False,
     )
-    assert r.tier == 3
-    assert r.stage == "request_photo"
+    assert r.tier == 2
+    assert r.stage == "safety"
+
+
+def test_reassurance_claim_routes_to_reassurance_stage_draft():
+    r = route(
+        language="EN",
+        intent="reassurance_claim",
+        known=None,
+        signals={},
+        out_of_warranty=False,
+        ebay_case=False,
+    )
+    assert r.tier == 2
+    assert r.stage == "reassurance"
 
 
 def test_match_known_issue_keywords():
@@ -215,3 +228,45 @@ def test_buyer_new_material_after_decision():
         ),
     ]
     assert buyer_new_material_after_decision(msgs) is True
+
+
+def test_seller_greeted_today_blocks_rehello():
+    from datetime import datetime
+
+    from app.services.reply_router import message_opens_with_greeting, seller_greeted_today
+
+    assert message_opens_with_greeting("Hello,\n\nThanks for your message.")
+    assert message_opens_with_greeting("Hi there — thanks for waiting.")
+    assert not message_opens_with_greeting("Thanks for the update.")
+
+    now = datetime(2026, 7, 28, 15, 0, 0)
+    msgs = [
+        SimpleNamespace(
+            sender_type="seller",
+            content="Hello,\n\nSorry to hear that.",
+            subject="",
+            ebay_created_at=datetime(2026, 7, 28, 9, 0, 0),
+        ),
+        SimpleNamespace(
+            sender_type="buyer",
+            content="Still not working",
+            subject="",
+            ebay_created_at=datetime(2026, 7, 28, 14, 0, 0),
+        ),
+    ]
+    assert seller_greeted_today(msgs, now=now) is True
+    # Different day → ok to greet again
+    assert (
+        seller_greeted_today(
+            [
+                SimpleNamespace(
+                    sender_type="seller",
+                    content="Hello,\n\nThanks.",
+                    subject="",
+                    ebay_created_at=datetime(2026, 7, 27, 9, 0, 0),
+                )
+            ],
+            now=now,
+        )
+        is False
+    )

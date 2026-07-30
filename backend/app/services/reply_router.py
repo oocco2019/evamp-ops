@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import select
@@ -18,25 +18,79 @@ from app.services.reply_compose import sku_matches_scope
 
 # --- Intent keyword tables (priority: first match wins). "error" intentionally omitted. ---
 
+# Real fire/heat hazard — routes to `safety` stage (reaction-first draft).
+_REAL_HAZARD_PHRASES = [
+    "burnt",
+    "burned",
+    "melted",
+    "festgeschmolzen",
+    "verschmort",
+    "stecken geblieben",
+    "stuck in the socket",
+    "stuck in socket",
+    "fire",
+    "smoke",
+    "shock",
+    "sparks",
+    "overheated",
+    "overheating",
+    "scorch",
+    "scorched",
+    "brandgeruch",
+    "geschmolzen",
+    "schuko",
+    "im stecker",
+    "in der steckdose",
+    "rauch",
+    "funken",
+    "electric shock",
+]
+
+# Protective cut-off / scary error — routes to `reassurance` stage (calm first).
+_REASSURANCE_PHRASES = [
+    "leakage",
+    "leakage error",
+    "rcd",
+    "rcd trip",
+    "earth fault",
+    "earth-fault",
+    "tripped breaker",
+    "tripped the breaker",
+    "breaker tripped",
+    "fi schalter",
+    "fehlerstrom",
+    "schutzschalter",
+    "stopped and won't restart",
+    "stopped and wont restart",
+    "fehlercode",
+]
+
+# Liability / disputed causation — safety_claim stays Tier 3 (no resolutive draft).
+_SAFETY_LIABILITY_PHRASES = [
+    "property damage",
+    "house fire",
+    "injured",
+    "injury",
+    "hospital",
+    "sue",
+    "suing",
+    "lawsuit",
+    "liable",
+    "liability",
+    "compensation",
+    "your fault",
+    "your product caused",
+    "dangerous product",
+    "almost burned",
+    "could have killed",
+    "sachschaden",
+    "personenschaden",
+    "verletzt",
+    "haftung",
+    "klage",
+]
+
 _INTENT_PRIORITY: List[tuple[str, List[str]]] = [
-    (
-        "safety_claim",
-        [
-            "burnt",
-            "burned",
-            "melted",
-            "fire",
-            "smoke",
-            "shock",
-            "sparks",
-            "tripped breaker",
-            "electric shock",
-            "brandgeruch",
-            "geschmolzen",
-            "rauch",
-            "funken",
-        ],
-    ),
     (
         "not_charging",
         [
@@ -47,10 +101,8 @@ _INTENT_PRIORITY: List[tuple[str, List[str]]] = [
             "not charging",
             "stops charging",
             "no charge",
-            "leakage",
             "lädt nicht",
             "laedt nicht",
-            "lädt nicht",
             "kein laden",
         ],
     ),
@@ -329,10 +381,33 @@ _DATE_OR_ORDER_RE = re.compile(
 
 _STYLE_PACK = (
     "You are drafting an eBay seller reply for Evamp. "
-    "Be warm, brief, and human. One short message only — never dump the whole support process. "
+    "ALWAYS write the draft in English only, even when the buyer wrote in German or another language. "
+    "Detected buyer language is for routing only; the seller will translate with a separate DE step before sending. "
+    "Be warm, brief, and human. One short message only. Never dump the whole support process. "
     "Do not invent order facts, tracking, or promises not supported by the thread or instructions. "
     "Never overturn a decision the seller already stated in this thread. "
-    "Prefer plain punctuation; avoid em-dashes and stiff corporate phrasing."
+    "Do not greet again (Hi/Hello/Hey/Good morning/etc.) if the seller already opened with a greeting "
+    "earlier the same calendar day. Continue directly with the substance of the reply. "
+    "EMPATHY REGISTER (hard): When acknowledging a problem or inconvenience, connect via the stress "
+    "or hassle it caused — not via the customer's safety or wellbeing. "
+    "'I hope this didn't stress you too much' or 'sorry for the hassle' is the right level for a seller-buyer relationship. "
+    "Never write 'I'm glad you're safe', 'I was worried', 'we take your safety very seriously', "
+    "or anything that implies a family-level concern. That register is fake from a stranger and reads as such. "
+    "PUNCTUATION (hard): Write like a normal text message. "
+    "Never use em dashes, en dashes, or a spaced hyphen as a pause (no —, –, or ' - '). "
+    "Use a full stop or a short new sentence instead. "
+    "Never write ', and' (no comma before and). Write ' and' instead. "
+    "No stiff corporate phrasing."
+)
+
+# Opening greetings (EN + common DE). Used with same-day timestamp check.
+_GREETING_START_RE = re.compile(
+    r"(?is)^\s*(?:"
+    r"hi\b|hello\b|hey\b|hiya\b|howdy\b|"
+    r"good\s+(?:morning|afternoon|evening)\b|"
+    r"hallo\b|guten\s+(?:tag|morgen|abend)\b|"
+    r"liebe[r]?\s+\w+"
+    r")"
 )
 
 
@@ -382,12 +457,81 @@ def detect_language(text: str, stored_lang: Optional[str] = None) -> str:
 
 
 def classify_intent(text: str) -> str:
+    """Classify intent from combined thread + seller prompt text (richest source wins)."""
     hay = (text or "").lower()
+    if not hay.strip():
+        return "other"
+    for p in _REAL_HAZARD_PHRASES:
+        if p.lower() in hay:
+            return "safety_claim"
+    for p in _REASSURANCE_PHRASES:
+        if p.lower() in hay:
+            return "reassurance_claim"
     for intent, phrases in _INTENT_PRIORITY:
         for p in phrases:
             if p.lower() in hay:
                 return intent
     return "other"
+
+
+def build_classification_text(
+    messages: Sequence[Message],
+    extra_instructions: Optional[str] = None,
+) -> str:
+    """
+    Text used for intent / known-issue / safety routing.
+    All buyer messages plus seller per-turn prompt (voice-note context often lives only in prompt).
+    """
+    parts: List[str] = []
+    for m in sorted(messages, key=lambda x: x.ebay_created_at or datetime.min):
+        if (m.sender_type or "").lower() == "buyer":
+            block = (m.content or "").strip()
+            if block:
+                parts.append(block)
+    extra = (extra_instructions or "").strip()
+    if extra:
+        parts.append(extra)
+    if not parts and messages:
+        last = messages[-1]
+        parts.append((last.content or "").strip())
+    return "\n\n".join(p for p in parts if p)
+
+
+def thread_has_buyer_image(messages: Sequence[Message]) -> bool:
+    for m in messages:
+        if (m.sender_type or "").lower() == "buyer" and _buyer_has_image(m):
+            return True
+    return False
+
+
+def is_safety_liability_dispute(text: str) -> bool:
+    hay = (text or "").lower()
+    return any(p in hay for p in _SAFETY_LIABILITY_PHRASES)
+
+
+def is_safety_clear_fault(text: str, *, has_image: bool) -> bool:
+    """Straightforward hazard report (melted/burned/smoke etc.) — draft reaction-first safety stage."""
+    hay = (text or "").lower()
+    if any(p.lower() in hay for p in _REAL_HAZARD_PHRASES):
+        return True
+    if has_image and any(
+        p in hay
+        for p in (
+            "plug",
+            "socket",
+            "stecker",
+            "steckdose",
+            "overheat",
+            "hot",
+            "stuck",
+            "photo",
+            "picture",
+            "foto",
+            "bild",
+        )
+    ):
+        return True
+    return False
 
 
 def _buyer_has_image(message: Optional[Message]) -> bool:
@@ -471,6 +615,63 @@ def buyer_new_material_after_decision(messages: Sequence[Message]) -> bool:
     return _message_has_material_info(after[-1])
 
 
+def message_opens_with_greeting(content: Optional[str]) -> bool:
+    """True if the message opens with a greeting (first line / leading text)."""
+    if not content:
+        return False
+    # Prefer first non-empty line (subjects may be prepended with \n)
+    lines = [ln.strip() for ln in (content or "").splitlines() if ln.strip()]
+    head = lines[0] if lines else (content or "").strip()
+    return bool(_GREETING_START_RE.match(head[:160]))
+
+
+def _message_day(ts: Optional[datetime]) -> Optional[date]:
+    if not ts:
+        return None
+    if getattr(ts, "tzinfo", None) is not None:
+        return ts.astimezone(tz=None).replace(tzinfo=None).date()
+    return ts.date()
+
+
+def seller_greeted_today(
+    messages: Sequence[Any],
+    *,
+    now: Optional[datetime] = None,
+) -> bool:
+    """
+    True if any seller message earlier today (UTC calendar day) opens with a greeting.
+    Accepts Message ORM rows or dicts with role/sender_type, content, ebay_created_at.
+    """
+    now = now or datetime.utcnow()
+    today = now.date() if getattr(now, "tzinfo", None) is None else now.replace(tzinfo=None).date()
+    for m in messages:
+        if hasattr(m, "sender_type"):
+            role = (m.sender_type or "").lower()
+            content = m.content or ""
+            # Match compose history shape: subject + content
+            subj = getattr(m, "subject", None) or ""
+            if subj:
+                content = f"{subj}\n{content}"
+            ts = getattr(m, "ebay_created_at", None)
+        else:
+            role = (m.get("role") or m.get("sender_type") or "").lower()
+            content = m.get("content") or ""
+            ts = m.get("ebay_created_at")
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+                except ValueError:
+                    ts = None
+        if role != "seller":
+            continue
+        day = _message_day(ts)
+        if day != today:
+            continue
+        if message_opens_with_greeting(content):
+            return True
+    return False
+
+
 def _thread_signals(messages: Sequence[Message]) -> Dict[str, bool]:
     msgs = sorted(messages, key=lambda m: m.ebay_created_at or datetime.min)
     seller_blob = "\n".join(
@@ -492,6 +693,7 @@ def _thread_signals(messages: Sequence[Message]) -> Dict[str, bool]:
     )
     decided = seller_already_decided(msgs)
     new_material = buyer_new_material_after_decision(msgs) if decided else False
+    greeted_today = seller_greeted_today(msgs)
     return {
         "prior_troubleshooting": prior_ts,
         "buyer_confirms_failed": fail,
@@ -502,6 +704,7 @@ def _thread_signals(messages: Sequence[Message]) -> Dict[str, bool]:
         "seller_already_decided": decided,
         "buyer_new_material_info": new_material,
         "no_new_material_info": decided and not new_material,
+        "seller_greeted_today": greeted_today,
     }
 
 
@@ -534,6 +737,8 @@ def route(
     signals: Dict[str, bool],
     out_of_warranty: bool,
     ebay_case: bool,
+    classification_text: str = "",
+    has_buyer_image: bool = False,
 ) -> RouterResult:
     reasons: List[str] = []
     flags = {
@@ -541,11 +746,89 @@ def route(
         "ebay_case": ebay_case,
         **signals,
     }
+    cls = classification_text or ""
 
-    # Safety / case / OOW → Tier 3
-    if intent == "safety_claim" or ebay_case or out_of_warranty:
-        reasons.append("tier3:safety_or_case_or_oow")
-        hint_stage = "request_photo" if known and known.issue_id == "melted_plug" else "clarify"
+    # Real hazard: reaction-first safety draft (unless liability/dispute or vague report).
+    if intent == "safety_claim":
+        if is_safety_liability_dispute(cls) or ebay_case:
+            reasons.append("tier3:safety_liability_dispute")
+            return RouterResult(
+                language=language,
+                intent=intent,
+                tier=3,
+                stage="safety",
+                known_issue_id=known.issue_id if known else None,
+                known_issue=_issue_dict(known) if known else None,
+                reasons=reasons,
+                flags=flags,
+            )
+        if is_safety_clear_fault(cls, has_image=has_buyer_image):
+            reasons.append("tier2:safety_clear_fault")
+            return RouterResult(
+                language=language,
+                intent=intent,
+                tier=2,
+                stage="safety",
+                known_issue_id=known.issue_id if known else None,
+                known_issue=_issue_dict(known) if known else None,
+                reasons=reasons,
+                flags=flags,
+            )
+        reasons.append("tier3:safety_unclear")
+        return RouterResult(
+            language=language,
+            intent=intent,
+            tier=3,
+            stage="safety",
+            known_issue_id=known.issue_id if known else None,
+            known_issue=_issue_dict(known) if known else None,
+            reasons=reasons,
+            flags=flags,
+        )
+
+    # Protective error / unwarranted fear — calm reassurance draft.
+    if intent == "reassurance_claim":
+        reasons.append("tier2:reassurance_claim")
+        return RouterResult(
+            language=language,
+            intent=intent,
+            tier=2,
+            stage="reassurance",
+            known_issue_id=known.issue_id if known else None,
+            known_issue=_issue_dict(known) if known else None,
+            reasons=reasons,
+            flags=flags,
+        )
+
+    # melted_plug known issue → safety stage draft (not Tier 3 lockout).
+    if known and known.issue_id == "melted_plug":
+        if is_safety_liability_dispute(cls):
+            reasons.append("tier3:melted_plug_liability")
+            return RouterResult(
+                language=language,
+                intent=intent if intent != "other" else "safety_claim",
+                tier=3,
+                stage="safety",
+                known_issue_id=known.issue_id,
+                known_issue=_issue_dict(known),
+                reasons=reasons,
+                flags=flags,
+            )
+        reasons.append("tier2:melted_plug_safety_stage")
+        return RouterResult(
+            language=language,
+            intent=intent if intent != "other" else "safety_claim",
+            tier=2,
+            stage="safety",
+            known_issue_id=known.issue_id,
+            known_issue=_issue_dict(known),
+            reasons=reasons,
+            flags=flags,
+        )
+
+    if ebay_case or (out_of_warranty and intent != "safety_claim"):
+        reasons.append("tier3:ebay_case_or_oow")
+        hint_stage = "clarify"
         return RouterResult(
             language=language,
             intent=intent,
@@ -553,20 +836,6 @@ def route(
             stage=hint_stage,
             known_issue_id=known.issue_id if known else None,
             known_issue=_issue_dict(known) if known else None,
-            reasons=reasons,
-            flags=flags,
-        )
-
-    # melted_plug always Tier 3 even if intent classified as physical_fault
-    if known and known.issue_id == "melted_plug":
-        reasons.append("tier3:melted_plug_safety")
-        return RouterResult(
-            language=language,
-            intent=intent if intent != "other" else "safety_claim",
-            tier=3,
-            stage="request_photo",
-            known_issue_id=known.issue_id,
-            known_issue=_issue_dict(known),
             reasons=reasons,
             flags=flags,
         )
@@ -747,27 +1016,29 @@ async def run_router(
     messages: Sequence[Message],
     skus: Sequence[str],
     order_date: Optional[datetime] = None,
+    extra_instructions: Optional[str] = None,
 ) -> RouterResult:
     msgs = sorted(messages, key=lambda m: m.ebay_created_at or datetime.min)
     last_buyer = latest_buyer_message(msgs)
-    text = (last_buyer.content or "") if last_buyer else ""
-    # If no buyer message, use last message content
-    if not text and msgs:
-        text = msgs[-1].content or ""
+    classification_text = build_classification_text(msgs, extra_instructions)
+    text_for_lang = classification_text or ((last_buyer.content or "") if last_buyer else "")
+    if not text_for_lang and msgs:
+        text_for_lang = msgs[-1].content or ""
 
     stored = (last_buyer.detected_language if last_buyer else None) or None
-    language = detect_language(text, stored)
-    intent = classify_intent(text)
+    language = detect_language(text_for_lang, stored)
+    intent = classify_intent(classification_text)
+    has_image = thread_has_buyer_image(msgs)
     issues = await load_active_known_issues(db)
     known = match_known_issue(
         issues,
-        text=text,
+        text=classification_text,
         skus=skus,
-        has_image=_buyer_has_image(last_buyer),
+        has_image=has_image,
     )
     signals = _thread_signals(msgs)
     oow = _out_of_warranty(order_date)
-    ebay_case = _ebay_case_flag(text)
+    ebay_case = _ebay_case_flag(classification_text)
     return route(
         language=language,
         intent=intent,
@@ -775,6 +1046,8 @@ async def run_router(
         signals=signals,
         out_of_warranty=oow,
         ebay_case=ebay_case,
+        classification_text=classification_text,
+        has_buyer_image=has_image,
     )
 
 
@@ -793,6 +1066,15 @@ def build_escalation_card(
             "You already responded — review before overriding. "
             "Draft is blocked so the router cannot overturn your prior decision."
         )
+    elif router.stage == "safety" and router.tier == 3:
+        suggested = (
+            "Safety case needs your judgment (liability, injury, disputed cause, or unclear report). "
+            "Review before sending a resolutive reply."
+        )
+    elif router.stage == "safety":
+        suggested = "Safety stage — draft should lead with human concern, then logistics."
+    elif router.stage == "reassurance":
+        suggested = "Reassurance stage — calm the buyer about a protective cut-off, then troubleshoot."
     elif router.known_issue_id == "melted_plug" or router.stage == "request_photo":
         suggested = "Ask for a clear photo of the plug/socket and any damage before promising a fix."
     elif router.reasons and any("de_return" in r for r in router.reasons):

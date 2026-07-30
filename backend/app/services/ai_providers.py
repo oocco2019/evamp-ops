@@ -57,6 +57,11 @@ class AnthropicProvider(AIProvider):
         parts = [
             "You are a professional eBay seller customer service assistant.",
             "Your role is to draft helpful, polite, and professional responses to buyers.",
+            "ALWAYS draft in English only, even when the buyer wrote in German or another language. "
+            "Outbound German is handled separately by the seller.",
+            "EMPATHY REGISTER (hard): When acknowledging a problem, connect via stress or hassle, not safety or wellbeing. "
+            "'Sorry for the hassle' or 'I hope this didn't stress you too much' is the right level. "
+            "Never write 'glad you're safe', 'I was worried', or anything implying family-level concern.",
             "Keep responses concise but thorough. Be empathetic and solution-focused.",
         ]
         
@@ -96,7 +101,7 @@ class AnthropicProvider(AIProvider):
 
 {prompt}
 
-Draft a response to the buyer. Do not include any preamble or explanation - just provide the message text that should be sent to the buyer."""
+Draft a response to the buyer in English only. Do not write German or any other language. Do not include any preamble or explanation - just provide the message text."""
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -228,6 +233,11 @@ class OpenAIProvider(AIProvider):
         parts = [
             "You are a professional eBay seller customer service assistant.",
             "Your role is to draft helpful, polite, and professional responses to buyers.",
+            "ALWAYS draft in English only, even when the buyer wrote in German or another language. "
+            "Outbound German is handled separately by the seller.",
+            "EMPATHY REGISTER (hard): When acknowledging a problem, connect via stress or hassle, not safety or wellbeing. "
+            "'Sorry for the hassle' or 'I hope this didn't stress you too much' is the right level. "
+            "Never write 'glad you're safe', 'I was worried', or anything implying family-level concern.",
             "Keep responses concise but thorough. Be empathetic and solution-focused.",
         ]
         
@@ -267,7 +277,7 @@ class OpenAIProvider(AIProvider):
 
 {prompt}
 
-Draft a response to the buyer. Do not include any preamble or explanation - just provide the message text that should be sent to the buyer."""
+Draft a response to the buyer in English only. Do not write German or any other language. Do not include any preamble or explanation - just provide the message text."""
 
         async with httpx.AsyncClient() as client:
             response = await client.post(

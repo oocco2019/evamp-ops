@@ -1277,8 +1277,19 @@ async def execute_oc_sku_mappings_sync(db: AsyncSession) -> SyncSkuResponse:
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"OC sync failed: {e}") from e
 
-    await db.execute(delete(OCSkuMapping).where(OCSkuMapping.connection_id == connection.id))
-    await db.execute(delete(OCSkuInventory).where(OCSkuInventory.connection_id == connection.id))
+    # Never wipe local tables when OC returned nothing (empty/transient failure).
+    # Prior behaviour DELETE'd all mappings/inventory first, which blanked the stock chart.
+    if not rows and not inventory_rows_data:
+        logger.warning(
+            "OC SKU/inventory sync returned 0 rows — keeping existing oc_sku_mappings / oc_sku_inventory"
+        )
+        return SyncSkuResponse(synced=0, skipped=0, inventory_rows=0)
+
+    if rows:
+        await db.execute(delete(OCSkuMapping).where(OCSkuMapping.connection_id == connection.id))
+    if inventory_rows_data:
+        await db.execute(delete(OCSkuInventory).where(OCSkuInventory.connection_id == connection.id))
+
     synced = 0
     skipped = 0
     inventory_rows = 0
@@ -1484,7 +1495,7 @@ async def list_inventory_history(
             to_date=(to_date or date.today()).isoformat(),
             mfskuid_count=0,
             scope=scope,
-            note="No mappings for this filter.",
+            note="No SKUs found for this filter (no OC mappings and no stored movement lines).",
         )
 
     now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1624,7 +1635,7 @@ async def _resolve_mfsku_list_for_movement(
     sku_code: Optional[str],
     mfskuid: Optional[str],
 ) -> tuple[List[str], str]:
-    """Return (mfsku ids, scope filtered|all_mapped_skus)."""
+    """Return (mfsku ids, scope filtered|all_mapped_skus|all_movement_skus)."""
     scope = "filtered"
     mf_key = (mfskuid or "").strip()
     mfs: List[str] = []
@@ -1654,6 +1665,15 @@ async def _resolve_mfsku_list_for_movement(
             select(OCSkuMapping.mfskuid).where(OCSkuMapping.connection_id == cid).distinct()
         )
         mfs = sorted({str(row[0]).strip() for row in mr.all() if row[0]})
+        # Mappings can be empty after a bad sync wipe — still chart from persisted movement lines.
+        if not mfs:
+            scope = "all_movement_skus"
+            mr2 = await db.execute(
+                select(OCStockMovementLine.mfskuid)
+                .where(OCStockMovementLine.connection_id == cid)
+                .distinct()
+            )
+            mfs = sorted({str(row[0]).strip() for row in mr2.all() if row[0]})
     return mfs, scope
 
 

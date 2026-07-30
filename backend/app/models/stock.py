@@ -239,3 +239,66 @@ class POLineItem(Base):
     
     def __repr__(self) -> str:
         return f"<POLineItem PO#{self.po_id} {self.sku_code} qty={self.quantity}>"
+
+
+class CustomerVehicleDetails(Base):
+    """
+    Denormalized vehicle stats source for dashboards.
+
+    One row per marketplace order (currently: eBay).
+    Parsed from eBay `buyerCheckoutNotes` (fallback) and eBay `compatibilityProperties` (primary),
+    but we keep the extracted raw vehicle string for audit.
+    """
+
+    __tablename__ = "customer_vehicle_details"
+
+    # One row per order. If an order is re-imported, we upsert this row with updated extraction.
+    order_id: Mapped[int] = mapped_column(
+        ForeignKey("orders.order_id"),
+        primary_key=True,
+    )
+
+    sales_channel: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="ebay",
+    )
+    ebay_order_id: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+    order_date: Mapped[date] = mapped_column(
+        Date,
+        nullable=False,
+    )
+
+    vehicle_make: Mapped[Optional[str]] = mapped_column(
+        String(80),
+        nullable=True,
+        comment="e.g., BMW, Tesla, Peugeot",
+    )
+    vehicle_model: Mapped[Optional[str]] = mapped_column(
+        String(120),
+        nullable=True,
+        comment="e.g., i3, Model 3, 3008 SUV",
+    )
+    vehicle_year: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="4-digit model year",
+    )
+    vehicle_type: Mapped[Optional[str]] = mapped_column(
+        String(30),
+        nullable=True,
+        comment="EV, PHEV, Hybrid (best-effort from source strings)",
+    )
+
+    # For audit and future parsing improvements.
+    vehicle_raw: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    vehicle_source: Mapped[Optional[str]] = mapped_column(String(40), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"<CustomerVehicleDetails {self.sales_channel}:{self.ebay_order_id} {self.vehicle_make} {self.vehicle_model} {self.vehicle_year}>"

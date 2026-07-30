@@ -584,6 +584,25 @@ export interface OrderDetailsResponse {
   totals: OrderDetailsTotals
 }
 
+export interface CustomerVehicleStatsMakeModelRow {
+  vehicle_make: string
+  vehicle_model: string
+  purchases: number
+}
+
+export interface CustomerVehicleStatsYearRow {
+  vehicle_year: number
+  purchases: number
+}
+
+export interface CustomerVehicleStatsResponse {
+  from_date: string
+  to_date: string
+  records_in_range: number
+  make_model_rows: CustomerVehicleStatsMakeModelRow[]
+  year_rows: CustomerVehicleStatsYearRow[]
+}
+
 export interface LenderSummaryHeadline {
   units_sold: number
   gross_revenue_gbp: string
@@ -814,6 +833,16 @@ export const stockAPI = {
       '/api/stock/generate-order-message',
       { items }
     ),
+
+  // Customer vehicle stats (SM??)
+  getCustomerVehicleStats: (params: { from: string; to: string; limit?: number }) =>
+    api.get<CustomerVehicleStatsResponse>('/api/stock/customer-vehicles/stats', {
+      params: {
+        from: params.from,
+        to: params.to,
+        limit: params.limit ?? undefined,
+      },
+    }),
 }
 
 // Messages API (Phase 4-6). media: eBay attachment types IMAGE, DOC, PDF, TXT
