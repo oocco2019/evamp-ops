@@ -1,7 +1,12 @@
 import datetime
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
 from app.api.inventory_status import (
     _extract_inbound_ui_times,
+    _find_inbound_order_for_override,
     _inbound_status_is_canceled,
     _movement_reason_code,
     _putaway_qty_transitioned,
@@ -11,6 +16,107 @@ from app.api.inventory_status import (
     _status_indicates_other_warehouse,
     _status_indicates_putaway,
 )
+from app.models.settings import OCConnection, OCInboundOrder
+
+
+class _AsyncExecuteOnlySession:
+    def __init__(self, sync_session):
+        self._sync_session = sync_session
+
+    async def execute(self, stmt):
+        return self._sync_session.execute(stmt)
+
+
+@pytest.mark.asyncio
+async def test_find_inbound_order_override_matches_both_identifiers_when_present():
+    engine = create_engine("sqlite:///:memory:")
+    OCConnection.__table__.create(engine)
+    OCInboundOrder.__table__.create(engine)
+    Session = sessionmaker(bind=engine)
+    try:
+        with Session() as session:
+            session.add(
+                OCConnection(
+                    id=1,
+                    name="OC",
+                    region="UK",
+                    environment="prod",
+                    oauth_base_url="https://oauth.example",
+                    api_base_url="https://api.example",
+                    signature_mode="path_and_body",
+                    is_active=True,
+                )
+            )
+            session.add_all(
+                [
+                    OCInboundOrder(
+                        connection_id=1,
+                        dedup_key="po-100|ib001",
+                        seller_inbound_number="PO-100",
+                        oc_inbound_number="IB001",
+                    ),
+                    OCInboundOrder(
+                        connection_id=1,
+                        dedup_key="po-100|ib002",
+                        seller_inbound_number="PO-100",
+                        oc_inbound_number="IB002",
+                    ),
+                ]
+            )
+            session.commit()
+
+            row = await _find_inbound_order_for_override(
+                _AsyncExecuteOnlySession(session),
+                1,
+                oc_inbound_number="IB002",
+                seller_inbound_number="PO-100",
+            )
+
+            assert row.oc_inbound_number == "IB002"
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_find_inbound_order_override_allows_single_identifier_fallback():
+    engine = create_engine("sqlite:///:memory:")
+    OCConnection.__table__.create(engine)
+    OCInboundOrder.__table__.create(engine)
+    Session = sessionmaker(bind=engine)
+    try:
+        with Session() as session:
+            session.add(
+                OCConnection(
+                    id=1,
+                    name="OC",
+                    region="UK",
+                    environment="prod",
+                    oauth_base_url="https://oauth.example",
+                    api_base_url="https://api.example",
+                    signature_mode="path_and_body",
+                    is_active=True,
+                )
+            )
+            session.add(
+                OCInboundOrder(
+                    connection_id=1,
+                    dedup_key="po-200|ib010",
+                    seller_inbound_number="PO-200",
+                    oc_inbound_number="IB010",
+                )
+            )
+            session.commit()
+
+            row = await _find_inbound_order_for_override(
+                _AsyncExecuteOnlySession(session),
+                1,
+                oc_inbound_number="ib010",
+                seller_inbound_number=None,
+            )
+
+            assert row.seller_inbound_number == "PO-200"
+    finally:
+        engine.dispose()
 
 
 def test_inbound_status_is_canceled():
