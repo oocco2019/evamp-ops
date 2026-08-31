@@ -4,6 +4,7 @@ See docs/DATA_RETENTION.md and .cursor/rules/data-retention.mdc. Platforms purge
 keep the complete payload (including line items) in orders.raw_payload.
 """
 from app.services.ebay_client import parse_orders_to_import
+from app.services.oc_client import _merge_inbound_list_and_detail
 from app.services.shopify_client import parse_shopify_order_to_import
 
 
@@ -42,3 +43,31 @@ def test_shopify_parse_retains_full_raw_order_object():
     parsed = parse_shopify_order_to_import(raw_order)
     assert parsed["raw_payload"] == raw_order
     assert parsed["raw_payload"]["an_unmapped_field"] == "keepme"
+
+
+def test_inbound_detail_merge_does_not_erase_non_empty_list_payloads():
+    list_raw = {
+        "inboundOrderNo": "OC-123",
+        "trackingList": [{"trackingNo": "TRACK-1"}],
+        "SKUList": [{"sku": "SKU-A", "qty": 2}],
+        "files": {"invoice": "keep.pdf"},
+    }
+    detail = {
+        "trackingList": [],
+        "SKUList": [],
+        "files": {},
+        "status": "Put away",
+    }
+
+    merged = _merge_inbound_list_and_detail(list_raw, detail)
+
+    assert merged["trackingList"] == [{"trackingNo": "TRACK-1"}]
+    assert merged["SKUList"] == [{"sku": "SKU-A", "qty": 2}]
+    assert merged["files"] == {"invoice": "keep.pdf"}
+    assert merged["status"] == "Put away"
+
+
+def test_inbound_detail_merge_keeps_empty_collection_when_no_existing_payload():
+    merged = _merge_inbound_list_and_detail({"inboundOrderNo": "OC-123"}, {"trackingList": []})
+
+    assert merged["trackingList"] == []
