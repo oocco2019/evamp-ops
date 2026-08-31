@@ -38,7 +38,7 @@ async def persist_oc_stock_movement_lines(
     connection_id: int,
     rows: List[Dict[str, Any]],
 ) -> int:
-    """Insert movement rows; skip duplicates on (connection_id, movement_id). Returns newly inserted count."""
+    """Insert movement rows; skip duplicate fetched movement lines. Returns newly inserted count."""
     if not rows:
         return 0
     payloads: List[Dict[str, Any]] = []
@@ -70,7 +70,7 @@ async def persist_oc_stock_movement_lines(
     for i in range(0, len(payloads), batch):
         chunk = payloads[i : i + batch]
         stmt = pg_insert(OCStockMovementLine).values(chunk)
-        stmt = stmt.on_conflict_do_nothing(constraint="uq_oc_stock_mov_conn_movement")
+        stmt = stmt.on_conflict_do_nothing(constraint="uq_oc_stock_mov_conn_movement_identity")
         res = await db.execute(stmt)
         rc = res.rowcount
         if rc is not None:
