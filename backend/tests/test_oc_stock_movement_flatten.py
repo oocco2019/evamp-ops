@@ -1,11 +1,62 @@
-"""Tests for OC GetStockMovement response parsing and time window chunking."""
+"""Tests for OC GetStockMovement response parsing, auth rotation, and time windows."""
+import asyncio
 from datetime import datetime, timedelta, timezone
 
+from app.core.security import encryption_service
+from app.models.settings import APICredential
 from app.services.oc_client import (
+    _persist_oc_refresh_token_if_rotated,
     _iter_movement_windows,
     clamp_oc_movement_query_bounds,
     flatten_stock_movement_response,
 )
+
+
+class _ScalarResult:
+    def __init__(self, row):
+        self.row = row
+
+    def scalar_one_or_none(self):
+        return self.row
+
+
+class _FakeDb:
+    def __init__(self, row):
+        self.row = row
+        self.flushed = 0
+        self.committed = 0
+
+    async def execute(self, _stmt):
+        return _ScalarResult(self.row)
+
+    async def flush(self):
+        self.flushed += 1
+
+    async def commit(self):
+        self.committed += 1
+
+
+def test_persist_oc_refresh_token_rotation_commits_immediately():
+    row = APICredential(
+        service_name="oc",
+        key_name="refresh_token",
+        encrypted_value=encryption_service.encrypt("old-refresh"),
+        is_active=True,
+    )
+    db = _FakeDb(row)
+
+    asyncio.run(
+        _persist_oc_refresh_token_if_rotated(
+            db,
+            {"refresh_token": "new-refresh"},
+            "https://oauth.example",
+            "client-id",
+        )
+    )
+
+    assert encryption_service.decrypt(row.encrypted_value) == "new-refresh"
+    assert db.flushed == 1
+    assert db.committed == 1
 
 
 def test_flatten_stock_movement_success_example():
