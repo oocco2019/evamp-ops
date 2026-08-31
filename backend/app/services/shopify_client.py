@@ -284,6 +284,42 @@ query ($id: ID!) {
 """
 
 
+def settlement_from_order_transactions(
+    transactions: Optional[List[Dict[str, Any]]],
+) -> Optional[Tuple[Decimal, Decimal]]:
+    """
+    Aggregate Shopify Payments fees + net from SUCCESS SALE/CAPTURE/REFUND txs.
+
+    Returns None when no settlement transactions are present so callers keep the
+    REST payout proxy instead of writing total_due_seller=0.
+    """
+    fee_total = Decimal("0")
+    net = Decimal("0")
+    saw_settlement_tx = False
+    for tx in transactions or []:
+        if str(tx.get("status") or "").upper() != "SUCCESS":
+            continue
+        kind = str(tx.get("kind") or "").upper()
+        if kind not in ("SALE", "CAPTURE", "REFUND"):
+            continue
+        saw_settlement_tx = True
+        amt = _dec(((tx.get("amountSet") or {}).get("shopMoney") or {}).get("amount"))
+        if amt is None:
+            amt = Decimal("0")
+        if kind in ("SALE", "CAPTURE"):
+            net += amt
+        else:
+            net -= amt
+        for fee in tx.get("fees") or []:
+            money = fee.get("amount")
+            fa = _dec(money.get("amount")) if isinstance(money, dict) else _dec(money)
+            if fa:
+                fee_total += fa
+    if not saw_settlement_tx:
+        return None
+    return fee_total, net
+
+
 async def fetch_shopify_payments_settlement(
     shop_domain: str,
     access_token: str,
@@ -293,10 +329,11 @@ async def fetch_shopify_payments_settlement(
     Shopify Payments settlement for one order via Admin GraphQL.
 
     Returns (fee_total, net_charged) in shop money:
-    - fee_total: sum of TransactionFee.amount on SUCCESS transactions
+    - fee_total: sum of TransactionFee.amount on SUCCESS SALE/CAPTURE/REFUND
     - net_charged: SUCCESS SALE/CAPTURE amounts minus SUCCESS REFUND amounts
 
-    None if the query fails or the order is missing (caller keeps price−tax proxy).
+    None if the query fails, the order is missing, or there are no settlement
+    transactions (caller keeps price−tax proxy — must not zero due seller).
     """
     base = _base_url(shop_domain)
     oid = str(shopify_order_id or "").strip()
@@ -324,26 +361,7 @@ async def fetch_shopify_payments_settlement(
     order = ((payload.get("data") or {}).get("order")) or None
     if not order:
         return None
-
-    fee_total = Decimal("0")
-    net = Decimal("0")
-    for tx in order.get("transactions") or []:
-        if str(tx.get("status") or "").upper() != "SUCCESS":
-            continue
-        kind = str(tx.get("kind") or "").upper()
-        amt = _dec(((tx.get("amountSet") or {}).get("shopMoney") or {}).get("amount"))
-        if amt is None:
-            amt = Decimal("0")
-        if kind in ("SALE", "CAPTURE"):
-            net += amt
-        elif kind == "REFUND":
-            net -= amt
-        for fee in tx.get("fees") or []:
-            money = fee.get("amount")
-            fa = _dec(money.get("amount")) if isinstance(money, dict) else _dec(money)
-            if fa:
-                fee_total += fa
-    return fee_total, net
+    return settlement_from_order_transactions(order.get("transactions"))
 
 
 def apply_shopify_payments_to_parsed(

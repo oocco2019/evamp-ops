@@ -2,7 +2,12 @@
 
 from app.services.label_compose.detect import ContentBox, content_box_from_rgb
 from app.services.label_compose.fingerprint import fingerprint_from_boxes
-from app.services.label_compose.layout import LabelInput, generate_arrangements
+from app.services.label_compose.layout import (
+    LabelInput,
+    Slot,
+    generate_arrangements,
+    remap_slots_by_content_size,
+)
 from PIL import Image, ImageDraw
 
 
@@ -28,6 +33,57 @@ def test_fingerprint_stable_under_reorder():
     f1 = fingerprint_from_boxes([a, b, c])
     f2 = fingerprint_from_boxes([c, a, b])
     assert f1 == f2
+
+
+def test_remap_cached_slots_survives_upload_reorder():
+    """
+    Cached slots keep geometry for each content size; rebinding must follow size,
+    not the original source_index, when the same mix is uploaded in another order.
+    """
+    wide = LabelInput(source_index=0, box=_box(300, 100))
+    square = LabelInput(source_index=1, box=_box(80, 80))
+    arranged = generate_arrangements([wide, square])
+    assert arranged
+    cached = arranged[0]
+    by_idx = {s.source_index: s for s in cached}
+    assert by_idx[0].width > by_idx[1].width
+
+    # Same sizes, swapped upload order (new source indices).
+    reordered = [
+        LabelInput(source_index=0, box=_box(80, 80)),
+        LabelInput(source_index=1, box=_box(300, 100)),
+    ]
+    remapped = remap_slots_by_content_size(cached, reordered)
+    assert remapped is not None
+    assert len(remapped) == 2
+    remapped_by_idx = {s.source_index: s for s in remapped}
+    # Wide geometry must follow the wide label to index 1; square to index 0.
+    assert abs(remapped_by_idx[1].width - by_idx[0].width) < 1e-6
+    assert abs(remapped_by_idx[1].height - by_idx[0].height) < 1e-6
+    assert abs(remapped_by_idx[0].width - by_idx[1].width) < 1e-6
+    assert abs(remapped_by_idx[0].height - by_idx[1].height) < 1e-6
+    # Crops come from the current upload, not the cache.
+    assert remapped_by_idx[0].crop_urx - remapped_by_idx[0].crop_llx == 80
+    assert remapped_by_idx[1].crop_urx - remapped_by_idx[1].crop_llx == 300
+
+
+def test_remap_cached_slots_rejects_size_mismatch():
+    cached = [
+        Slot(
+            source_index=0,
+            x=10,
+            y=10,
+            width=200,
+            height=80,
+            scale=1.0,
+            crop_llx=0,
+            crop_lly=0,
+            crop_urx=300,
+            crop_ury=100,
+        )
+    ]
+    labels = [LabelInput(source_index=0, box=_box(80, 80))]
+    assert remap_slots_by_content_size(cached, labels) is None
 
 
 def test_packer_fits_many_tiny_equal_boxes():
