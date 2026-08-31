@@ -9,6 +9,7 @@ from pypdf import PageObject, PdfReader, PdfWriter, Transformation
 from pypdf.generic import ArrayObject, DecodedStreamObject, NameObject, RectangleObject
 
 from app.services.label_compose import A4_HEIGHT_PT, A4_WIDTH_PT
+from app.services.label_compose.detect import normalize_pdf_for_compose
 from app.services.label_compose.layout import Slot
 
 
@@ -66,7 +67,8 @@ def render_a4(pdf_bytes_by_source: dict[int, bytes], slots: Sequence[Slot]) -> b
         raw = pdf_bytes_by_source.get(slot.source_index)
         if not raw:
             continue
-        reader = PdfReader(io.BytesIO(raw))
+        # Crop boxes are computed after normalize_pdf_for_compose; keep render in sync.
+        reader = PdfReader(io.BytesIO(normalize_pdf_for_compose(raw)))
         if not reader.pages:
             continue
         page = reader.pages[0]

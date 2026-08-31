@@ -5,7 +5,9 @@ Compose any number of shipping label PDFs/PNGs onto a single A4 sheet for printi
 
 ## Pipeline
 
-1. **Detect content bbox** — Rasterise each input at 72 DPI (`pdf2image` + Poppler for PDF;
+1. **Detect content bbox** — For PDF inputs, first normalize each page (`/Rotate` baked into
+   the content stream; MediaBox shifted to origin) so raster detection and CropBox render
+   share one coordinate space. Then rasterise at 72 DPI (`pdf2image` + Poppler for PDF;
    Pillow for PNG). Treat pixels with all RGB channels above ~245 as background. Keep
    connected components larger than a few pixels; pad the tight box by ~2.5mm so barcode
    quiet zones survive.
