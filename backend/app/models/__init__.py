@@ -13,7 +13,7 @@ from app.models.settings import (
 )
 from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem, CustomerVehicleDetails
 from app.models.messages import MessageThread, Message, AIInstruction, SyncMetadata, ReplyPolicy, ReplyPlaybookEntry, AIComposition, ReplyInsight
-from app.models.listing_video import EbayListingSkuCache
+from app.models.listing_video import EbayListingSkuCache, ListingVideoJob, ListingVideoJobItem, ListingVideoJobLog
 
 __all__ = [
     # Settings
@@ -42,4 +42,7 @@ __all__ = [
     "ReplyInsight",
     "SyncMetadata",
     "EbayListingSkuCache",
+    "ListingVideoJob",
+    "ListingVideoJobItem",
+    "ListingVideoJobLog",
 ]

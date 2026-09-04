@@ -18,7 +18,18 @@
 
 ## Current app behaviour
 
-The app exposes a **Video ID getter** only (nav: "Video ID getter", route `/listing-video`). User enters a listing URL or item number; the app returns video ID(s) via Trading API GetItem. No "add video to SKU" or SKU input in the UI. Backend add-video endpoints may still exist for API use but are not part of the current UI.
+The app exposes listing video tools under Misc → **Listing videos** (`/settings?tab=video`):
+
+1. **Get video ID** — paste a listing URL or item number; Trading GetItem returns `VideoID`s (and SKU when present).
+2. **Add video to SKU** — paste video ID + SKU; scans active listings via GetSellerList (Fine) and matches
+   `Item.SKU` (Seller Hub Custom Label), then `ReviseFixedPriceItem` each with `VideoDetails.VideoID`.
+3. **Remove videos** — paste/upload item IDs (or URLs), confirm, then stream
+   `ReviseFixedPriceItem` with `<DeletedField>Item.VideoDetails</DeletedField>` per listing.
+   Listings with no video are skipped.
+
+**Parser note:** Python’s `xml.etree.ElementTree` treats leaf nodes with only text as falsy. Never use
+`el.find("SKU") or el.find(...)` — that drops real Custom Labels. Use `_et_child` / `_et_text` in
+`ebay_client.py`.
 
 ## References
 

@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     EBAY_MEDIA_API_URL: str = "https://apim.ebay.com"  # Commerce Media API (images for messages/listings)
     # Marketplace for Finances API (required header). E.g. EBAY_GB, EBAY_US.
     EBAY_MARKETPLACE_ID: str = "EBAY_GB"
+    # Comma-separated fallback marketplaces if the primary EBAY_MARKETPLACE_ID scan returns 0.
+    # GetSellerList+SKUArray typically returns the same ItemIDs for every SiteID, so we only
+    # hit these when the primary site finds nothing.
+    EBAY_SCAN_MARKETPLACES: str = "EBAY_GB,EBAY_DE,EBAY_US"
     EBAY_AUTH_URL: str = "https://auth.ebay.com/oauth2"
     EBAY_IDENTITY_URL: str = "https://api.ebay.com/identity/v1/oauth2"
     # Optional: seller eBay username for classifying message sender_type (buyer vs seller)
@@ -60,8 +64,8 @@ class Settings(BaseSettings):
     # Sales Analytics profit: convert USD/EUR to GBP (landed cost, postage; order amounts)
     USD_TO_GBP_RATE: float = 0.79
     EUR_TO_GBP_RATE: float = 0.86
-    # Profit after tax: displayed profit = gross profit * (1 - PROFIT_TAX_RATE). E.g. 0.30 = 30% tax on profit (take-home 70%).
-    PROFIT_TAX_RATE: float = 0.30
+    # Profit after tax: displayed profit = gross profit * (1 - PROFIT_TAX_RATE). E.g. 0.32 = 32% tax on profit (take-home 68%).
+    PROFIT_TAX_RATE: float = 0.32
     # UK ship-to GB: when eBay tax_total is missing/zero, VAT in analytics = order total (GBP) × rate/(1+rate) (VAT-inclusive).
     UK_VAT_DEFAULT_RATE: float = 0.20
     # Profit in EUR: multiply GBP profit by this. E.g. 1.16 = 1 GBP = 1.16 EUR.

@@ -398,7 +398,8 @@ export const settingsAPI = {
   }) => api.post<AIModelSetting>('/api/settings/ai-models', data),
 
   listAIModels: () => api.get<AIModelSetting[]>('/api/settings/ai-models'),
-
+  listAvailableModels: (provider: string) =>
+    api.get(`/api/settings/ai-models/available/${provider}`),
   getDefaultAIModel: () =>
     api.get<AIModelSetting>('/api/settings/ai-models/default'),
 
@@ -1120,6 +1121,7 @@ export interface VideoIdResponse {
   item_number: string
   video_ids: string[]
   title: string | null
+  sku?: string | null
 }
 
 export interface AddVideoToSkuResponse {
@@ -1130,12 +1132,12 @@ export interface AddVideoToSkuResponse {
 export type AddVideoToSkuEvent =
   | { type: 'progress'; message: string }
   | { type: 'listing_count'; count: number }
-  | { type: 'done'; sku: string; updated: number; failed: string[]; total: number }
+  | { type: 'done'; sku: string; updated: number; failed: string[]; total: number; fail_reasons?: Record<string, string> }
   | { type: 'error'; detail: string }
 
-export type AddVideoToListingsEvent =
+export type RemoveVideoFromListingsEvent =
   | { type: 'progress'; message: string }
-  | { type: 'done'; updated: number; failed: string[]; total: number }
+  | { type: 'done'; updated: number; failed: string[]; skipped?: number; total: number }
   | { type: 'error'; detail: string }
 
 export const listingVideoAPI = {
@@ -1256,6 +1258,105 @@ export const listingVideoAPI = {
       }
     }
   },
+  /** Stream remove-video-from-listings (Trading API DeletedField). */
+  removeVideoFromListingsStream: async (
+    itemIds: string[],
+    onEvent: (ev: RemoveVideoFromListingsEvent) => void
+  ): Promise<void> => {
+    const url = `${API_BASE_URL.replace(/\/$/, '')}/api/listing-video/remove-video-from-listings`
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ item_ids: itemIds }),
+      credentials: 'include',
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}))
+      onEvent({ type: 'error', detail: (err as { detail?: string }).detail || res.statusText })
+      return
+    }
+    const reader = res.body?.getReader()
+    if (!reader) {
+      onEvent({ type: 'error', detail: 'No response body' })
+      return
+    }
+    const dec = new TextDecoder()
+    let buf = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.trim()) continue
+        try {
+          const ev = JSON.parse(line) as RemoveVideoFromListingsEvent
+          onEvent(ev)
+          if (ev.type === 'done' || ev.type === 'error') return
+        } catch {
+          // skip
+        }
+      }
+    }
+    if (buf.trim()) {
+      try {
+        const ev = JSON.parse(buf) as RemoveVideoFromListingsEvent
+        onEvent(ev)
+      } catch {
+        onEvent({ type: 'error', detail: 'Incomplete response' })
+      }
+    }
+  },
+}
+
+// --- Persistent listing-video job types and client ---
+
+export interface ListingVideoJobStatus {
+  job_id: string
+  mode: string
+  sku: string | null
+  video_id: string
+  status: string   // pending | scanning | running | done | error
+  total: number
+  updated_count: number
+  skipped_count: number
+  failed_count: number
+  error_message: string | null
+  created_at: string
+  updated_at: string
+  recent_logs: string[]
+}
+
+export interface ListingVideoJobLog {
+  id: number
+  message: string
+  created_at: string
+}
+
+export const listingVideoJobAPI = {
+  /** Start a new job; returns { job_id, mode, total, status }. */
+  start: (payload: {
+    video_id: string
+    sku?: string
+    item_ids?: string[]
+    marketplace_id?: string
+  }) =>
+    api.post<{ job_id: string; mode: string; total: number; status: string }>(
+      '/api/listing-video/start-add-video-job',
+      payload,
+    ),
+
+  /** Poll job status + last 50 log lines. */
+  getStatus: (jobId: string) =>
+    api.get<ListingVideoJobStatus>(`/api/listing-video/jobs/${jobId}`),
+
+  /** Fetch log lines, optionally only after a given log row id. */
+  getLogs: (jobId: string, afterId = 0) =>
+    api.get<{ job_id: string; logs: ListingVideoJobLog[] }>(
+      `/api/listing-video/jobs/${jobId}/logs`,
+      { params: { after_id: afterId } },
+    ),
 }
 
 export const inventoryStatusAPI = {
