@@ -105,7 +105,7 @@ export default function Settings() {
           {tabBtn('warehouses', 'Warehouses')}
           {tabBtn('email-templates', 'Email Templates')}
           {tabBtn('skus', 'SKUs')}
-          {tabBtn('video', 'Video ID getter')}
+          {tabBtn('video', 'Listing videos')}
           {tabBtn('lender', 'Lender summary')}
           {tabBtn('customer-vehicles', 'Customer Vehicle Details')}
         </nav>
@@ -752,7 +752,6 @@ function OCTab() {
     </div>
   )
 }
-
 function AIModelsTab() {
   const queryClient = useQueryClient()
   const [provider, setProvider] = useState('')
@@ -775,6 +774,17 @@ function AIModelsTab() {
     },
   })
 
+  // Live model list from the provider's API, fetched when a provider is chosen.
+  const { data: liveModels, isLoading: liveModelsLoading, isError: liveModelsError } = useQuery({
+    queryKey: ['available-models', provider],
+    queryFn: async () => {
+      const response = await settingsAPI.listAvailableModels(provider)
+      return response.data as Array<{ id: string; display_name: string }>
+    },
+    enabled: !!provider,
+  })
+
+  
   const createMutation = useMutation({
     mutationFn: settingsAPI.createAIModel,
     onSuccess: () => {
@@ -810,15 +820,21 @@ function AIModelsTab() {
     })
   }
 
-  const modelOptions: Record<string, string[]> = {
+  // Static fallback used only if the live fetch fails, so the dropdown is never empty.
+  const fallbackModelOptions: Record<string, string[]> = {
     anthropic: [
-      'claude-sonnet-4-5-20250929',
+      'claude-opus-5',
+      'claude-sonnet-5',
       'claude-haiku-4-5-20251001',
-      'claude-opus-4-5-20251101',
-      'claude-3-haiku-20240307',
     ],
     openai: ['gpt-4-turbo-preview', 'gpt-4', 'gpt-3.5-turbo'],
   }
+
+  // Prefer the live list; fall back to the static one on error/empty.
+  const modelChoices: Array<{ id: string; label: string }> =
+    liveModels && liveModels.length > 0
+      ? liveModels.map((m) => ({ id: m.id, label: m.display_name }))
+      : (fallbackModelOptions[provider] ?? []).map((id) => ({ id, label: id }))
 
   // Check if there's a default model and matching credentials
   const defaultModel = models?.find((m: AIModelSetting) => m.is_default)
@@ -889,16 +905,22 @@ function AIModelsTab() {
               onChange={(e) => setModelName(e.target.value)}
               className="w-full border border-gray-300 rounded-md px-3 py-2"
               required
-              disabled={!provider}
+              disabled={!provider || liveModelsLoading}
             >
-              <option value="">Select model...</option>
-              {provider &&
-                modelOptions[provider]?.map((model) => (
-                  <option key={model} value={model}>
-                    {model}
-                  </option>
-                ))}
+              <option value="">
+                {liveModelsLoading ? 'Loading models...' : 'Select model...'}
+              </option>
+              {modelChoices.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
             </select>
+            {liveModelsError && (
+              <p className="mt-1 text-xs text-amber-700">
+                Couldn't load the live model list; showing built-in options.
+              </p>
+            )}
           </div>
         </div>
         <div className="mt-4">

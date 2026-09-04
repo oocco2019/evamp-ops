@@ -120,7 +120,7 @@ The UI and SKU rollups show **not** `gross_profit_gbp` but:
 
 **displayed_profit_gbp = gross_profit_gbp × (1 − PROFIT_TAX_RATE)**
 
-Default **PROFIT_TAX_RATE = 0.30** means “take home **70%** of gross profit” in this **simplified** model (it is **not** a full corporation tax computation).
+Default **PROFIT_TAX_RATE = 0.32** means “take home **68%** of gross profit” in this **simplified** model (it is **not** a full corporation tax computation).
 
 All **“profit”** figures in **by-SKU**, **by-country**, and the **Order details** **net** columns use this after-tax value (unless a screen explicitly says “gross”).
 
@@ -246,7 +246,7 @@ These support **stock and ops** questions; they are **not** statutory financial 
 |----------|---------|-----------------|
 | `USD_TO_GBP_RATE` | Multiply **USD** amounts (SKU costs; non-EUR/GBP order handling where applicable) to get **GBP** | 0.79 |
 | `EUR_TO_GBP_RATE` | **EUR** order amounts → **GBP** | 0.86 |
-| `PROFIT_TAX_RATE` | Applied to **gross** profit: **displayed = gross × (1 − rate)** | 0.30 |
+| `PROFIT_TAX_RATE` | Applied to **gross** profit: **displayed = gross × (1 − rate)** | 0.32 |
 | `UK_VAT_DEFAULT_RATE` | **GB** orders, when `tax_total` is 0/null: VAT from inclusive **price_gbp** = **× rate/(1+rate)** | 0.20 |
 | `GBP_TO_EUR_RATE` | **GBP** profit → **EUR** display | 1.16 |
 

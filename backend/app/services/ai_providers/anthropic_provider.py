@@ -9,8 +9,50 @@ from app.services.ai_providers.base import AIProvider
 API_URL = "https://api.anthropic.com/v1/messages"
 
 
+def _rejects_temperature(model_name: str) -> bool:
+    """
+    Claude Opus 4.7 and later (including Sonnet 5, Opus 5, Fable 5, Mythos) reject
+    `temperature` (and top_p/top_k): a non-default value returns a 400 error.
+    For those models we omit the parameter entirely. Older models still accept it.
+    """
+    name = (model_name or "").lower()
+    if any(tag in name for tag in ("-5", "sonnet-5", "opus-5", "fable-5", "mythos")):
+        # Guard against matching "4-5" (4.5 generation) which still accepts temperature.
+        if "4-5" not in name:
+            return True
+    if "opus-4-7" in name or "opus-4-8" in name:
+        return True
+    return False
+
+
+def _extract_text(data: Dict[str, Any], default: str = "") -> str:
+    """
+    Pull the assistant's text from a Messages API response.
+
+    Newer models (Sonnet 5, Opus 5, Fable 5) have thinking on by default, so the
+    `content` array can start with a `thinking` block. Scan for the first block whose
+    type is "text" rather than assuming content[0] is the text, otherwise the draft
+    comes back empty.
+    """
+    content = data.get("content") or []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            return (block.get("text") or "").strip()
+    # Fallback: some responses may omit an explicit type but still carry text.
+    for block in content:
+        if isinstance(block, dict) and block.get("text"):
+            return (block.get("text") or "").strip()
+    return default
+
+
 class AnthropicProvider(AIProvider):
     """Implementation for Anthropic Claude models using raw HTTP (no SDK)."""
+
+    def _apply_temperature(self, payload: Dict[str, Any], temperature: float) -> Dict[str, Any]:
+        """Add temperature to the payload only for models that accept it."""
+        if not _rejects_temperature(self.model_name):
+            payload["temperature"] = float(temperature)
+        return payload
 
     def _build_system_prompt(self, context: Dict[str, Any]) -> str:
         """Build system prompt from context."""
@@ -44,7 +86,7 @@ class AnthropicProvider(AIProvider):
                 if isinstance(e, dict):
                     sym = (e.get("symptom") or "").strip()
                     res = (e.get("resolution") or "").strip()
-                    line = f"{i}. {res}" if not sym else f"{i}. Symptom: {sym} → {res}"
+                    line = f"{i}. {res}" if not sym else f"{i}. Symptom: {sym} -> {res}"
                 else:
                     line = f"{i}. {e}"
                 parts.append(line)
@@ -86,10 +128,10 @@ Draft a response to the buyer in English only. Do not write German or any other 
         payload = {
             "model": self.model_name,
             "max_tokens": int(context.get("max_tokens") or self.max_tokens),
-            "temperature": float(self.temperature),
             "system": system,
             "messages": [{"role": "user", "content": user_content}],
         }
+        self._apply_temperature(payload, self.temperature)
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 API_URL,
@@ -103,22 +145,19 @@ Draft a response to the buyer in English only. Do not write German or any other 
             )
             response.raise_for_status()
             data = response.json()
-        content = data.get("content", [])
-        if content and len(content) > 0:
-            return (content[0].get("text") or "").strip()
-        return ""
+        return _extract_text(data, default="")
 
     async def detect_language(self, text: str) -> str:
         """Detect language using Claude."""
         payload = {
             "model": self.model_name,
             "max_tokens": 10,
-            "temperature": 0,
             "messages": [{
                 "role": "user",
                 "content": f"Detect the language of this text and respond with only the ISO 639-1 two-letter code (e.g., 'en', 'de', 'fr'):\n\n{text[:500]}",
             }],
         }
+        self._apply_temperature(payload, 0)
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 API_URL,
@@ -132,10 +171,8 @@ Draft a response to the buyer in English only. Do not write German or any other 
             )
             response.raise_for_status()
             data = response.json()
-        content = data.get("content", [])
-        if content and len(content) > 0:
-            return (content[0].get("text", "en") or "en").strip().lower()[:2]
-        return "en"
+        code = _extract_text(data, default="en")
+        return (code or "en").strip().lower()[:2]
 
     async def translate(
         self,
@@ -147,12 +184,12 @@ Draft a response to the buyer in English only. Do not write German or any other 
         payload_fwd = {
             "model": self.model_name,
             "max_tokens": self.max_tokens,
-            "temperature": 0.3,
             "messages": [{
                 "role": "user",
                 "content": f"Translate the following text from {source_lang} to {target_lang}. Preserve the meaning and tone. Do not add any explanation - just provide the translation:\n\n{text}",
             }],
         }
+        self._apply_temperature(payload_fwd, 0.3)
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 API_URL,
@@ -166,18 +203,17 @@ Draft a response to the buyer in English only. Do not write German or any other 
             )
             response.raise_for_status()
             data = response.json()
-        content = data.get("content", [])
-        translated = content[0].get("text", "").strip() if content else text
+        translated = _extract_text(data, default=text)
 
         payload_back = {
             "model": self.model_name,
             "max_tokens": self.max_tokens,
-            "temperature": 0.3,
             "messages": [{
                 "role": "user",
                 "content": f"Translate the following text from {target_lang} back to {source_lang}. This is for verification. Do not add any explanation - just provide the translation:\n\n{translated}",
             }],
         }
+        self._apply_temperature(payload_back, 0.3)
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 API_URL,
@@ -191,7 +227,6 @@ Draft a response to the buyer in English only. Do not write German or any other 
             )
             response.raise_for_status()
             data = response.json()
-        content = data.get("content", [])
-        back_translated = content[0].get("text", "").strip() if content else translated
+        back_translated = _extract_text(data, default=translated)
 
         return {"translated": translated, "back_translated": back_translated}

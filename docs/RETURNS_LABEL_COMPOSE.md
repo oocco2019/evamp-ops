@@ -18,10 +18,13 @@ Compose any number of shipping label PDFs/PNGs onto a single A4 sheet for printi
    and column variants; downscale only when needed (never upscale). If nothing fits even
    after aggressive downscale, the API returns 422.
 4. **Cache** — On a miss, persist slots + arrangement index in `label_compose_templates`.
-   On a hit (arrangement index 0), reuse stored coordinates and skip fitting.
+   On a hit (arrangement index 0), reuse stored frame sizes/positions but **rebind each
+   frame to the current upload by rounded content size** (not upload index), so a
+   small-then-medium batch does not stretch into a medium-then-small template. If size
+   matching or aspect check fails, pack fresh.
 5. **Render** — Apply the detected box as a CropBox and place with pypdf
-   `Transformation().scale().translate()` so PDF barcodes stay vector. PNGs are converted
-   to a single-page PDF first (raster page).
+   `Transformation().scale().translate()` using a **uniform** scale (no independent
+   stretch/squash). PNGs are converted to a single-page PDF first (raster page).
 6. **UI** — Preview the PDF, drag slot overlays to adjust, **Save layout** (overwrites
    cache), **Regenerate** (unbounded next packing variant), **PDF** / **PNG** download.
 

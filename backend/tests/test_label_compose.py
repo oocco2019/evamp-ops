@@ -114,3 +114,67 @@ def test_single_label_arrangement():
     # Single label centered on the page
     assert abs(s.x - (595 - s.width) / 2) < 1.0
     assert abs(s.y - (842 - s.height) / 2) < 1.0
+
+
+def test_remap_cached_slots_follows_size_not_upload_index():
+    from app.services.label_compose.compose import remap_cached_slots
+    from app.services.label_compose.layout import Slot
+
+    medium = LabelInput(source_index=0, box=_box(200, 100))
+    small = LabelInput(source_index=1, box=_box(80, 40))
+    cached_medium = Slot(
+        source_index=0,
+        x=50,
+        y=400,
+        width=200,
+        height=100,
+        scale=1.0,
+        crop_llx=0,
+        crop_lly=0,
+        crop_urx=200,
+        crop_ury=100,
+    )
+    cached_small = Slot(
+        source_index=1,
+        x=50,
+        y=200,
+        width=80,
+        height=40,
+        scale=1.0,
+        crop_llx=0,
+        crop_lly=0,
+        crop_urx=80,
+        crop_ury=40,
+    )
+    # Same sizes, reverse upload order
+    relabeled = [
+        LabelInput(source_index=0, box=_box(80, 40)),
+        LabelInput(source_index=1, box=_box(200, 100)),
+    ]
+    remapped = remap_cached_slots([cached_medium, cached_small], relabeled)
+    assert remapped is not None
+    by_idx = {s.source_index: s for s in remapped}
+    assert by_idx[0].width == 80
+    assert by_idx[1].width == 200
+    assert by_idx[0].x == cached_small.x
+    assert by_idx[1].x == cached_medium.x
+
+
+def test_remap_cached_slots_rejects_aspect_mismatch():
+    from app.services.label_compose.compose import remap_cached_slots
+    from app.services.label_compose.layout import Slot
+
+    slot = Slot(
+        source_index=0,
+        x=10,
+        y=10,
+        width=200,
+        height=40,
+        scale=1.0,
+        crop_llx=0,
+        crop_lly=0,
+        crop_urx=80,
+        crop_ury=40,
+    )
+    labels = [LabelInput(source_index=0, box=_box(80, 40))]
+    assert remap_cached_slots([slot], labels) is None

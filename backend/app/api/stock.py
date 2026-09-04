@@ -1489,9 +1489,9 @@ def _order_profit_gbp(
 
 
 def _profit_after_tax(gross_profit: Decimal) -> Decimal:
-    """Apply profit tax (e.g. 30%): displayed profit = gross * (1 - rate). See docs/ANALYTICS_PROFIT_LOGIC.md."""
-    rate = getattr(app_settings, "PROFIT_TAX_RATE", 0.30)
-    return gross_profit * Decimal(str(1.0 - rate))
+    """Apply profit tax: displayed profit = gross * (1 - rate). See docs/ANALYTICS_PROFIT_LOGIC.md."""
+    rate = Decimal(str(getattr(app_settings, "PROFIT_TAX_RATE", 0.32)))
+    return gross_profit * (Decimal("1") - rate)
 
 
 def _profit_for_display(gross_profit: Decimal, *, profit_tax_included: bool) -> Decimal:
@@ -1819,7 +1819,7 @@ async def get_analytics_order_details(
         sku_result = await db.execute(select(SKU).where(SKU.sku_code.in_(sku_codes)))
         sku_map = {s.sku_code: s for s in sku_result.scalars().all()}
     usd_to_gbp = getattr(app_settings, "USD_TO_GBP_RATE", 0.79)
-    profit_tax_rate = float(getattr(app_settings, "PROFIT_TAX_RATE", 0.30))
+    profit_tax_rate = float(getattr(app_settings, "PROFIT_TAX_RATE", 0.32))
 
     rows: List[OrderDetailRow] = []
     payout_by_order: dict = {}

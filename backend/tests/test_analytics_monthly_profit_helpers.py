@@ -21,7 +21,7 @@ def test_month_is_partial_current_and_future():
 
 def test_profit_for_display_tax_toggle():
     gross = Decimal("100")
-    rate = Decimal(str(getattr(app_settings, "PROFIT_TAX_RATE", 0.30)))
+    rate = Decimal(str(getattr(app_settings, "PROFIT_TAX_RATE", 0.32)))
     expected_after_tax = gross * (Decimal("1") - rate)
 
     assert _profit_for_display(gross, profit_tax_included=True) == expected_after_tax

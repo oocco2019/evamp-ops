@@ -7,7 +7,7 @@ UI copy on the page is kept minimal; behaviour that used to live in on-page blur
 
 - **Filters:** Period presets / From–To, Group by (day/week/month), Source (All / eBay / Shopify), Country, SKU. A **Refunds only** toggle sits next to the Filters heading. Changing any filter refetches analytics automatically (no Apply button).
 - **Default date range:** last **90 complete calendar days** ending yesterday (not including today). See `defaultAnalyticsRange()` / `completeDaysRange(90)` in `frontend/src/utils/datePeriodPresets.ts`.
-- **Cards:** Units sold (period total + Today side stat); Profit (GBP and EUR after 30% tax, + Today side stat) – profit rules in [ANALYTICS_PROFIT_LOGIC.md](ANALYTICS_PROFIT_LOGIC.md).
+- **Cards:** Units sold (period total + Today side stat); Profit (GBP and EUR after 32% tax, + Today side stat) – profit rules in [ANALYTICS_PROFIT_LOGIC.md](ANALYTICS_PROFIT_LOGIC.md).
 - **Order details (separate page):** For **line-level transparency** (payout, COGS, VAT, allocated profit per line), open the link at the **bottom of the Sales Analytics page** (`/order-details`). It is not in the top nav. See [ORDER_DETAILS_AND_ANALYTICS_TRANSPARENCY.md](ORDER_DETAILS_AND_ANALYTICS_TRANSPARENCY.md).
 - **Chart:** Units sold by period (bar chart).
 - **Tables:** Sales by Country; Sales by SKU. Both show quantity sold and profit (GBP only in the tables).

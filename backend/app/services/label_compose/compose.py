@@ -12,9 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.settings import LabelComposeTemplate
-from app.services.label_compose import MAX_FILES, MAX_UPLOAD_BYTES
+from app.services.label_compose import MAX_FILES, MAX_UPLOAD_BYTES, PT_PER_MM
 from app.services.label_compose.detect import ContentBox, load_input_as_pdf_and_box
-from app.services.label_compose.fingerprint import fingerprint_from_boxes
+from app.services.label_compose.fingerprint import fingerprint_from_boxes, round_mm
 from app.services.label_compose.layout import (
     LabelInput,
     Slot,
@@ -24,6 +24,62 @@ from app.services.label_compose.layout import (
 from app.services.label_compose.render import preview_png_base64, render_a4
 
 logger = logging.getLogger(__name__)
+
+# Reject cache when slot aspect vs current crop aspect differs by more than this.
+_CACHE_ASPECT_TOLERANCE = 0.08
+
+
+def _size_key_pt(width_pt: float, height_pt: float) -> tuple[int, int]:
+    return (round_mm(width_pt / PT_PER_MM), round_mm(height_pt / PT_PER_MM))
+
+
+def remap_cached_slots(slots: list[Slot], labels: Sequence[LabelInput]) -> Optional[list[Slot]]:
+    """
+    Rebind cached frames to current uploads by rounded content size, not upload index.
+
+    Fingerprint ignores order, so a small-then-medium upload must not reuse a
+    medium-then-small template by source_index.
+    """
+    if len(slots) != len(labels):
+        return None
+    unused = list(labels)
+    remapped: list[Slot] = []
+    for s in slots:
+        crop_w = max(s.crop_urx - s.crop_llx, 0.0)
+        crop_h = max(s.crop_ury - s.crop_lly, 0.0)
+        key = _size_key_pt(crop_w, crop_h)
+        match_i = None
+        for i, lab in enumerate(unused):
+            if _size_key_pt(lab.box.width, lab.box.height) == key:
+                match_i = i
+                break
+        if match_i is None:
+            return None
+        lab = unused.pop(match_i)
+        new_w = max(lab.box.width, 1e-6)
+        new_h = max(lab.box.height, 1e-6)
+        slot_aspect = s.width / max(s.height, 1e-6)
+        content_aspect = new_w / new_h
+        denom = max(abs(slot_aspect), abs(content_aspect), 1e-6)
+        if abs(slot_aspect - content_aspect) / denom > _CACHE_ASPECT_TOLERANCE:
+            return None
+        remapped.append(
+            Slot(
+                source_index=lab.source_index,
+                x=s.x,
+                y=s.y,
+                width=s.width,
+                height=s.height,
+                scale=s.scale,
+                crop_llx=lab.box.llx,
+                crop_lly=lab.box.lly,
+                crop_urx=lab.box.urx,
+                crop_ury=lab.box.ury,
+            )
+        )
+    if unused:
+        return None
+    return remapped
 
 
 @dataclass
@@ -163,28 +219,9 @@ async def compose_labels(
             if isinstance(raw_slots, dict) and "slots" in raw_slots:
                 raw_slots = raw_slots["slots"]
             slots = [Slot.from_dict(s) for s in raw_slots]
-            by_idx = {L.source_index: L for L in labels}
-            fixed: list[Slot] = []
-            for s in slots:
-                lab = by_idx.get(s.source_index)
-                if not lab:
-                    continue
-                fixed.append(
-                    Slot(
-                        source_index=s.source_index,
-                        x=s.x,
-                        y=s.y,
-                        width=s.width,
-                        height=s.height,
-                        scale=s.scale,
-                        crop_llx=lab.box.llx,
-                        crop_lly=lab.box.lly,
-                        crop_urx=lab.box.urx,
-                        crop_ury=lab.box.ury,
-                    )
-                )
-            if len(fixed) == len(labels):
-                slots = fixed
+            remapped = remap_cached_slots(slots, labels)
+            if remapped is not None:
+                slots = remapped
                 cache_hit = True
                 pdf_bytes = render_a4(pdfs, slots)
                 return _pack_result(

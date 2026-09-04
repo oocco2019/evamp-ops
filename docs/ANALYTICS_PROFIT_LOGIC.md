@@ -73,14 +73,14 @@ When **Total Due Seller** is **zero or negative** (net clawback after a refund),
 
 ## Profit after tax (what is displayed)
 
-When you “take out” profit you pay tax on it (e.g. 30%). The app shows **profit after that tax** (take-home).
+When you “take out” profit you pay tax on it (e.g. 32%). The app shows **profit after that tax** (take-home).
 
 **Formula:**
 
 `displayed_profit = gross_profit * (1 - PROFIT_TAX_RATE)`
 
-- Default `PROFIT_TAX_RATE = 0.30` (30% tax → 70% take-home).
-- Set in `.env` as `PROFIT_TAX_RATE=0.30` (or override in config).
+- Default `PROFIT_TAX_RATE = 0.32` (32% tax → 68% take-home).
+- Set in `.env` as `PROFIT_TAX_RATE=0.32` (or override in config).
 
 All profit values in Sales Analytics (by SKU, by country, total Profit card) use this after-tax value.
 
@@ -90,7 +90,7 @@ All profit values in Sales Analytics (by SKU, by country, total Profit card) use
 |--------------------|----------------------------------|---------|
 | `USD_TO_GBP_RATE` | Multiply USD amounts by this to get GBP | 0.79    |
 | `EUR_TO_GBP_RATE` | Multiply EUR amounts by this to get GBP | 0.86    |
-| `PROFIT_TAX_RATE` | Tax rate on profit (0–1). Displayed profit = gross × (1 - rate) | 0.30    |
+| `PROFIT_TAX_RATE` | Tax rate on profit (0–1). Displayed profit = gross × (1 - rate) | 0.32    |
 | `UK_VAT_DEFAULT_RATE` | GB orders only: when `tax_total` is 0/null, VAT = order total (GBP) × `rate/(1+rate)` (VAT-inclusive). Default 0.20 | 0.20    |
 | `GBP_TO_EUR_RATE` | Multiply GBP profit by this to get EUR for display. E.g. 1.16 = 1 GBP = 1.16 EUR | 1.16    |
 | `SHOPIFY_POSTAGE_SURCHARGE_GBP` | Extra GBP per unit of Shopify postage on top of SKU postage (eBay baseline). Default 1.0 | 1.0 |

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from app.core.database import get_db
 from app.core.security import encryption_service
 from app.models.settings import APICredential, AIModelSetting, Warehouse, EmailTemplate, AppBranding, AppNotepad
+from app.services.ai_service import AIService
 
 router = APIRouter()
 
@@ -235,6 +236,22 @@ async def list_ai_model_settings(
     result = await db.execute(select(AIModelSetting))
     settings = result.scalars().all()
     return settings
+
+
+# NOTE: this route must be declared BEFORE any "/ai-models/{setting_id}" route,
+# otherwise FastAPI treats "available" as a setting_id and never reaches here.
+@router.get("/ai-models/available/{provider}")
+async def list_available_models(
+    provider: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Return the live model list for a provider (anthropic/openai), fetched from the
+    provider's API so the settings dropdown stays current without code changes.
+    Each item has at least "id" and "display_name".
+    """
+    service = AIService(db)
+    return await service.list_available_models(provider)
 
 
 @router.get("/ai-models/default", response_model=AIModelSettingResponse)

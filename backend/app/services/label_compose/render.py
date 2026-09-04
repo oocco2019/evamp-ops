@@ -86,8 +86,10 @@ def render_a4(pdf_bytes_by_source: dict[int, bytes], slots: Sequence[Slot]) -> b
 
         cw = max(urx - llx, 1e-6)
         ch = max(ury - lly, 1e-6)
-        sx = slot.width / cw
-        sy = slot.height / ch
+        # Uniform scale so a mismatched slot cannot stretch/squash the barcode.
+        scale = min(slot.width / cw, slot.height / ch)
+        sx = scale
+        sy = scale
         # Map crop lower-left → slot lower-left
         transformation = (
             Transformation()

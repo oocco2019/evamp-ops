@@ -581,7 +581,7 @@ export default function SalesAnalytics() {
             </div>
             <div className="bg-white shadow rounded-lg p-4 flex justify-between items-end gap-4">
               <div>
-                <p className="text-sm text-gray-500" title="Total profit in the selected period (GBP / EUR), after 30% tax on profit.">Profit</p>
+                <p className="text-sm text-gray-500" title="Total profit in the selected period (GBP / EUR), after 32% tax on profit.">Profit</p>
                 <p className="text-2xl font-bold text-gray-900">{formatProfitPair(periodProfitGbp)}</p>
               </div>
               <div className="text-right border-l border-gray-200 pl-4 min-w-[5rem]">
@@ -784,7 +784,7 @@ export default function SalesAnalytics() {
 
             <label
               className="inline-flex items-center gap-2 cursor-pointer select-none shrink-0"
-              title="On: profit after 30% tax. Off: profit before tax."
+              title="On: profit after 32% tax. Off: profit before tax."
             >
               <span className="text-sm font-medium text-gray-700">Tax</span>
               <button

@@ -155,13 +155,12 @@ pip3 install cryptography
 
 ---
 
-## Video ID getter
+## Video ID getter / listing videos
 
-1. Open **Video ID getter** in the nav (or go to `/listing-video`).
-2. Enter a **listing URL** (e.g. `https://www.ebay.co.uk/itm/136528644539`) or **item number** (e.g. `136528644539`) only.
-3. Click **Get video ID**. You should get title and video ID(s) or "No video".
-4. **Video ID:** Use the returned ID with exact character count when adding to other listings (no truncation or padding).
-5. **If you get stuck:** See `docs/GET_VIDEO_ID_HANDOFF.md` for technical details; write a short summary and ask Claude or another model.
+1. Open Misc → **Listing videos** (`/settings?tab=video`, or `/listing-video` redirect).
+2. **Get video ID:** enter a listing URL or item number → **Get video ID**.
+3. **Remove videos:** paste or upload item IDs → confirm → stream progress (removed / skipped / failed).
+4. **Add to SKU:** paste video ID + SKU → confirm → revises all active listings with that SKU.
 
 ---
 

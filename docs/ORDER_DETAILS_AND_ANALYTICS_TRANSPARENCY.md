@@ -44,7 +44,7 @@ Profit **per order** uses the same core function as **`/analytics/by-sku`** and 
 | **COGS (SKU Manager)** | **Landed GBP**, **Post GBP**, **Line cost**, **Order cost** – USD costs × `USD_TO_GBP_RATE`, with **refund mode** adjusting line display (see below). |
 | **UK VAT (analytics)** | **VAT** – not eBay’s `tax_total` column when that is empty; see [ANALYTICS_PROFIT_LOGIC.md](ANALYTICS_PROFIT_LOGIC.md). |
 | **Profit** | **Ord gross / Ord net** – order-level profit after `_order_profit_gbp` and `_profit_after_tax`; **Line gross / Line net** – same order numbers **× allocation share**. |
-| **Tax %** | **PROFIT_TAX_RATE** (e.g. 30%) on **profit** – **not** UK VAT rate. |
+| **Tax %** | **PROFIT_TAX_RATE** (e.g. 32%) on **profit** – **not** UK VAT rate. |
 
 ## Issues this dashboard helped surface (and how logic evolved)
 
@@ -66,7 +66,7 @@ These are **examples** of why transparency matters; the code is the source of tr
 |----------|------|
 | `USD_TO_GBP_RATE` | SKU costs (USD) and order FX when currency is not GBP/EUR. |
 | `EUR_TO_GBP_RATE` | Order amounts in EUR → GBP. |
-| `PROFIT_TAX_RATE` | Tax on **profit** (e.g. 0.30 = 30%) – **Ord net** / **Line net**. |
+| `PROFIT_TAX_RATE` | Tax on **profit** (e.g. 0.32 = 32%) – **Ord net** / **Line net**. |
 | `UK_VAT_DEFAULT_RATE` | GB orders only: when eBay `tax_total` is 0/null, VAT = inclusive extract **× rate/(1+rate)**. |
 | `GBP_TO_EUR_RATE` | EUR display on Sales Analytics cards. |
 
