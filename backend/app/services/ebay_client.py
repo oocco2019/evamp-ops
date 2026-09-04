@@ -1233,6 +1233,61 @@ def _et_text(parent, name: str, ns: str = _TRADING_XML_NS) -> Optional[str]:
     return text or None
 
 
+def _trading_ack(root) -> Optional[str]:
+    ack = _et_text(root, "Ack")
+    if ack:
+        return ack
+    el = _et_desc(root, "Ack")
+    if el is None or el.text is None:
+        return None
+    text = (el.text or "").strip()
+    return text or None
+
+
+def _trading_error_nodes(root):
+    """
+    Trading API ErrorType is a repeated <Errors> element with fields as direct
+    children. There is no nested <Error> wrapper.
+    """
+    NS = _TRADING_XML_NS
+    errors = list(root.findall(f"{{{NS}}}Errors"))
+    if not errors:
+        errors = list(root.findall(f".//{{{NS}}}Errors"))
+    if not errors:
+        errors = list(root.findall("Errors"))
+    return errors
+
+
+def _trading_primary_error_message(root) -> str:
+    for err in _trading_error_nodes(root):
+        sev = (_et_text(err, "SeverityCode") or "").lower()
+        if sev == "warning":
+            continue
+        msg = _et_text(err, "ShortMessage") or _et_text(err, "LongMessage")
+        if msg:
+            return msg
+    return "Trading API error"
+
+
+def _trading_raise_if_failure(root, http_response) -> None:
+    """
+    Raise HTTPStatusError when Trading API Ack is Failure/PartialFailure.
+
+    Trading calls return HTTP 200 for API-level failures. Callers that only
+    look for <Errors><Error> never see those failures and treat them as success.
+    """
+    ack = (_trading_ack(root) or "").strip().lower()
+    if ack not in ("failure", "partialfailure"):
+        return
+    msg = _trading_primary_error_message(root)
+    import logging
+    logging.getLogger(__name__).warning(
+        "listing_video: Trading API Ack=%s msg=%s", ack, msg
+    )
+    request = getattr(http_response, "request", None) or http_response
+    raise httpx.HTTPStatusError(msg, request=request, response=http_response)
+
+
 async def trading_get_item(access_token: str, item_id: str) -> Dict[str, Any]:
     """
     Trading API GetItem: get listing by item ID (e.g. 136528644539 from ebay.com/itm/136528644539).
@@ -1271,21 +1326,8 @@ async def trading_get_item(access_token: str, item_id: str) -> Dict[str, Any]:
         r.raise_for_status()
 
     root = ET.fromstring(r.text or "")
-    # eBay response uses default namespace urn:ebay:apis:eBLBaseComponents; ET exposes as {uri}LocalName
     NS = _TRADING_XML_NS
-    errors = root.findall(f".//{{{NS}}}Errors/{{{NS}}}Error")
-    if not errors:
-        errors = root.findall(".//Errors/Error")
-    if errors:
-        err = errors[0]
-        code_val = _et_text(err, "ErrorCode") or ""
-        msg = _et_text(err, "ShortMessage") or "Trading API error"
-        log.warning("listing_video: trading_get_item API error code=%s msg=%s", code_val, msg)
-        raise httpx.HTTPStatusError(
-            msg,
-            request=r.request,
-            response=r,
-        )
+    _trading_raise_if_failure(root, r)
 
     item = _et_desc(root, "Item")
     if item is None:
@@ -1372,20 +1414,7 @@ async def trading_remove_video_from_item(
         r.raise_for_status()
 
     root = ET.fromstring(r.text or "")
-    NS = _TRADING_XML_NS
-    errors = root.findall(f".//{{{NS}}}Errors/{{{NS}}}Error")
-    if not errors:
-        errors = root.findall(".//Errors/Error")
-    if errors:
-        err = errors[0]
-        code_val = _et_text(err, "ErrorCode") or ""
-        msg = _et_text(err, "ShortMessage") or "Trading API error"
-        log.warning("listing_video: trading_remove API error code=%s msg=%s", code_val, msg)
-        raise httpx.HTTPStatusError(
-            msg,
-            request=r.request,
-            response=r,
-        )
+    _trading_raise_if_failure(root, r)
 
 
 async def trading_revise_fixed_price_item(
@@ -1431,20 +1460,7 @@ async def trading_revise_fixed_price_item(
         r.raise_for_status()
 
     root = ET.fromstring(r.text or "")
-    NS = _TRADING_XML_NS
-    errors = root.findall(f".//{{{NS}}}Errors/{{{NS}}}Error")
-    if not errors:
-        errors = root.findall(".//Errors/Error")
-    if errors:
-        err = errors[0]
-        code_val = _et_text(err, "ErrorCode") or ""
-        msg = _et_text(err, "ShortMessage") or "Trading API error"
-        log.warning("listing_video: trading_revise API error code=%s msg=%s", code_val, msg)
-        raise httpx.HTTPStatusError(
-            msg,
-            request=r.request,
-            response=r,
-        )
+    _trading_raise_if_failure(root, r)
 
 
 async def _trading_get_seller_list_page(
@@ -1490,31 +1506,12 @@ async def _trading_get_seller_list_page(
     return ET.fromstring(r.text or ""), r
 
 
-def _gsl_check_errors(root, request_obj) -> None:
-    """Raise HTTPStatusError if the XML root contains hard API errors."""
-    NS = _TRADING_XML_NS
-    errors = root.findall(f".//{{{NS}}}Errors/{{{NS}}}Error")
-    if not errors:
-        errors = root.findall(".//Errors/Error")
-    for err in errors:
-        sev_text = (_et_text(err, "SeverityCode") or "").lower()
-        if sev_text and sev_text != "error":
-            continue
-        msg = (
-            _et_text(err, "ShortMessage")
-            or _et_text(err, "LongMessage")
-            or "GetSellerList error"
-        )
-        code_val = _et_text(err, "ErrorCode") or ""
-        import logging
-        logging.getLogger(__name__).warning(
-            "listing_video: GetSellerList API error code=%s: %s", code_val, msg
-        )
-        raise httpx.HTTPStatusError(msg, request=request_obj, response=request_obj)
+def _gsl_check_errors(root, http_response) -> None:
+    """Raise HTTPStatusError if Trading Ack is Failure/PartialFailure."""
+    _trading_raise_if_failure(root, http_response)
 
 
-def _gsl_extract_item_ids(root, filter_sku_lower: str = "") -> List[str]:
-    """Return item IDs from a GetSellerList root.  Optionally filter by SKU (case-insensitive)."""
+def _gsl_iter_items(root):
     NS = _TRADING_XML_NS
     item_array = _et_desc(root, "ItemArray")
     if item_array is None:
@@ -1522,8 +1519,13 @@ def _gsl_extract_item_ids(root, filter_sku_lower: str = "") -> List[str]:
     items = item_array.findall(f"{{{NS}}}Item")
     if not items:
         items = item_array.findall("Item")
+    return items
+
+
+def _gsl_extract_item_ids(root, filter_sku_lower: str = "") -> List[str]:
+    """Return item IDs from a GetSellerList root.  Optionally filter by SKU (case-insensitive)."""
     result = []
-    for item in items:
+    for item in _gsl_iter_items(root):
         if filter_sku_lower:
             item_sku = _et_text(item, "SKU")
             if not item_sku or item_sku.lower() != filter_sku_lower:
@@ -1532,6 +1534,41 @@ def _gsl_extract_item_ids(root, filter_sku_lower: str = "") -> List[str]:
         if iid:
             result.append(iid)
     return result
+
+
+def _gsl_sku_array_page_ids(root, filter_sku_lower: str) -> tuple[List[str], bool]:
+    """
+    Item IDs from a SKUArray GetSellerList page.
+
+    Returns (ids, filter_ignored). filter_ignored=True when the page contains
+    Item.SKU values and none match the requested SKU — eBay likely ignored
+    SKUArray and returned an unfiltered seller list. The caller must full-scan
+    instead of revising unrelated listings.
+
+    Items with no SKU field are trusted (SKUArray already filtered server-side).
+    """
+    all_ids: List[str] = []
+    matching: List[str] = []
+    saw_sku = False
+    saw_mismatch = False
+    for item in _gsl_iter_items(root):
+        iid = _et_text(item, "ItemID")
+        if iid:
+            all_ids.append(iid)
+        item_sku = _et_text(item, "SKU")
+        if not item_sku:
+            continue
+        saw_sku = True
+        if item_sku.lower() == filter_sku_lower:
+            if iid:
+                matching.append(iid)
+        else:
+            saw_mismatch = True
+    if saw_mismatch and not matching:
+        return [], True
+    if saw_sku:
+        return matching, False
+    return all_ids, False
 
 
 def _gsl_total_pages(root) -> int:
@@ -1601,10 +1638,20 @@ async def trading_get_seller_list_by_sku(
             access_token, site_id, end_from, end_to, 1, per_page, sku_array_xml
         )
         _gsl_check_errors(root1, resp1)
-        fast_ids = _gsl_extract_item_ids(root1)  # no client-side SKU filter needed
+        fast_ids, sku_array_ignored = _gsl_sku_array_page_ids(root1, sku_lower)
         total_pages_fast = _gsl_total_pages(root1)
 
-        if fast_ids or total_pages_fast > 1:
+        if sku_array_ignored:
+            log.warning(
+                "listing_video: SKUArray returned non-matching SKUs for sku=%s site=%s — falling back to full scan",
+                sku, mkt,
+            )
+            if yield_page_progress:
+                yield {
+                    "type": "progress",
+                    "message": f"[{mkt_label}] SKUArray did not match SKU {sku} — trying full listing scan…",
+                }
+        elif fast_ids or total_pages_fast > 1:
             # SKUArray worked — collect remaining pages
             if yield_page_progress and total_pages_fast > 1:
                 yield {
@@ -1616,18 +1663,20 @@ async def trading_get_seller_list_by_sku(
                     access_token, site_id, end_from, end_to, p, per_page, sku_array_xml
                 )
                 _gsl_check_errors(root_p, resp_p)
-                fast_ids.extend(_gsl_extract_item_ids(root_p))
+                page_ids, page_ignored = _gsl_sku_array_page_ids(root_p, sku_lower)
+                if not page_ignored:
+                    fast_ids.extend(page_ids)
 
             log.info("listing_video: SKUArray found=%s sku=%s site=%s", len(fast_ids), sku, mkt)
             yield fast_ids
             return
-
-        log.info("listing_video: SKUArray returned 0 for sku=%s site=%s — falling back to full scan", sku, mkt)
-        if yield_page_progress:
-            yield {
-                "type": "progress",
-                "message": f"[{mkt_label}] No SKUArray matches — trying full listing scan…",
-            }
+        else:
+            log.info("listing_video: SKUArray returned 0 for sku=%s site=%s — falling back to full scan", sku, mkt)
+            if yield_page_progress:
+                yield {
+                    "type": "progress",
+                    "message": f"[{mkt_label}] No SKUArray matches — trying full listing scan…",
+                }
     except Exception as e:
         log.warning("listing_video: SKUArray attempt failed (%s) — falling back to full scan", e)
         if yield_page_progress:

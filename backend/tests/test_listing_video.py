@@ -1,8 +1,9 @@
 import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
-from xml.etree.ElementTree import Element, SubElement, tostring
+from xml.etree.ElementTree import Element, SubElement, fromstring, tostring
 
+import httpx
 import pytest
 
 from app.api.listing_video import _extract_item_id, _parse_item_ids, _run_job_worker
@@ -253,3 +254,129 @@ def test_sku_array_fast_path_returns_item_ids():
     assert results[-1] == ["999888777666"]
     # Only one HTTP call (SKUArray page 1) — no full-scan pages
     assert post_mock.await_count == 1
+
+
+NS = "urn:ebay:apis:eBLBaseComponents"
+
+
+def _el(tag: str, text: str | None = None, parent=None):
+    node = SubElement(parent, f"{{{NS}}}{tag}") if parent is not None else Element(f"{{{NS}}}{tag}")
+    if text is not None:
+        node.text = text
+    return node
+
+
+def _seller_list_xml(items: list[tuple[str, str | None]], pages: int = 1, ack: str = "Success") -> str:
+    root_el = _el("GetSellerListResponse")
+    _el("Ack", ack, root_el)
+    pagination = _el("PaginationResult", parent=root_el)
+    _el("TotalNumberOfPages", str(pages), pagination)
+    array = _el("ItemArray", parent=root_el)
+    for item_id, sku in items:
+        item = _el("Item", parent=array)
+        _el("ItemID", item_id, item)
+        if sku is not None:
+            _el("SKU", sku, item)
+    return tostring(root_el, encoding="unicode")
+
+
+def _revise_xml(ack: str, short_message: str | None = None, severity: str = "Error") -> str:
+    root_el = _el("ReviseFixedPriceItemResponse")
+    _el("Ack", ack, root_el)
+    if short_message is not None:
+        errors = _el("Errors", parent=root_el)
+        _el("ShortMessage", short_message, errors)
+        _el("ErrorCode", "21919188", errors)
+        _el("SeverityCode", severity, errors)
+    return tostring(root_el, encoding="unicode")
+
+
+def _mock_response(xml: str, status_code: int = 200):
+    fake_response = MagicMock()
+    fake_response.status_code = status_code
+    fake_response.text = xml
+    fake_response.request = MagicMock()
+    return fake_response
+
+
+def _patch_async_client(post_mock):
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=MagicMock(post=post_mock))
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+    return patch("app.services.ebay_client.httpx.AsyncClient", return_value=fake_client)
+
+
+def test_trading_ack_failure_without_nested_error_element_raises():
+    """eBay uses <Errors><ShortMessage>, not <Errors><Error>. Ack=Failure must raise."""
+    from app.services.ebay_client import _trading_raise_if_failure
+
+    root = fromstring(_revise_xml("Failure", "This item cannot be revised."))
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        _trading_raise_if_failure(root, _mock_response("<unused/>"))
+    assert "cannot be revised" in str(ei.value)
+
+
+def test_trading_ack_warning_does_not_raise():
+    from app.services.ebay_client import _trading_raise_if_failure
+
+    root = fromstring(_revise_xml("Warning", "Duration cannot be reduced.", severity="Warning"))
+    _trading_raise_if_failure(root, _mock_response("<unused/>"))
+
+
+def test_trading_ack_success_does_not_raise():
+    from app.services.ebay_client import _trading_raise_if_failure
+
+    root = fromstring(_revise_xml("Success"))
+    _trading_raise_if_failure(root, _mock_response("<unused/>"))
+
+
+def test_revise_raises_on_ack_failure():
+    from app.services.ebay_client import trading_revise_fixed_price_item
+
+    post_mock = AsyncMock(return_value=_mock_response(_revise_xml("Failure", "This item cannot be revised.")))
+
+    async def _run():
+        with _patch_async_client(post_mock):
+            await trading_revise_fixed_price_item("tok", "136528644539", "vid123")
+
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        _arun(_run())
+    assert "cannot be revised" in str(ei.value)
+
+
+def test_sku_array_page_ids_treats_wrong_skus_as_ignored():
+    from app.services.ebay_client import _gsl_sku_array_page_ids
+
+    root = fromstring(_seller_list_xml([("111111111111", "other-sku"), ("222222222222", "also-wrong")]))
+    ids, ignored = _gsl_sku_array_page_ids(root, "uke03")
+    assert ignored is True
+    assert ids == []
+
+
+def test_sku_array_page_ids_keeps_matching_and_drops_mismatches():
+    from app.services.ebay_client import _gsl_sku_array_page_ids
+
+    root = fromstring(_seller_list_xml([("111111111111", "uke03"), ("222222222222", "other")]))
+    ids, ignored = _gsl_sku_array_page_ids(root, "uke03")
+    assert ignored is False
+    assert ids == ["111111111111"]
+
+
+def test_sku_array_ignored_falls_back_to_full_scan():
+    """If SKUArray returns other SKUs, do not revise those listings; full-scan instead."""
+    from app.services.ebay_client import trading_get_seller_list_by_sku
+
+    sku_array_wrong = _mock_response(_seller_list_xml([("111111111111", "other-sku")]))
+    full_scan_hit = _mock_response(_seller_list_xml([("999888777666", "uke03")]))
+    post_mock = AsyncMock(side_effect=[sku_array_wrong, full_scan_hit])
+
+    async def _run():
+        results = []
+        with _patch_async_client(post_mock):
+            async for payload in trading_get_seller_list_by_sku("tok", "uke03", "EBAY_GB"):
+                results.append(payload)
+        return results
+
+    results = _arun(_run())
+    assert results[-1] == ["999888777666"]
+    assert post_mock.await_count == 2
