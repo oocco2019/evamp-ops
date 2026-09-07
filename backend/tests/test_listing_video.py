@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from xml.etree.ElementTree import Element, SubElement, tostring
 
@@ -9,6 +9,8 @@ from app.api.listing_video import _extract_item_id, _parse_item_ids, _run_job_wo
 from app.services.ebay_client import (
     _et_child,
     _et_text,
+    _gsl_end_time_window,
+    _GSL_END_RANGE,
     trading_remove_video_xml,
 )
 
@@ -253,3 +255,68 @@ def test_sku_array_fast_path_returns_item_ids():
     assert results[-1] == ["999888777666"]
     # Only one HTTP call (SKUArray page 1) — no full-scan pages
     assert post_mock.await_count == 1
+
+
+def test_gsl_end_time_window_is_under_120_days():
+    """GetSellerList rejects EndTime ranges of 120 days or more (Ack=Failure)."""
+    now = datetime(2026, 9, 7, 11, 0, 0, tzinfo=timezone.utc)
+    end_from_s, end_to_s = _gsl_end_time_window(now)
+    end_from = datetime.strptime(end_from_s, "%Y-%m-%dT%H:%M:%S.000Z").replace(
+        tzinfo=timezone.utc
+    )
+    end_to = datetime.strptime(end_to_s, "%Y-%m-%dT%H:%M:%S.000Z").replace(
+        tzinfo=timezone.utc
+    )
+    span = end_to - end_from
+    assert span < timedelta(days=120)
+    assert span == _GSL_END_RANGE
+    # Active listings only: do not look back into already-ended items.
+    assert end_from == now.replace(microsecond=0)
+    assert end_to > now + timedelta(days=119)
+
+
+def test_sku_array_request_uses_legal_end_time_window():
+    """Posted GetSellerList XML must not exceed eBay's <120 day EndTime range."""
+    from app.services.ebay_client import trading_get_seller_list_by_sku
+
+    NS = "urn:ebay:apis:eBLBaseComponents"
+
+    def _xml_with_item(item_id: str):
+        root_el = Element(f"{{{NS}}}GetSellerListResponse")
+        pagination = SubElement(root_el, f"{{{NS}}}PaginationResult")
+        pages_el = SubElement(pagination, f"{{{NS}}}TotalNumberOfPages")
+        pages_el.text = "1"
+        array = SubElement(root_el, f"{{{NS}}}ItemArray")
+        item = SubElement(array, f"{{{NS}}}Item")
+        iid = SubElement(item, f"{{{NS}}}ItemID")
+        iid.text = item_id
+        from xml.etree.ElementTree import tostring
+        return tostring(root_el, encoding="unicode")
+
+    fake_response = MagicMock()
+    fake_response.status_code = 200
+    fake_response.text = _xml_with_item("999888777666")
+    fake_response.request = MagicMock()
+
+    post_mock = AsyncMock(return_value=fake_response)
+    fake_client = MagicMock()
+    fake_client.__aenter__ = AsyncMock(return_value=MagicMock(post=post_mock))
+    fake_client.__aexit__ = AsyncMock(return_value=False)
+
+    async def _run():
+        with patch("app.services.ebay_client.httpx.AsyncClient", return_value=fake_client):
+            async for _payload in trading_get_seller_list_by_sku("tok", "uke03", "EBAY_GB"):
+                pass
+
+    _arun(_run())
+    assert post_mock.await_count >= 1
+    posted = post_mock.await_args.kwargs.get("content") or post_mock.await_args.args[1]
+    from xml.etree.ElementTree import fromstring
+
+    root = fromstring(posted)
+    end_from_el = root.find(f"{{{NS}}}EndTimeFrom")
+    end_to_el = root.find(f"{{{NS}}}EndTimeTo")
+    assert end_from_el is not None and end_to_el is not None
+    end_from = datetime.strptime(end_from_el.text, "%Y-%m-%dT%H:%M:%S.000Z")
+    end_to = datetime.strptime(end_to_el.text, "%Y-%m-%dT%H:%M:%S.000Z")
+    assert (end_to - end_from) < timedelta(days=120)
