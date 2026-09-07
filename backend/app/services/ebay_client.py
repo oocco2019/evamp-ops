@@ -1547,6 +1547,30 @@ def _gsl_total_pages(root) -> int:
     return 1
 
 
+# eBay GetSellerList: EndTimeFrom/To duration must be strictly less than 120 days.
+# A window of (now - 1h, now + 120d) is 120d+1h and is rejected with Ack=Failure.
+_GSL_END_RANGE = timedelta(days=120) - timedelta(minutes=1)
+
+
+def _gsl_end_time_window(now: Optional[datetime] = None) -> Tuple[str, str]:
+    """
+    Active-listing EndTime window for GetSellerList.
+
+    Start at `now` (ended listings are not revise targets). Span just under
+    120 days so the request satisfies eBay's documented maximum.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+    end_from = now
+    end_to = now + _GSL_END_RANGE
+    fmt = "%Y-%m-%dT%H:%M:%S.000Z"
+    return end_from.strftime(fmt), end_to.strftime(fmt)
+
+
 async def trading_get_seller_list_by_sku(
     access_token: str,
     sku: str,
@@ -1581,8 +1605,7 @@ async def trading_get_seller_list_by_sku(
     site_id = _EBAY_MARKETPLACE_TO_SITE_ID.get(mkt, 3)
     mkt_label = mkt.replace("EBAY_", "")
     now = datetime.now(timezone.utc)
-    end_from = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    end_to = (now + timedelta(days=120)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    end_from, end_to = _gsl_end_time_window(now)
     per_page = 200
     NS = _TRADING_XML_NS
 
