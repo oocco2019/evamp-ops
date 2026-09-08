@@ -179,12 +179,8 @@ async def _add_video_to_sku_stream(
                 last_errors[item_id] = err_msg
                 yield _stream_line({"type": "progress", "message": f"Failed: {item_id} — {err_msg}"})
 
-        if still_failing and len(still_failing) == len(pending):
-            # All failed this attempt — no progress; stop retrying
-            if attempt < max_attempts:
-                yield _stream_line({"type": "progress", "message": f"All {len(still_failing)} retried listing(s) failed again — stopping retries."})
-            break
-
+        # An all-fail round is not a stop condition. Concurrent Revise calls
+        # often all 429/timeout together; the delays below exist for that case.
         pending = still_failing
 
     failed = list(last_errors.keys())
@@ -882,21 +878,10 @@ async def _run_job_worker_inner(job_id: str, log: logging.Logger) -> None:
                 await _refresh_counters(db, job_id)
                 await db.commit()
 
-            if results_this_round["done"] == 0 and results_this_round["skipped"] == 0:
-                if attempt < _MAX_ATTEMPTS:
-                    async with async_session_maker() as db:
-                        await _log(db, job_id, "No progress this round — stopping retries.")
-                        await db.execute(
-                            update(ListingVideoJobItem)
-                            .where(
-                                ListingVideoJobItem.job_id == job_id,
-                                ListingVideoJobItem.status == "pending",
-                            )
-                            .values(status="failed", updated_at=_now())
-                        )
-                        await _refresh_counters(db, job_id)
-                        await db.commit()
-                break
+            # Do not abort when a round updates/skips nothing. Transient eBay
+            # errors (rate limit, timeout) commonly fail every concurrent
+            # revise; items stay pending and the next attempt waits _RETRY_DELAYS.
+            # Permanent failures are marked failed on the last attempt above.
 
         # --- Phase 3: finalize ---
         async with async_session_maker() as db:

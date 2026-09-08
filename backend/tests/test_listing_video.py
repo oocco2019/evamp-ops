@@ -1,11 +1,16 @@
 import asyncio
+import json
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 import pytest
 
-from app.api.listing_video import _extract_item_id, _parse_item_ids, _run_job_worker
+from app.api.listing_video import (
+    _add_video_to_sku_stream,
+    _extract_item_id,
+    _parse_item_ids,
+)
 from app.services.ebay_client import (
     _et_child,
     _et_text,
@@ -253,3 +258,74 @@ def test_sku_array_fast_path_returns_item_ids():
     assert results[-1] == ["999888777666"]
     # Only one HTTP call (SKUArray page 1) — no full-scan pages
     assert post_mock.await_count == 1
+
+
+async def _collect_sku_stream_events(video_id="vid123", sku="uke01"):
+    events = []
+    async for chunk in _add_video_to_sku_stream(video_id, sku, "tok", "EBAY_GB"):
+        events.append(json.loads(chunk))
+    return events
+
+
+def _sku_scan_yielding(item_ids):
+    async def _gen(*_args, **_kwargs):
+        yield item_ids
+
+    return _gen
+
+
+def test_sku_stream_retries_after_all_fail_round():
+    """Rate-limit/timeout on every listing in round 1 must still retry.
+
+    The old circuit breaker treated 'all failed this round' as no progress and
+    aborted, so listings that would succeed after a short delay stayed without
+    video. UI add-video uses the job worker, which had the same abort.
+    """
+    calls = {"n": 0}
+
+    async def revise(*_args, **_kwargs):
+        calls["n"] += 1
+        # Two listings: first round both fail (calls 1–2), second round both succeed.
+        if calls["n"] <= 2:
+            raise RuntimeError("eBay rate limited")
+
+    async def _run():
+        with patch(
+            "app.api.listing_video.trading_get_seller_list_by_sku",
+            _sku_scan_yielding(["111111111111", "222222222222"]),
+        ), patch(
+            "app.api.listing_video.trading_revise_fixed_price_item",
+            side_effect=revise,
+        ), patch("asyncio.sleep", AsyncMock()):
+            return await _collect_sku_stream_events()
+
+    events = _arun(_run())
+    done = next(e for e in events if e.get("type") == "done")
+    assert done["updated"] == 2
+    assert done["failed"] == []
+    assert calls["n"] == 4  # 2 fail + 2 succeed; would be 2 if retries aborted
+
+
+def test_sku_stream_uses_all_attempts_when_every_revise_fails():
+    """Permanent failures still run the configured retry budget (4 attempts)."""
+    calls = {"n": 0}
+
+    async def revise(*_args, **_kwargs):
+        calls["n"] += 1
+        raise RuntimeError("invalid video id")
+
+    async def _run():
+        with patch(
+            "app.api.listing_video.trading_get_seller_list_by_sku",
+            _sku_scan_yielding(["111111111111", "222222222222"]),
+        ), patch(
+            "app.api.listing_video.trading_revise_fixed_price_item",
+            side_effect=revise,
+        ), patch("asyncio.sleep", AsyncMock()):
+            return await _collect_sku_stream_events()
+
+    events = _arun(_run())
+    done = next(e for e in events if e.get("type") == "done")
+    assert done["updated"] == 0
+    assert set(done["failed"]) == {"111111111111", "222222222222"}
+    assert calls["n"] == 8  # 2 listings × 4 attempts
