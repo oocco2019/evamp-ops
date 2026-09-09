@@ -52,6 +52,8 @@ Starter seed: suggest printing labels on A4 paper (`sku_scope=*`).
 
 Draft speed defaults (override in `.env`): `REPLY_DRAFT_ADHERENCE_ENABLED=false`, `REPLY_DRAFT_MAX_REVISES=0`, `REPLY_DRAFT_MAX_THREAD_MESSAGES=24`, `REPLY_DRAFT_MAX_TOKENS=700`. Backend logs `reply_compose:` timings when diagnosing slow drafts.
 
+**Claude 5 thinking:** Sonnet 5 / Opus 5 / Fable 5 turn adaptive thinking on when the `thinking` field is omitted. Thinking tokens count against `max_tokens`, so a 700-token draft can come back empty or truncated (`stop_reason: max_tokens`). The Anthropic provider must send `thinking: {type: disabled}` for those models (CS drafts, language detect, translate). Do not send that field to Claude 3.5 / 4.5.
+
 Legacy global/SKU `AIInstruction` blobs and **Generate global from history** are retired (rows cleared; endpoints removed). Style profile / procedure tables remain but are no longer injected into draft.
 
 ## Insights (pending review)
