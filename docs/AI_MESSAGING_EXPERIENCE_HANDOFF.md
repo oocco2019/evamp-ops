@@ -87,6 +87,8 @@ That flow spans **many messages**. Today the model often **crams steps 1–5 int
 | Premade messages (paste into reply, not into AI prompt) | Dropdown + `/premade-messages` |
 | Policies + playbook CRUD + Insights | `frontend/src/pages/AIInstructions.tsx` |
 
+Generate draft uses a dedicated `isDrafting` flag so a silent thread-list refresh does not disable the button. **Send must stay disabled while `isDrafting`.** A completed draft must not write the reply box if the user switched threads or the send already succeeded (`frontend/src/utils/draftReplyGuard.ts`).
+
 ### Data model
 
 - **`reply_policies`** — how to write; every enabled row every draft.
