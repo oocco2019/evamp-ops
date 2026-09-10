@@ -45,6 +45,9 @@ from app.models.messages import (
     ReplyPolicy,
     ReplyPlaybookEntry,
     ReplyInsight,
+    PremadeMessage,
+    SampleConversation,
+    SampleMessage,
 )
 from app.models.stock import Order
 from app.services.ai_service import AIService
@@ -150,6 +153,19 @@ class ThreadDetail(BaseModel):
 class DraftRequest(BaseModel):
     extra_instructions: Optional[str] = Field(None, max_length=2000)
     procedure: Optional[str] = Field(None, description="Procedure name to apply (e.g., 'proof_of_fault')")
+    model_id: Optional[int] = Field(None, description="Override via saved AI model row id")
+    provider: Optional[str] = Field(
+        None, max_length=40, description="Override provider (anthropic|openai); use with model_name"
+    )
+    model_name: Optional[str] = Field(
+        None, max_length=120, description="Override model id from provider catalog"
+    )
+    include_sample_conversations: bool = Field(
+        False, description="Inject enabled sample conversations into the draft prompt"
+    )
+    dump_all_playbook: bool = Field(
+        False, description="Inject all enabled playbook rows (skip SKU matching)"
+    )
 
 
 class DraftGermanRequest(BaseModel):
@@ -248,6 +264,130 @@ async def list_threads(
     for tid, uname in buyer_fallback.items():
         buyer_usernames.add(uname)
     buyer_order_map = {}
+    if buyer_usernames:
+        order_result = await db.execute(
+            select(Order.buyer_username, Order.ebay_order_id)
+            .where(
+                Order.sales_channel == "ebay",
+                Order.buyer_username.in_(buyer_usernames),
+            )
+            .order_by(Order.date.desc())
+        )
+        for row in order_result.all():
+            if row.buyer_username not in buyer_order_map:
+                buyer_order_map[row.buyer_username] = row.ebay_order_id
+
+    def _list_buyer_display(t: MessageThread) -> Optional[str]:
+        raw = t.buyer_username if not _is_seller_username(t.buyer_username or "") else None
+        if raw:
+            return raw
+        return buyer_fallback.get(t.thread_id)
+
+    return [
+        ThreadSummary(
+            thread_id=t.thread_id,
+            buyer_username=_list_buyer_display(t),
+            ebay_order_id=t.ebay_order_id or buyer_order_map.get(_list_buyer_display(t) or ""),
+            ebay_item_id=t.ebay_item_id,
+            sku=t.sku,
+            created_at=t.created_at.isoformat(),
+            unread_count=t.unread_count or 0,
+            is_flagged=t.is_flagged,
+            message_count=t.message_count or 0,
+            last_message_preview=t.last_message_preview,
+        )
+        for t in threads
+    ]
+
+
+class AiSearchRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=2000, description="Natural-language description of the conversation to find.")
+
+
+@router.post("/ai-search", response_model=List[ThreadSummary])
+async def ai_search_threads(
+    body: AiSearchRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    AI prompt search over threads with activity in the last 90 days.
+    Sends full message text (batched) to the default AI model; returns matching
+    threads in the same shape as GET /threads (no match rationales).
+    """
+    from app.services.message_ai_search import (
+        AI_SEARCH_WINDOW_DAYS,
+        ai_search_thread_ids,
+        load_recent_thread_blocks,
+    )
+
+    prompt = (body.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt is required.")
+
+    blocks = await load_recent_thread_blocks(db, window_days=AI_SEARCH_WINDOW_DAYS)
+    if not blocks:
+        return []
+
+    ai = AIService(db)
+
+    async def _complete(user_prompt: str, *, system: str, max_tokens: int = 4000, temperature: float = 0) -> str:
+        return await ai.complete(
+            user_prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+    try:
+        matched_ids = await ai_search_thread_ids(prompt, blocks, _complete)
+    except NotImplementedError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("messages ai-search failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI search failed: {e!s}",
+        ) from e
+
+    if not matched_ids:
+        return []
+
+    # Preserve AI match order while loading thread rows
+    result = await db.execute(
+        select(MessageThread).where(MessageThread.thread_id.in_(matched_ids))
+    )
+    by_id = {t.thread_id: t for t in result.scalars().all()}
+    threads = [by_id[tid] for tid in matched_ids if tid in by_id]
+
+    need_fallback_ids = [
+        t.thread_id for t in threads
+        if not t.buyer_username or _is_seller_username(t.buyer_username or "")
+    ]
+    buyer_fallback: dict[str, Optional[str]] = {}
+    if need_fallback_ids:
+        fallback_result = await db.execute(
+            select(Message.thread_id, Message.sender_username)
+            .where(
+                Message.thread_id.in_(need_fallback_ids),
+                Message.sender_type != "seller",
+                Message.sender_username.isnot(None),
+            )
+            .order_by(Message.thread_id, Message.ebay_created_at)
+        )
+        for row in fallback_result.all():
+            tid = getattr(row, "thread_id", None)
+            uname = getattr(row, "sender_username", None)
+            if tid and uname and not _is_seller_username(uname) and tid not in buyer_fallback:
+                buyer_fallback[tid] = uname
+
+    buyer_usernames = {
+        t.buyer_username for t in threads
+        if t.buyer_username and not _is_seller_username(t.buyer_username)
+    }
+    for uname in buyer_fallback.values():
+        if uname:
+            buyer_usernames.add(uname)
+    buyer_order_map: dict = {}
     if buyer_usernames:
         order_result = await db.execute(
             select(Order.buyer_username, Order.ebay_order_id)
@@ -548,6 +688,14 @@ async def draft_reply(
         ebay_order_id = await _find_order_for_buyer(db, buyer_name)
 
     async def _gen(prompt: str, context: dict) -> str:
+        if body.provider and body.model_name:
+            provider = await ai.get_provider_for_provider_model(
+                body.provider.strip(), body.model_name.strip()
+            )
+            return await provider.generate_message(prompt, context)
+        if body.model_id is not None:
+            provider = await ai.get_provider_for_model_id(body.model_id)
+            return await provider.generate_message(prompt, context)
         return await ai.generate_message(prompt, context)
 
     try:
@@ -558,6 +706,8 @@ async def draft_reply(
             ebay_order_id=ebay_order_id,
             extra_instructions=body.extra_instructions,
             ai_generate=_gen,
+            include_sample_conversations=body.include_sample_conversations,
+            dump_all_playbook=body.dump_all_playbook,
         )
     except ValueError as e:
         raise HTTPException(
@@ -2116,6 +2266,323 @@ async def delete_reply_policy(policy_id: int, db: AsyncSession = Depends(get_db)
     if not row:
         raise HTTPException(status_code=404, detail="Policy not found")
     await db.delete(row)
+    await db.commit()
+
+
+# === Premade (canned) reply messages ===
+
+class PremadeMessageCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    content: str = Field(..., min_length=1, max_length=8000)
+
+
+class PremadeMessageUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=120)
+    content: Optional[str] = Field(None, min_length=1, max_length=8000)
+
+
+class PremadeMessageResponse(BaseModel):
+    id: int
+    name: str
+    content: str
+    sort_order: int
+    created_at: str
+    updated_at: str
+
+    model_config = {"from_attributes": True}
+
+
+class PremadeReorderRequest(BaseModel):
+    ordered_ids: List[int] = Field(..., min_length=1, description="Premade message ids in desired display order")
+
+
+def _premade_resp(row: PremadeMessage) -> PremadeMessageResponse:
+    return PremadeMessageResponse(
+        id=row.id,
+        name=row.name,
+        content=row.content,
+        sort_order=row.sort_order,
+        created_at=row.created_at.isoformat() if row.created_at else "",
+        updated_at=row.updated_at.isoformat() if row.updated_at else "",
+    )
+
+
+@router.get("/premade-messages", response_model=List[PremadeMessageResponse])
+async def list_premade_messages(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(PremadeMessage).order_by(PremadeMessage.sort_order, PremadeMessage.id)
+    )
+    return [_premade_resp(r) for r in result.scalars().all()]
+
+
+@router.post("/premade-messages", response_model=PremadeMessageResponse, status_code=status.HTTP_201_CREATED)
+async def create_premade_message(body: PremadeMessageCreate, db: AsyncSession = Depends(get_db)):
+    name = body.name.strip()
+    content = body.content.strip()
+    if not name or not content:
+        raise HTTPException(status_code=400, detail="name and content are required.")
+    max_order = await db.execute(select(func.coalesce(func.max(PremadeMessage.sort_order), -1)))
+    next_order = int(max_order.scalar_one()) + 1
+    row = PremadeMessage(name=name, content=content, sort_order=next_order)
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _premade_resp(row)
+
+
+@router.put("/premade-messages/reorder", response_model=List[PremadeMessageResponse])
+async def reorder_premade_messages(body: PremadeReorderRequest, db: AsyncSession = Depends(get_db)):
+    ids = body.ordered_ids
+    if len(ids) != len(set(ids)):
+        raise HTTPException(status_code=400, detail="ordered_ids must be unique.")
+    result = await db.execute(select(PremadeMessage).where(PremadeMessage.id.in_(ids)))
+    rows = {r.id: r for r in result.scalars().all()}
+    if len(rows) != len(ids):
+        raise HTTPException(status_code=400, detail="One or more premade message ids were not found.")
+    for i, mid in enumerate(ids):
+        rows[mid].sort_order = i
+    await db.commit()
+    ordered = await db.execute(
+        select(PremadeMessage).order_by(PremadeMessage.sort_order, PremadeMessage.id)
+    )
+    return [_premade_resp(r) for r in ordered.scalars().all()]
+
+
+@router.put("/premade-messages/{message_id}", response_model=PremadeMessageResponse)
+async def update_premade_message(
+    message_id: int,
+    body: PremadeMessageUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    row = await db.get(PremadeMessage, message_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Premade message not found")
+    if body.name is not None:
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="name cannot be empty.")
+        row.name = name
+    if body.content is not None:
+        content = body.content.strip()
+        if not content:
+            raise HTTPException(status_code=400, detail="content cannot be empty.")
+        row.content = content
+    await db.commit()
+    await db.refresh(row)
+    return _premade_resp(row)
+
+
+@router.delete("/premade-messages/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_premade_message(message_id: int, db: AsyncSession = Depends(get_db)):
+    row = await db.get(PremadeMessage, message_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Premade message not found")
+    await db.delete(row)
+    await db.commit()
+
+
+# --- Sample conversations (Messages-Test style/flow exemplars) ---
+
+
+class SampleMessageIn(BaseModel):
+    role: str = Field(..., pattern="^(buyer|seller)$")
+    content: str = Field(..., min_length=1, max_length=8000)
+
+
+class SampleMessageUpdate(BaseModel):
+    role: Optional[str] = Field(None, pattern="^(buyer|seller)$")
+    content: Optional[str] = Field(None, min_length=1, max_length=8000)
+
+
+class SampleMessageOut(BaseModel):
+    id: int
+    conversation_id: int
+    role: str
+    content: str
+    sort_order: int
+
+    model_config = {"from_attributes": True}
+
+
+class SampleConversationCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    enabled: bool = True
+
+
+class SampleConversationUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    enabled: Optional[bool] = None
+
+
+class SampleConversationOut(BaseModel):
+    id: int
+    title: str
+    enabled: bool
+    sort_order: int
+    messages: List[SampleMessageOut] = []
+
+    model_config = {"from_attributes": True}
+
+
+def _sample_msg_out(m: SampleMessage) -> SampleMessageOut:
+    return SampleMessageOut(
+        id=m.id,
+        conversation_id=m.conversation_id,
+        role=m.role,
+        content=m.content,
+        sort_order=m.sort_order,
+    )
+
+
+def _sample_conv_out(c: SampleConversation) -> SampleConversationOut:
+    msgs = sorted(c.messages or [], key=lambda m: (m.sort_order, m.id))
+    return SampleConversationOut(
+        id=c.id,
+        title=c.title,
+        enabled=c.enabled,
+        sort_order=c.sort_order,
+        messages=[_sample_msg_out(m) for m in msgs],
+    )
+
+
+@router.get("/sample-conversations", response_model=List[SampleConversationOut])
+async def list_sample_conversations(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(SampleConversation)
+        .options(selectinload(SampleConversation.messages))
+        .order_by(SampleConversation.sort_order, SampleConversation.id)
+    )
+    return [_sample_conv_out(c) for c in result.scalars().all()]
+
+
+@router.post(
+    "/sample-conversations",
+    response_model=SampleConversationOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_sample_conversation(
+    body: SampleConversationCreate, db: AsyncSession = Depends(get_db)
+):
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title cannot be empty.")
+    max_order = await db.execute(
+        select(func.coalesce(func.max(SampleConversation.sort_order), -1))
+    )
+    next_order = int(max_order.scalar_one()) + 1
+    row = SampleConversation(title=title, enabled=body.enabled, sort_order=next_order)
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    result = await db.execute(
+        select(SampleConversation)
+        .where(SampleConversation.id == row.id)
+        .options(selectinload(SampleConversation.messages))
+    )
+    return _sample_conv_out(result.scalar_one())
+
+
+@router.put("/sample-conversations/{conversation_id}", response_model=SampleConversationOut)
+async def update_sample_conversation(
+    conversation_id: int,
+    body: SampleConversationUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(SampleConversation)
+        .where(SampleConversation.id == conversation_id)
+        .options(selectinload(SampleConversation.messages))
+    )
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Sample conversation not found")
+    if body.title is not None:
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="title cannot be empty.")
+        row.title = title
+    if body.enabled is not None:
+        row.enabled = body.enabled
+    await db.commit()
+    await db.refresh(row)
+    result = await db.execute(
+        select(SampleConversation)
+        .where(SampleConversation.id == conversation_id)
+        .options(selectinload(SampleConversation.messages))
+    )
+    return _sample_conv_out(result.scalar_one())
+
+
+@router.delete("/sample-conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_sample_conversation(conversation_id: int, db: AsyncSession = Depends(get_db)):
+    row = await db.get(SampleConversation, conversation_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Sample conversation not found")
+    await db.delete(row)
+    await db.commit()
+
+
+@router.post(
+    "/sample-conversations/{conversation_id}/messages",
+    response_model=SampleMessageOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_sample_message(
+    conversation_id: int,
+    body: SampleMessageIn,
+    db: AsyncSession = Depends(get_db),
+):
+    conv = await db.get(SampleConversation, conversation_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="Sample conversation not found")
+    content = body.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="content cannot be empty.")
+    max_order = await db.execute(
+        select(func.coalesce(func.max(SampleMessage.sort_order), -1)).where(
+            SampleMessage.conversation_id == conversation_id
+        )
+    )
+    next_order = int(max_order.scalar_one()) + 1
+    msg = SampleMessage(
+        conversation_id=conversation_id,
+        role=body.role,
+        content=content,
+        sort_order=next_order,
+    )
+    db.add(msg)
+    await db.commit()
+    await db.refresh(msg)
+    return _sample_msg_out(msg)
+
+
+@router.put("/sample-messages/{message_id}", response_model=SampleMessageOut)
+async def update_sample_message(
+    message_id: int,
+    body: SampleMessageUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    msg = await db.get(SampleMessage, message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Sample message not found")
+    if body.role is not None:
+        msg.role = body.role
+    if body.content is not None:
+        content = body.content.strip()
+        if not content:
+            raise HTTPException(status_code=400, detail="content cannot be empty.")
+        msg.content = content
+    await db.commit()
+    await db.refresh(msg)
+    return _sample_msg_out(msg)
+
+
+@router.delete("/sample-messages/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_sample_message(message_id: int, db: AsyncSession = Depends(get_db)):
+    msg = await db.get(SampleMessage, message_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Sample message not found")
+    await db.delete(msg)
     await db.commit()
 
 

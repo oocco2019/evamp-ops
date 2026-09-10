@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import time
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import select
@@ -19,6 +20,7 @@ from app.models.messages import (
     MessageThread,
     ReplyPlaybookEntry,
     ReplyPolicy,
+    SampleConversation,
 )
 from app.models.stock import LineItem, Order, SKU
 
@@ -27,6 +29,71 @@ logger = logging.getLogger(__name__)
 # Clause dashes people do not type in casual messaging (keep word-hyphens like Wi-Fi).
 _CLAUSE_DASH_RE = re.compile(r"\s*[—–]\s*|\s+-\s+")
 _COMMA_AND_RE = re.compile(r",\s+and\b", re.I)
+
+# Opening greetings (EN + common DE). Used with same-day timestamp check.
+_GREETING_START_RE = re.compile(
+    r"(?is)^\s*(?:"
+    r"hi\b|hello\b|hey\b|hiya\b|howdy\b|"
+    r"good\s+(?:morning|afternoon|evening)\b|"
+    r"hallo\b|guten\s+(?:tag|morgen|abend)\b|"
+    r"liebe[r]?\s+\w+"
+    r")"
+)
+
+
+def message_opens_with_greeting(content: Optional[str]) -> bool:
+    """True if the message opens with a greeting (first line / leading text)."""
+    if not content:
+        return False
+    lines = [ln.strip() for ln in (content or "").splitlines() if ln.strip()]
+    head = lines[0] if lines else (content or "").strip()
+    return bool(_GREETING_START_RE.match(head[:160]))
+
+
+def _message_day(ts: Optional[datetime]) -> Optional[date]:
+    if not ts:
+        return None
+    if getattr(ts, "tzinfo", None) is not None:
+        return ts.astimezone(tz=None).replace(tzinfo=None).date()
+    return ts.date()
+
+
+def seller_greeted_today(
+    messages: Sequence[Any],
+    *,
+    now: Optional[datetime] = None,
+) -> bool:
+    """
+    True if any seller message earlier today (UTC calendar day) opens with a greeting.
+    Accepts Message ORM rows or dicts with role/sender_type, content, ebay_created_at.
+    """
+    now = now or datetime.utcnow()
+    today = now.date() if getattr(now, "tzinfo", None) is None else now.replace(tzinfo=None).date()
+    for m in messages:
+        if hasattr(m, "sender_type"):
+            role = (m.sender_type or "").lower()
+            content = m.content or ""
+            subj = getattr(m, "subject", None) or ""
+            if subj:
+                content = f"{subj}\n{content}"
+            ts = getattr(m, "ebay_created_at", None)
+        else:
+            role = (m.get("role") or m.get("sender_type") or "").lower()
+            content = m.get("content") or ""
+            ts = m.get("ebay_created_at")
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+                except ValueError:
+                    ts = None
+        if role != "seller":
+            continue
+        day = _message_day(ts)
+        if day != today:
+            continue
+        if message_opens_with_greeting(content):
+            return True
+    return False
 
 
 def sanitize_messaging_punctuation(text: str) -> str:
@@ -184,19 +251,46 @@ async def retrieve_playbook_entries(
     *,
     skus: Sequence[str],
     thread_text: str,
+    dump_all: bool = False,
 ) -> List[ReplyPlaybookEntry]:
-    """Match by SKU scope only (`*` = all). Keywords are not used for retrieval."""
-    del thread_text  # reserved for future use; matching is SKU-scope only
+    """Match by SKU scope (`*` = all). If dump_all, return every enabled entry."""
+    del thread_text  # reserved; matching is SKU-scope only unless dump_all
     result = await db.execute(
         select(ReplyPlaybookEntry).where(ReplyPlaybookEntry.enabled == True)  # noqa: E712
     )
     entries = list(result.scalars().all())
+    if dump_all:
+        return entries
     matched: List[ReplyPlaybookEntry] = []
     sku_list = [s for s in skus if s] or [None]
     for entry in entries:
         if any(sku_matches_scope(s, entry.sku_scope) for s in sku_list):
             matched.append(entry)
     return matched
+
+
+async def load_enabled_sample_conversations(db: AsyncSession) -> List[SampleConversation]:
+    result = await db.execute(
+        select(SampleConversation)
+        .where(SampleConversation.enabled == True)  # noqa: E712
+        .options(selectinload(SampleConversation.messages))
+        .order_by(SampleConversation.sort_order, SampleConversation.id)
+    )
+    return list(result.scalars().all())
+
+
+def format_sample_conversations_for_prompt(samples: Sequence[SampleConversation]) -> str:
+    if not samples:
+        return ""
+    blocks: List[str] = []
+    for conv in samples:
+        lines = [f"--- Example: {conv.title} ---"]
+        msgs = sorted(conv.messages, key=lambda m: (m.sort_order, m.id))
+        for m in msgs:
+            role = "Buyer" if (m.role or "").lower() == "buyer" else "Seller"
+            lines.append(f"[{role}]: {(m.content or '').strip()}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
 
 
 def build_compose_prompt_parts(
@@ -242,6 +336,7 @@ def build_provider_context(
     policies: Sequence[ReplyPolicy],
     playbook: Sequence[ReplyPlaybookEntry],
     product_context_text: str,
+    sample_conversations_text: str = "",
 ) -> Dict[str, Any]:
     return {
         "thread_history": thread_history,
@@ -256,6 +351,7 @@ def build_provider_context(
             for e in playbook
         ],
         "product_context": product_context_text,
+        "sample_conversations": sample_conversations_text,
         # Back-compat keys unused by new builders
         "global_instructions": "",
         "sku_instructions": "",
@@ -385,6 +481,8 @@ async def compose_draft_with_adherence(
     run_adherence: Optional[bool] = None,
     max_thread_messages: Optional[int] = None,
     draft_max_tokens: Optional[int] = None,
+    include_sample_conversations: bool = False,
+    dump_all_playbook: bool = False,
 ) -> Tuple[str, AIComposition]:
     """
     Full compose: resolve product, policies, playbook, generate, optional adhere ≤ max_revises.
@@ -406,11 +504,18 @@ async def compose_draft_with_adherence(
     policies = await load_enabled_policies(db)
     text = thread_text_from_history(thread_history)
     playbook = await retrieve_playbook_entries(
-        db, skus=product["skus"] or ([product["primary_sku"]] if product["primary_sku"] else []), thread_text=text
+        db,
+        skus=product["skus"] or ([product["primary_sku"]] if product["primary_sku"] else []),
+        thread_text=text,
+        dump_all=dump_all_playbook,
     )
-    from app.services.reply_router import seller_greeted_today as _seller_greeted_today
-
-    greeted_today = _seller_greeted_today(thread_history)
+    samples_text = ""
+    sample_ids: List[int] = []
+    if include_sample_conversations:
+        samples = await load_enabled_sample_conversations(db)
+        samples_text = format_sample_conversations_for_prompt(samples)
+        sample_ids = [s.id for s in samples]
+    greeted_today = seller_greeted_today(thread_history)
     prompt, snapshot = build_compose_prompt_parts(
         policies,
         playbook,
@@ -418,22 +523,27 @@ async def compose_draft_with_adherence(
         extra_instructions,
         seller_greeted_today=greeted_today,
     )
+    if samples_text:
+        snapshot["sample_conversation_ids"] = sample_ids
+        snapshot["sample_conversations_preview"] = samples_text[:2000]
     ctx = build_provider_context(
         thread_history=thread_history,
         policies=policies,
         playbook=playbook,
         product_context_text=product["product_context_text"],
+        sample_conversations_text=samples_text,
     )
     ctx["max_tokens"] = draft_max_tokens
 
     draft = (await ai_generate(prompt, ctx)).strip()
     draft = sanitize_messaging_punctuation(draft)
     logger.info(
-        "reply_compose: initial draft in %.2fs (messages=%s policies=%s playbook=%s)",
+        "reply_compose: initial draft in %.2fs (messages=%s policies=%s playbook=%s samples=%s)",
         time.perf_counter() - t0,
         len(thread_history),
         len(policies),
         len(playbook),
+        len(sample_ids),
     )
 
     adherence_rounds: List[Dict[str, Any]] = []

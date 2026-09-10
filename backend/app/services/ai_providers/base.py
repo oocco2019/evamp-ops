@@ -45,6 +45,20 @@ class AIProvider(ABC):
             Generated message text
         """
         pass
+
+    async def complete(
+        self,
+        user_prompt: str,
+        *,
+        system: str,
+        max_tokens: int = 2000,
+        temperature: float = 0,
+    ) -> str:
+        """
+        Raw completion (system + user). Providers override.
+        Used for non-draft tasks (e.g. AI message search).
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement complete()")
     
     @abstractmethod
     async def detect_language(self, text: str) -> str:

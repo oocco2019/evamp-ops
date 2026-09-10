@@ -228,41 +228,6 @@ class AIComposition(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
-class KnownIssue(Base):
-    """Known product-fault register for CS router (stage skip / collapse)."""
-
-    __tablename__ = "known_issues"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    issue_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
-    symptom_keywords: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
-    applies_to_sku: Mapped[str] = mapped_column(String(500), nullable=False, default="*")
-    diagnosis: Mapped[str] = mapped_column(Text, nullable=False)
-    confidence: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")
-    skip_to_action: Mapped[str] = mapped_column(String(40), nullable=False, default="none")
-    evidence_required: Mapped[str] = mapped_column(String(20), nullable=False, default="none")
-    disposal_note: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    batch_safe: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    requires_image: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
-
-
-class ReplyStageTemplate(Base):
-    """Stage instruction text for CS router drafts (editable)."""
-
-    __tablename__ = "reply_stage_templates"
-
-    stage_key: Mapped[str] = mapped_column(String(60), primary_key=True)
-    instruction: Mapped[str] = mapped_column(Text, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
-    )
-
-
 class ReplyInsight(Base):
     """
     Pending instruction candidates mined from repeated Instructions-for-AI prompts
@@ -393,3 +358,74 @@ class DraftFeedback(Base):
     buyer_message_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True, comment="What the buyer asked")
     
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PremadeMessage(Base):
+    """
+    Canned reply texts for Messages: pick from dropdown → paste into draft reply box.
+    sort_order controls dropdown order (managed via drag-and-drop on /premade-messages).
+    """
+    __tablename__ = "premade_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+    def __repr__(self) -> str:
+        return f"<PremadeMessage {self.id} {self.name!r}>"
+
+
+class SampleConversation(Base):
+    """Curated example threads injected into Messages-Test drafts for style/flow."""
+
+    __tablename__ = "sample_conversations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    messages: Mapped[List["SampleMessage"]] = relationship(
+        "SampleMessage",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="SampleMessage.sort_order",
+    )
+
+    def __repr__(self) -> str:
+        return f"<SampleConversation {self.id} {self.title!r}>"
+
+
+class SampleMessage(Base):
+    """One buyer/seller turn inside a sample conversation."""
+
+    __tablename__ = "sample_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("sample_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False, comment="buyer|seller")
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    conversation: Mapped["SampleConversation"] = relationship(
+        "SampleConversation", back_populates="messages"
+    )
+
+    def __repr__(self) -> str:
+        return f"<SampleMessage {self.id} {self.role}>"

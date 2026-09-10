@@ -12,7 +12,7 @@ from app.models.settings import (
     OCInboundOrder,
 )
 from app.models.stock import Order, LineItem, SKU, PurchaseOrder, POLineItem, CustomerVehicleDetails
-from app.models.messages import MessageThread, Message, AIInstruction, SyncMetadata, ReplyPolicy, ReplyPlaybookEntry, AIComposition, ReplyInsight
+from app.models.messages import MessageThread, Message, AIInstruction, SyncMetadata, ReplyPolicy, ReplyPlaybookEntry, AIComposition, ReplyInsight, PremadeMessage, SampleConversation, SampleMessage
 from app.models.listing_video import EbayListingSkuCache, ListingVideoJob, ListingVideoJobItem, ListingVideoJobLog
 
 __all__ = [
@@ -40,6 +40,9 @@ __all__ = [
     "ReplyPlaybookEntry",
     "AIComposition",
     "ReplyInsight",
+    "PremadeMessage",
+    "SampleConversation",
+    "SampleMessage",
     "SyncMetadata",
     "EbayListingSkuCache",
     "ListingVideoJob",

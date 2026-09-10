@@ -2,7 +2,7 @@
 
 UI: `/messages` → `frontend/src/pages/MessageDashboard.tsx`.
 
-**Messages-Test** (`/messages-test`): same Messages UI with CS **rule router + stage drafter** (and voice instructions). See [AI_REPLY_POLICY.md](AI_REPLY_POLICY.md#messages-test-cs-router). If it wins, the plan is to replace/rename over Messages later.
+**Messages-Test** (`/messages-test`): same UI; drafts inject **enabled sample conversations** + **all enabled playbook** + policies, with an **AI model selector** at the top. Create/edit samples under AI Instructions → Sample conversations.
 
 On-page explanatory blurbs were removed; behaviour is documented here and in the related message docs.
 

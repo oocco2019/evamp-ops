@@ -1,16 +1,15 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   messagesAPI,
-  messagesTestAPI,
   settingsAPI,
   type ThreadSummary,
   type ThreadDetail,
   type MessageResp,
   type MessageMediaItem,
   type EmailTemplate,
-  type RouterDraftResult,
+  type PremadeMessage,
 } from '../services/api'
 import { getInstructionsDisplayValue } from '../utils/voiceInstructionsDisplay'
 
@@ -102,18 +101,21 @@ function getStoredHeight(key: string): number {
   return BOX_HEIGHT_DEFAULT
 }
 
-export type MessageComposeMode = 'legacy' | 'router'
+export type MessageComposeMode = 'legacy' | 'test'
+
+const TEST_PROVIDER_STORAGE_KEY = 'evamp_messages_test_provider'
+const TEST_MODEL_NAME_STORAGE_KEY = 'evamp_messages_test_model_name'
 
 export default function MessageDashboard({
   composeMode = 'legacy',
 }: {
   composeMode?: MessageComposeMode
 }) {
-  const isRouter = composeMode === 'router'
+  const isTest = composeMode === 'test'
+  const queryClient = useQueryClient()
   const [threads, setThreads] = useState<ThreadSummary[]>([])
   const [selectedThread, setSelectedThread] = useState<ThreadDetail | null>(null)
   const [_draft, setDraft] = useState('')
-  const [routerDraftMeta, setRouterDraftMeta] = useState<RouterDraftResult | null>(null)
   const [replyContent, setReplyContent] = useState('')
   const [replyAttachments, setReplyAttachments] = useState<MessageMediaItem[]>([])
   const [uploadingAttachment, setUploadingAttachment] = useState(false)
@@ -124,12 +126,30 @@ export default function MessageDashboard({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [aiPromptInstructions, setAiPromptInstructions] = useState('')
   const [loading, setLoading] = useState(false)
+  const [isDrafting, setIsDrafting] = useState(false)
+  const [testProvider, setTestProvider] = useState(() => {
+    try {
+      return localStorage.getItem(TEST_PROVIDER_STORAGE_KEY) || 'anthropic'
+    } catch {
+      return 'anthropic'
+    }
+  })
+  const [testModelName, setTestModelName] = useState(() => {
+    try {
+      return localStorage.getItem(TEST_MODEL_NAME_STORAGE_KEY) || ''
+    } catch {
+      return ''
+    }
+  })
+  const [modelFilter, setModelFilter] = useState('')
   const [syncing, setSyncing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<'all' | 'unread' | 'flagged'>('all')
   const [senderType, setSenderType] = useState<'all' | 'customer' | 'ebay'>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [searchInput, setSearchInput] = useState('')
+  const [searchMode, setSearchMode] = useState<'keyword' | 'ai'>('keyword')
+  const [aiSearching, setAiSearching] = useState(false)
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle')
   const [syncMessage, setSyncMessage] = useState<string>('')
   const [threadsStatus, setThreadsStatus] = useState<string>('')
@@ -163,6 +183,12 @@ export default function MessageDashboard({
   useEffect(() => {
     promptInstructionsRef.current = aiPromptInstructions
   }, [aiPromptInstructions])
+
+  // Keep ref in sync on every keystroke path as well (onChange also writes below).
+  const setPromptInstructions = useCallback((value: string) => {
+    promptInstructionsRef.current = value
+    setAiPromptInstructions(value)
+  }, [])
   useEffect(() => {
     liveTranscriptRef.current = liveTranscript
   }, [liveTranscript])
@@ -171,8 +197,65 @@ export default function MessageDashboard({
     queryKey: ['reply-insights-pending-count'],
     queryFn: async () => (await messagesAPI.replyInsightsPendingCount()).data,
     refetchInterval: 60_000,
-    enabled: !isRouter,
+    enabled: true,
   })
+
+  const { data: premadeMessages = [] } = useQuery({
+    queryKey: ['premade-messages'],
+    queryFn: async () => (await messagesAPI.listPremadeMessages()).data,
+  })
+
+  const {
+    data: liveModels,
+    isLoading: liveModelsLoading,
+    isError: liveModelsError,
+    isFetching: liveModelsFetching,
+  } = useQuery({
+    queryKey: ['available-models', testProvider],
+    queryFn: async () =>
+      (await settingsAPI.listAvailableModels(testProvider)).data as Array<{
+        id: string
+        display_name: string
+      }>,
+    enabled: isTest && !!testProvider,
+  })
+
+  const fallbackModels: Record<string, string[]> = {
+    anthropic: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'],
+    openai: ['gpt-4-turbo-preview', 'gpt-4', 'gpt-3.5-turbo'],
+  }
+
+  const modelChoices = useMemo(() => {
+    if (liveModels && liveModels.length > 0) {
+      return liveModels.map((m) => ({ id: m.id, label: m.display_name || m.id }))
+    }
+    return (fallbackModels[testProvider] || []).map((id) => ({ id, label: id }))
+  }, [liveModels, testProvider])
+
+  const filteredModelChoices = useMemo(() => {
+    const q = modelFilter.trim().toLowerCase()
+    if (!q) return modelChoices
+    return modelChoices.filter(
+      (m) => m.id.toLowerCase().includes(q) || m.label.toLowerCase().includes(q)
+    )
+  }, [modelChoices, modelFilter])
+
+  useEffect(() => {
+    if (!isTest || !modelChoices.length) return
+    if (testModelName && modelChoices.some((m) => m.id === testModelName)) return
+    const preferHaiku =
+      modelChoices.find((m) => /haiku/i.test(m.id)) ||
+      modelChoices.find((m) => /haiku/i.test(m.label))
+    const next = preferHaiku?.id || modelChoices[0]?.id || ''
+    if (next) {
+      setTestModelName(next)
+      try {
+        localStorage.setItem(TEST_MODEL_NAME_STORAGE_KEY, next)
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [isTest, modelChoices, testModelName])
 
   const toggleVoiceInstructions = useCallback(() => {
     const SpeechRecognitionAPI =
@@ -191,7 +274,7 @@ export default function MessageDashboard({
       const finalText = currentLive
         ? (currentInstructions ? `${currentInstructions}\n${currentLive}` : currentLive)
         : currentInstructions
-      setAiPromptInstructions(finalText)
+      setPromptInstructions(finalText)
       setLiveTranscript('')
       transcriptChunksRef.current = []
       if (recognitionRef.current) {
@@ -230,7 +313,8 @@ export default function MessageDashboard({
         } else {
           const text = transcriptChunksRef.current.join(' ').trim()
           if (text) {
-            setAiPromptInstructions((prev) => (prev ? `${prev}\n${text}` : text))
+            const prev = promptInstructionsRef.current
+            setPromptInstructions(prev ? `${prev}\n${text}` : text)
           }
         }
         transcriptChunksRef.current = []
@@ -279,6 +363,10 @@ export default function MessageDashboard({
   }, [selectedEmailTemplate])
 
   const loadThreads = useCallback(async (opts?: { silent?: boolean }) => {
+    // Don't replace AI prompt results with the full/keyword list (sync poll, tab focus, etc.)
+    if (searchMode === 'ai' && searchQuery.trim()) {
+      return
+    }
     const silent = opts?.silent ?? false
     if (!silent) {
       setLoading(true)
@@ -288,12 +376,13 @@ export default function MessageDashboard({
     try {
       const params: { filter?: 'unread' | 'flagged'; search?: string; sender_type?: 'customer' | 'ebay' } = {}
       if (filter !== 'all') params.filter = filter
-      if (searchQuery.trim()) params.search = searchQuery.trim()
+      if (searchMode === 'keyword' && searchQuery.trim()) params.search = searchQuery.trim()
       if (senderType !== 'all') params.sender_type = senderType
       const res = await messagesAPI.listThreads(params)
       setThreads(res.data)
       if (!silent) {
-        const searchNote = searchQuery.trim() ? ` matching "${searchQuery}"` : ''
+        const searchNote =
+          searchMode === 'keyword' && searchQuery.trim() ? ` matching "${searchQuery}"` : ''
         setThreadsStatus(`Loaded ${res.data.length} thread${res.data.length !== 1 ? 's' : ''}${searchNote}.`)
       }
     } catch (e: unknown) {
@@ -308,7 +397,36 @@ export default function MessageDashboard({
     } finally {
       if (!silent) setLoading(false)
     }
-  }, [filter, searchQuery, senderType])
+  }, [filter, searchQuery, senderType, searchMode])
+
+  const runAiSearch = useCallback(async () => {
+    const prompt = searchInput.trim()
+    if (!prompt || aiSearching) return
+    setAiSearching(true)
+    setLoading(true)
+    setError(null)
+    setSearchQuery(prompt)
+    setThreadsStatus('AI search: reading last 90 days of messages… this can take a minute or two.')
+    try {
+      const res = await messagesAPI.aiSearch(prompt)
+      setThreads(res.data)
+      setThreadsStatus(
+        res.data.length
+          ? `AI found ${res.data.length} thread${res.data.length !== 1 ? 's' : ''} for "${prompt}".`
+          : `AI found no matching threads for "${prompt}" in the last 90 days.`,
+      )
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'AI search failed'
+      setError(msg)
+      setThreads([])
+      const ax = e as { response?: { data?: { detail?: string } } }
+      const detail = ax.response?.data?.detail
+      setThreadsStatus(`AI search error: ${typeof detail === 'string' ? detail : msg}`)
+    } finally {
+      setAiSearching(false)
+      setLoading(false)
+    }
+  }, [searchInput, aiSearching])
 
   const loadThread = useCallback(
     async (threadId: string, opts?: { silent?: boolean }) => {
@@ -317,7 +435,6 @@ export default function MessageDashboard({
         setLoading(true)
         setError(null)
         setDraft('')
-        setRouterDraftMeta(null)
         setReplyContent('')
       }
       try {
@@ -331,7 +448,9 @@ export default function MessageDashboard({
         setDetectedLang(nonEnglishMsg?.detected_language || 'en')
         messagesAPI.markThreadRead(threadId).catch(() => {})
         loadFlaggedCount()
-        loadThreads({ silent })
+        // Always silent: a non-silent list refresh re-disables Generate draft and
+        // swallows the first click after the thread UI appears.
+        void loadThreads({ silent: true })
       } catch (e: unknown) {
         const ax = e as { response?: { data?: { detail?: string | string[] }; status?: number }; message?: string }
         const detail = ax.response?.data?.detail
@@ -410,10 +529,11 @@ export default function MessageDashboard({
   }, [loadThreads, loadFlaggedCount])
 
   const handleDraft = async () => {
-    if (!selectedThread) return
-    setLoading(true)
+    if (!selectedThread || isDrafting) return
+    setIsDrafting(true)
     setError(null)
-    let instructionsForDraft = aiPromptInstructions.trim()
+    // Prefer ref so the latest typed prompt is used even if a click races a re-render.
+    let instructionsForDraft = (promptInstructionsRef.current || aiPromptInstructions).trim()
     if (voiceRecording && recognitionRef.current) {
       const fromChunks = transcriptChunksRef.current.join(' ').trim()
       const live = (liveTranscript ?? '').trim()
@@ -421,36 +541,38 @@ export default function MessageDashboard({
         live && (fromChunks === '' || !fromChunks.endsWith(live))
           ? `${fromChunks} ${live}`.trim()
           : fromChunks
-      instructionsForDraft = (aiPromptInstructions + (transcript ? '\n' + transcript : '')).trim()
+      instructionsForDraft = (
+        (promptInstructionsRef.current || aiPromptInstructions) + (transcript ? '\n' + transcript : '')
+      ).trim()
       transcriptChunksRef.current = []
       setLiveTranscript('')
       setVoiceRecording(false)
-      setAiPromptInstructions(instructionsForDraft)
+      setPromptInstructions(instructionsForDraft)
+      promptInstructionsRef.current = instructionsForDraft
       skipAppendOnEndRef.current = true
       recognitionRef.current.stop()
     }
     try {
-      if (isRouter) {
-        const res = await messagesTestAPI.draft(
-          selectedThread.thread_id,
-          instructionsForDraft || undefined
-        )
-        setRouterDraftMeta(res.data)
-        if (res.data.tier === 3) {
-          setDraft('')
-          setReplyContent('')
-        } else if (res.data.draft) {
-          setDraft(res.data.draft)
-          setReplyContent(res.data.draft)
-        }
+      const res = await messagesAPI.draftReply(
+        selectedThread.thread_id,
+        instructionsForDraft || undefined,
+        isTest
+          ? {
+              provider: testProvider || undefined,
+              model_name: testModelName || undefined,
+              include_sample_conversations: true,
+              dump_all_playbook: true,
+            }
+          : undefined
+      )
+      const text = (res.data.draft || '').trim()
+      if (!text) {
+        setError('Draft came back empty. Try Generate draft again.')
+        setDraft('')
+        setReplyContent('')
       } else {
-        const res = await messagesAPI.draftReply(
-          selectedThread.thread_id,
-          instructionsForDraft || undefined
-        )
-        setRouterDraftMeta(null)
-        setDraft(res.data.draft)
-        setReplyContent(res.data.draft)
+        setDraft(text)
+        setReplyContent(text)
       }
     } catch (e: unknown) {
       const ax = e as { response?: { status?: number; data?: { detail?: string } } }
@@ -470,7 +592,7 @@ export default function MessageDashboard({
 
       setError(errorMsg)
     } finally {
-      setLoading(false)
+      setIsDrafting(false)
     }
   }
 
@@ -569,7 +691,6 @@ export default function MessageDashboard({
       )
       setReplyContent('')
       setDraft('')
-      setRouterDraftMeta(null)
       setReplyAttachments([])
       const threadId = selectedThread.thread_id
       loadThread(threadId)
@@ -601,8 +722,10 @@ export default function MessageDashboard({
   }, [loadFlaggedCount, loadEmailTemplates])
 
   useEffect(() => {
+    // Keep AI search results until Clear / mode switch / new AI search
+    if (searchMode === 'ai' && searchQuery.trim()) return
     loadThreads()
-  }, [loadThreads])
+  }, [loadThreads, searchMode, searchQuery])
 
   // Poll backend sync status; while a sync runs, refresh thread list silently (chunked commits surface new rows progressively)
   useEffect(() => {
@@ -786,19 +909,104 @@ export default function MessageDashboard({
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-3xl font-bold text-gray-900">
-            {isRouter ? 'Messages-Test' : 'Customer Service'}
+            {isTest ? 'Messages-Test' : 'Customer Service'}
           </h1>
-          {isRouter ? (
+          {isTest ? (
             <p className="text-sm text-gray-600 mt-1">
-              Same UI as Messages; drafts use the CS router. Legacy compose stays on{' '}
-              <Link to="/messages" className="text-blue-600 hover:underline">
-                Messages
+              Same Messages UI; drafts include sample conversations + full playbook. Create samples in{' '}
+              <Link to="/ai-instructions#sample-conversations" className="text-blue-600 hover:underline">
+                AI Instructions
               </Link>
               .
             </p>
           ) : null}
         </div>
-        {!isRouter ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {isTest ? (
+            <div className="flex flex-wrap items-end gap-3 rounded-lg border border-gray-200 bg-white px-3 py-2">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Provider</label>
+                <select
+                  value={testProvider}
+                  onChange={(e) => {
+                    const p = e.target.value
+                    setTestProvider(p)
+                    setTestModelName('')
+                    setModelFilter('')
+                    try {
+                      localStorage.setItem(TEST_PROVIDER_STORAGE_KEY, p)
+                      localStorage.removeItem(TEST_MODEL_NAME_STORAGE_KEY)
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  className="pl-2 pr-8 py-1.5 border border-gray-300 rounded text-sm bg-white min-w-[10rem]"
+                >
+                  <option value="anthropic">Anthropic</option>
+                  <option value="openai">OpenAI</option>
+                </select>
+              </div>
+              <div className="min-w-[18rem]">
+                <label className="block text-xs font-medium text-gray-600 mb-1">Model</label>
+                <div className="flex gap-1 mb-1">
+                  <input
+                    type="search"
+                    value={modelFilter}
+                    onChange={(e) => setModelFilter(e.target.value)}
+                    placeholder="Type to filter the list…"
+                    className="flex-1 border border-gray-300 rounded px-2 py-1.5 text-sm"
+                    disabled={!testProvider}
+                  />
+                  <button
+                    type="button"
+                    title="Refresh model list"
+                    aria-label="Refresh model list"
+                    className="px-2.5 py-1.5 border border-gray-300 rounded text-sm bg-white hover:bg-gray-50 disabled:opacity-50"
+                    disabled={!testProvider || liveModelsFetching}
+                    onClick={() =>
+                      queryClient.invalidateQueries({ queryKey: ['available-models', testProvider] })
+                    }
+                  >
+                    ↻
+                  </button>
+                </div>
+                <select
+                  value={testModelName}
+                  onChange={(e) => {
+                    const name = e.target.value
+                    setTestModelName(name)
+                    try {
+                      localStorage.setItem(TEST_MODEL_NAME_STORAGE_KEY, name)
+                    } catch {
+                      /* ignore */
+                    }
+                  }}
+                  className="w-full pl-2 pr-8 py-1.5 border border-gray-300 rounded text-sm bg-white"
+                  disabled={!testProvider || liveModelsLoading}
+                >
+                  <option value="">
+                    {liveModelsLoading || liveModelsFetching
+                      ? 'Loading models…'
+                      : filteredModelChoices.length
+                        ? 'Select model…'
+                        : 'No models match filter'}
+                  </option>
+                  {filteredModelChoices.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-gray-500 mt-0.5">
+                  {liveModelsLoading || liveModelsFetching
+                    ? 'Loading…'
+                    : `${filteredModelChoices.length} of ${modelChoices.length} models${
+                        liveModelsError ? ' (fallback list — check API key in Misc)' : ''
+                      }.`}
+                </p>
+              </div>
+            </div>
+          ) : null}
           <Link
             to="/ai-instructions"
             className="relative inline-flex items-center px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
@@ -813,7 +1021,7 @@ export default function MessageDashboard({
               </span>
             ) : null}
           </Link>
-        ) : null}
+        </div>
       </div>
 
       {error && (
@@ -904,24 +1112,51 @@ export default function MessageDashboard({
         <form
           onSubmit={(e) => {
             e.preventDefault()
-            setSearchQuery(searchInput)
+            if (searchMode === 'ai') {
+              void runAiSearch()
+            } else {
+              setSearchQuery(searchInput)
+            }
           }}
-          className="flex gap-1"
+          className="flex gap-1 items-center"
         >
+          <select
+            value={searchMode}
+            onChange={(e) => {
+              const mode = e.target.value as 'keyword' | 'ai'
+              setSearchMode(mode)
+              setSearchInput('')
+              setSearchQuery('')
+            }}
+            className="pl-2 pr-8 py-2 border border-gray-300 rounded text-sm bg-white"
+            title="Search type"
+            disabled={aiSearching}
+          >
+            <option value="keyword">Keyword</option>
+            <option value="ai">AI prompt</option>
+          </select>
           <input
             type="text"
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="Search messages..."
-            className="px-3 py-2 border border-gray-300 rounded text-sm w-48 bg-white text-gray-900"
+            placeholder={
+              searchMode === 'ai'
+                ? 'Describe the conversation… e.g. return, forgot my phone number'
+                : 'Search messages...'
+            }
+            className={`px-3 py-2 border border-gray-300 rounded text-sm bg-white text-gray-900 ${
+              searchMode === 'ai' ? 'w-72 sm:w-96' : 'w-48'
+            }`}
+            disabled={aiSearching}
           />
           <button
             type="submit"
-            className="px-3 py-2 bg-white border border-gray-300 rounded text-sm text-gray-800 hover:bg-gray-50"
+            disabled={aiSearching || !searchInput.trim()}
+            className="px-3 py-2 bg-white border border-gray-300 rounded text-sm text-gray-800 hover:bg-gray-50 disabled:opacity-50"
           >
-            Search
+            {aiSearching ? 'Searching…' : 'Search'}
           </button>
-          {searchQuery && (
+          {(searchQuery || searchInput) && (
             <button
               type="button"
               onClick={() => {
@@ -930,6 +1165,7 @@ export default function MessageDashboard({
               }}
               className="px-3 py-2 bg-white border border-gray-300 rounded text-sm text-gray-800 hover:bg-gray-50"
               title="Clear search"
+              disabled={aiSearching}
             >
               Clear
             </button>
@@ -1109,66 +1345,16 @@ export default function MessageDashboard({
                 ))}
               </div>
               <div className="p-4 border-t border-gray-200 flex flex-col flex-shrink-0">
-                {isRouter && routerDraftMeta?.router ? (
-                  <div className="mb-2 flex flex-wrap gap-2 text-xs items-center">
-                    <span className="font-medium text-gray-700">Route:</span>
-                    <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-900">
-                      Tier {routerDraftMeta.router.tier}
-                    </span>
-                    <span className="px-2 py-0.5 rounded bg-gray-100">{routerDraftMeta.router.intent}</span>
-                    <span className="px-2 py-0.5 rounded bg-gray-100">{routerDraftMeta.router.language}</span>
-                    <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900">
-                      {routerDraftMeta.router.stage}
-                    </span>
-                    {routerDraftMeta.router.known_issue_id ? (
-                      <span className="px-2 py-0.5 rounded bg-green-100 text-green-900">
-                        {routerDraftMeta.router.known_issue_id}
-                      </span>
-                    ) : null}
-                    {routerDraftMeta.tier === 3 ? (
-                      <button
-                        type="button"
-                        className="text-blue-600 hover:underline"
-                        onClick={() => {
-                          setRouterDraftMeta(null)
-                          setDraft('')
-                          setReplyContent('')
-                        }}
-                      >
-                        Clear routing
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
-                {isRouter && routerDraftMeta?.tier === 3 && routerDraftMeta.escalation ? (
-                  <div className="mb-3 border border-red-200 bg-red-50 rounded-lg p-3 text-sm text-red-900">
-                    <p className="font-semibold mb-1">Tier 3 — no resolutive draft</p>
-                    <p className="mb-1">{routerDraftMeta.escalation.summary}</p>
-                    {routerDraftMeta.escalation.suggested_next_step ? (
-                      <p className="mb-1">
-                        <span className="font-medium">Suggested: </span>
-                        {routerDraftMeta.escalation.suggested_next_step}
-                      </p>
-                    ) : null}
-                    <p className="text-xs text-red-700 mt-1">
-                      Resolutive draft disabled. Type a manual reply below if you still want to send.
-                    </p>
-                  </div>
-                ) : null}
                 {/* Upper box: AI prompt instructions → Draft reply uses this as extra_instructions. Top-edge drag to resize. */}
                 <div className="mb-1 flex items-center gap-2">
                   <button
                     type="button"
                     onClick={handleDraft}
-                    disabled={loading || (isRouter && routerDraftMeta?.tier === 3)}
+                    disabled={isDrafting || !selectedThread}
                     className="px-3 py-2 bg-gray-100 text-gray-800 rounded hover:bg-gray-200 disabled:opacity-50 text-sm font-medium"
-                    title={
-                      isRouter && routerDraftMeta?.tier === 3
-                        ? 'Tier 3 — no resolutive draft'
-                        : 'Generate draft in the reply box below using instructions above'
-                    }
+                    title="Generate draft in the reply box below using instructions above"
                   >
-                    {loading ? '...' : isRouter ? 'Draft' : 'Generate draft'}
+                    {isDrafting ? '...' : 'Generate draft'}
                   </button>
                   <button
                     type="button"
@@ -1189,6 +1375,35 @@ export default function MessageDashboard({
                       'Voice instructions'
                     )}
                   </button>
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const id = Number(e.target.value)
+                      if (!id) return
+                      const row = premadeMessages.find((m: PremadeMessage) => m.id === id)
+                      if (row) {
+                        setReplyContent(row.content)
+                        setDraft('')
+                      }
+                    }}
+                    className="pl-2 pr-8 py-1.5 border border-gray-300 rounded text-sm bg-white max-w-[11rem]"
+                    title="Insert a premade message into the draft reply"
+                    disabled={!selectedThread}
+                  >
+                    <option value="">Premade…</option>
+                    {premadeMessages.map((m: PremadeMessage) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                  <Link
+                    to="/premade-messages"
+                    className="inline-flex items-center justify-center w-8 h-8 rounded border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 text-lg leading-none font-medium"
+                    title="Manage premade messages"
+                  >
+                    +
+                  </Link>
                   {voiceRecording && (
                     <span className="text-xs text-gray-500">Listening… Press the button again when done.</span>
                   )}
@@ -1212,11 +1427,11 @@ export default function MessageDashboard({
                     onChange={(e) => {
                       const newValue = e.target.value
                       if (voiceRecording) {
-                        setAiPromptInstructions(newValue)
+                        setPromptInstructions(newValue)
                         setLiveTranscript('')
                         transcriptChunksRef.current = []
                       } else {
-                        setAiPromptInstructions(newValue)
+                        setPromptInstructions(newValue)
                       }
                     }}
                     readOnly={false}

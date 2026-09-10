@@ -37,6 +37,27 @@ class OpenAIProvider(AIProvider):
         )
         
         return response.choices[0].message.content
+
+    async def complete(
+        self,
+        user_prompt: str,
+        *,
+        system: str,
+        max_tokens: int = 2000,
+        temperature: float = 0,
+    ) -> str:
+        """Raw chat completion without CS-draft wrapping."""
+        response = await self.client.chat.completions.create(
+            model=self.model_name,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=int(max_tokens),
+            temperature=float(temperature),
+            timeout=180.0,
+        )
+        return (response.choices[0].message.content or "").strip()
     
     async def detect_language(self, text: str) -> str:
         """Detect language using GPT"""
@@ -131,6 +152,14 @@ class OpenAIProvider(AIProvider):
         product = (context.get("product_context") or "").strip()
         if product:
             parts.append(f"\nPRODUCT CONTEXT:\n{product}")
+
+        samples = (context.get("sample_conversations") or "").strip()
+        if samples:
+            parts.append(
+                "\nSAMPLE CONVERSATIONS (match tone, pacing, and how the seller leads. "
+                "Do not copy tracking numbers, names, or exact wording unless it fits):\n"
+                f"{samples}"
+            )
 
         if context.get("global_instructions"):
             parts.append(f"\nGlobal Guidelines:\n{context['global_instructions']}")

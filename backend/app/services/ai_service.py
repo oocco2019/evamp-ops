@@ -53,6 +53,75 @@ class AIService:
                 "Please configure an AI model in the Settings page."
             )
 
+        self._provider = await self._provider_from_setting(model_setting)
+        return self._provider
+
+    async def get_provider_for_model_id(self, model_id: int) -> AIProvider:
+        """Build a provider for a specific AIModelSetting id (does not change default cache)."""
+        result = await self.db.execute(
+            select(AIModelSetting).where(AIModelSetting.id == model_id)
+        )
+        model_setting = result.scalar_one_or_none()
+        if not model_setting:
+            raise ValueError(f"AI model id {model_id} not found.")
+        return await self._provider_from_setting(model_setting)
+
+    async def get_provider_for_provider_model(
+        self, provider_name: str, model_name: str
+    ) -> AIProvider:
+        """
+        Build a provider from Misc API credentials + a live catalog model id.
+        Used by Messages-Test model picker (no need to save the model first).
+        """
+        provider_name = (provider_name or "").strip().lower()
+        model_name = (model_name or "").strip()
+        if not provider_name or not model_name:
+            raise ValueError("provider and model_name are required.")
+        if provider_name not in ("anthropic", "openai"):
+            raise ValueError(f"Unsupported provider '{provider_name}'. Use anthropic or openai.")
+
+        api_key = await self._get_provider_api_key(provider_name)
+        if not api_key:
+            raise ValueError(
+                f"No API key found for provider '{provider_name}'. "
+                f"Add it in Misc → API."
+            )
+
+        # Reuse temperature/max_tokens from default row for that provider when present.
+        result = await self.db.execute(
+            select(AIModelSetting)
+            .where(AIModelSetting.provider == provider_name)
+            .order_by(AIModelSetting.is_default.desc(), AIModelSetting.id)
+            .limit(1)
+        )
+        hint = result.scalar_one_or_none()
+        temperature = hint.temperature if hint and hint.temperature is not None else 0.7
+        max_tokens = hint.max_tokens if hint and hint.max_tokens is not None else 2000
+        system_override = hint.system_prompt_override if hint else None
+
+        if provider_name == "anthropic":
+            retired_anthropic = {
+                "claude-3-5-sonnet-20241022": "claude-sonnet-5",
+                "claude-3-5-sonnet-20240620": "claude-sonnet-5",
+                "claude-3-opus-20240229": "claude-opus-5",
+                "claude-3-7-sonnet-20250219": "claude-sonnet-5",
+                "claude-3-5-haiku-20241022": "claude-haiku-4-5-20251001",
+                "claude-3-haiku-20240307": "claude-haiku-4-5-20251001",
+                "claude-sonnet-4-5-20250929": "claude-sonnet-5",
+                "claude-opus-4-5-20251101": "claude-opus-5",
+            }
+            model_name = retired_anthropic.get(model_name, model_name)
+
+        return self._create_provider(
+            provider_name=provider_name,
+            api_key=api_key,
+            model_name=model_name,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            system_prompt_override=system_override,
+        )
+
+    async def _provider_from_setting(self, model_setting: AIModelSetting) -> AIProvider:
         # Get API key for the provider
         result = await self.db.execute(
             select(APICredential).where(
@@ -95,8 +164,7 @@ class AIService:
             }
             model_name = retired_anthropic.get(model_name, model_name)
 
-        # Create provider instance
-        self._provider = self._create_provider(
+        return self._create_provider(
             provider_name=model_setting.provider,
             api_key=api_key,
             model_name=model_name,
@@ -104,8 +172,6 @@ class AIService:
             max_tokens=max_tokens,
             system_prompt_override=model_setting.system_prompt_override
         )
-
-        return self._provider
 
     def _create_provider(
         self,
@@ -269,6 +335,25 @@ class AIService:
         """
         provider = await self.get_active_provider()
         return await provider.generate_message(prompt, context or {})
+
+    async def complete(
+        self,
+        user_prompt: str,
+        *,
+        system: str,
+        max_tokens: int = 4000,
+        temperature: float = 0,
+    ) -> str:
+        """
+        Raw LLM completion (not a CS draft). Used for AI message search and similar tasks.
+        """
+        provider = await self.get_active_provider()
+        return await provider.complete(
+            user_prompt,
+            system=system,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
 
     async def detect_language(self, text: str) -> str:
         """

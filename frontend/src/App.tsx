@@ -13,6 +13,7 @@ const MessageTest = lazy(() => import('./pages/MessageTest'))
 const InventoryStatus = lazy(() => import('./pages/InventoryStatus'))
 const OrderDetails = lazy(() => import('./pages/OrderDetails'))
 const AIInstructions = lazy(() => import('./pages/AIInstructions'))
+const PremadeMessages = lazy(() => import('./pages/PremadeMessages'))
 const Returns = lazy(() => import('./pages/Returns'))
 
 const NAV_LINK =
@@ -75,6 +76,7 @@ function App() {
               <Route path="/messages" element={<MessageDashboard />} />
               <Route path="/messages-test" element={<MessageTest />} />
               <Route path="/ai-instructions" element={<AIInstructions />} />
+              <Route path="/premade-messages" element={<PremadeMessages />} />
               <Route path="/listing-video" element={<Navigate to="/settings?tab=video" replace />} />
               <Route path="/settings" element={<Settings />} />
             </Routes>

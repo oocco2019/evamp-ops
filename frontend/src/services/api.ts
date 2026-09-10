@@ -902,6 +902,31 @@ export interface ReplyPolicy {
   updated_at: string
 }
 
+export interface PremadeMessage {
+  id: number
+  name: string
+  content: string
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+export interface SampleMessage {
+  id: number
+  conversation_id: number
+  role: 'buyer' | 'seller' | string
+  content: string
+  sort_order: number
+}
+
+export interface SampleConversation {
+  id: number
+  title: string
+  enabled: boolean
+  sort_order: number
+  messages: SampleMessage[]
+}
+
 export interface ReplyPlaybookEntry {
   id: number
   symptom: string
@@ -932,13 +957,31 @@ export const messagesAPI = {
     api.get<ThreadSummary[]>('/api/messages/threads', {
       params: params ?? {},
     }),
+  /** AI prompt search over last 90 days of threads (full message text). Can take 1–3 minutes. */
+  aiSearch: (prompt: string, timeoutMs = 300000) =>
+    api.post<ThreadSummary[]>('/api/messages/ai-search', { prompt }, { timeout: timeoutMs }),
   getThread: (threadId: string) =>
     api.get<ThreadDetail>(`/api/messages/threads/${threadId}`),
   markThreadRead: (threadId: string) =>
     api.post<void>(`/api/messages/threads/${threadId}/mark-read`),
-  draftReply: (threadId: string, extra_instructions?: string) =>
+  draftReply: (
+    threadId: string,
+    extra_instructions?: string,
+    opts?: {
+      model_id?: number
+      provider?: string
+      model_name?: string
+      include_sample_conversations?: boolean
+      dump_all_playbook?: boolean
+    }
+  ) =>
     api.post<{ draft: string }>(`/api/messages/threads/${threadId}/draft`, {
       extra_instructions: extra_instructions || undefined,
+      model_id: opts?.model_id,
+      provider: opts?.provider || undefined,
+      model_name: opts?.model_name || undefined,
+      include_sample_conversations: opts?.include_sample_conversations || undefined,
+      dump_all_playbook: opts?.dump_all_playbook || undefined,
     }),
   draftGerman: (threadId: string, seed_text: string) =>
     api.post<{ draft: string }>(`/api/messages/threads/${threadId}/draft-german`, {
@@ -1008,6 +1051,34 @@ export const messagesAPI = {
   ) => api.put<ReplyPolicy>(`/api/messages/reply-policies/${id}`, data),
   deleteReplyPolicy: (id: number) => api.delete(`/api/messages/reply-policies/${id}`),
 
+  listPremadeMessages: () => api.get<PremadeMessage[]>('/api/messages/premade-messages'),
+  createPremadeMessage: (data: { name: string; content: string }) =>
+    api.post<PremadeMessage>('/api/messages/premade-messages', data),
+  updatePremadeMessage: (id: number, data: { name?: string; content?: string }) =>
+    api.put<PremadeMessage>(`/api/messages/premade-messages/${id}`, data),
+  reorderPremadeMessages: (ordered_ids: number[]) =>
+    api.put<PremadeMessage[]>('/api/messages/premade-messages/reorder', { ordered_ids }),
+  deletePremadeMessage: (id: number) => api.delete(`/api/messages/premade-messages/${id}`),
+
+  listSampleConversations: () =>
+    api.get<SampleConversation[]>('/api/messages/sample-conversations'),
+  createSampleConversation: (data: { title: string; enabled?: boolean }) =>
+    api.post<SampleConversation>('/api/messages/sample-conversations', data),
+  updateSampleConversation: (
+    id: number,
+    data: { title?: string; enabled?: boolean }
+  ) => api.put<SampleConversation>(`/api/messages/sample-conversations/${id}`, data),
+  deleteSampleConversation: (id: number) =>
+    api.delete(`/api/messages/sample-conversations/${id}`),
+  addSampleMessage: (conversationId: number, data: { role: 'buyer' | 'seller'; content: string }) =>
+    api.post<SampleMessage>(`/api/messages/sample-conversations/${conversationId}/messages`, data),
+  updateSampleMessage: (
+    messageId: number,
+    data: { role?: 'buyer' | 'seller'; content?: string }
+  ) => api.put<SampleMessage>(`/api/messages/sample-messages/${messageId}`, data),
+  deleteSampleMessage: (messageId: number) =>
+    api.delete(`/api/messages/sample-messages/${messageId}`),
+
   listReplyPlaybook: () => api.get<ReplyPlaybookEntry[]>('/api/messages/reply-playbook'),
   createReplyPlaybook: (data: {
     symptom?: string
@@ -1049,71 +1120,6 @@ export const messagesAPI = {
     }>('/api/messages/reply-insights/scan-seller-style', null, {
       params: { months },
     }),
-}
-
-export interface RouterDraftResult {
-  draft: string | null
-  tier: number
-  router: {
-    language: string
-    intent: string
-    tier: number
-    stage: string
-    known_issue_id: string | null
-    known_issue: Record<string, unknown> | null
-    reasons: string[]
-    flags: Record<string, boolean>
-  }
-  escalation: {
-    summary: string
-    suggested_next_step: string | null
-    last_buyer_preview: string
-    reasons: string[]
-    known_issue_id: string | null
-    known_issue: Record<string, unknown> | null
-  } | null
-  composition_id: number | null
-}
-
-export interface KnownIssueRow {
-  id: number
-  issue_id: string
-  symptom_keywords: string[]
-  applies_to_sku: string
-  diagnosis: string
-  confidence: string
-  skip_to_action: string
-  evidence_required: string
-  disposal_note: boolean
-  batch_safe: boolean
-  requires_image: boolean
-  active: boolean
-}
-
-export interface FollowUpItem {
-  thread_id: string
-  buyer_username: string | null
-  sku: string | null
-  ebay_order_id: string | null
-  last_message_at: string | null
-  days_stalled: number
-  reason: string
-  last_preview: string | null
-}
-
-export const messagesTestAPI = {
-  draft: (threadId: string, extra_instructions?: string, force_stage?: string) =>
-    api.post<RouterDraftResult>(`/api/messages-test/threads/${threadId}/draft`, {
-      extra_instructions: extra_instructions || undefined,
-      force_stage: force_stage || undefined,
-    }),
-  listKnownIssues: () => api.get<KnownIssueRow[]>('/api/messages-test/known-issues'),
-  updateKnownIssue: (issueId: string, data: Partial<KnownIssueRow>) =>
-    api.patch<KnownIssueRow>(`/api/messages-test/known-issues/${issueId}`, data),
-  listFollowUps: () => api.get<FollowUpItem[]>('/api/messages-test/follow-ups'),
-  getSettings: () => api.get<{ whatsapp: string }>('/api/messages-test/settings'),
-  putSettings: (whatsapp: string) =>
-    api.put<{ whatsapp: string }>('/api/messages-test/settings', { whatsapp }),
 }
 
 // Get video ID from an eBay listing (item number or URL)

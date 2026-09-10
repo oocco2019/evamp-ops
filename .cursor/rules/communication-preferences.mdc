@@ -6,7 +6,7 @@ alwaysApply: true
 # Communication preferences
 
 - **Default to short answers.** Skip long preambles, hedging, and engagement-style sign-offs unless the topic needs depth.
-- **Commands:** When the user needs to run something, give **one copy-paste block** (full paths, no `...`). Prefer a **single combined command** over “run A or B” unless they explicitly want options.
+- **Commands:** When the user needs to run something, give **one copy-paste block** (full paths, no `...`). Put all steps for that task in that one block — many lines is fine. Never drip sequential commands one message at a time when they belong together. Never split into “Terminal 1 / Terminal 2” inside a copy block; if service + app both need to run, combine with `&` / `sleep` in one paste.
 - **Problems:** Assume they will **come back with errors** if something fails. Do not preemptively write troubleshooting essays.
 - **Planning vs doing:** Still align on big or risky changes when the repo’s process calls for it; keep routine execution minimal.
 

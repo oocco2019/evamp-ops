@@ -93,6 +93,13 @@ class AnthropicProvider(AIProvider):
         product = (context.get("product_context") or "").strip()
         if product:
             parts.append(f"\n\nPRODUCT CONTEXT:\n{product}")
+        samples = (context.get("sample_conversations") or "").strip()
+        if samples:
+            parts.append(
+                "\n\nSAMPLE CONVERSATIONS (match tone, pacing, and how the seller leads. "
+                "Do not copy tracking numbers, names, or exact wording unless it fits):\n"
+                f"{samples}"
+            )
         # Legacy fallbacks
         if context.get("global_instructions"):
             parts.append(f"\n\nGlobal instructions from the seller:\n{context['global_instructions']}")
@@ -142,6 +149,37 @@ Draft a response to the buyer in English only. Do not write German or any other 
                 },
                 json=payload,
                 timeout=60.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+        return _extract_text(data, default="")
+
+    async def complete(
+        self,
+        user_prompt: str,
+        *,
+        system: str,
+        max_tokens: int = 2000,
+        temperature: float = 0,
+    ) -> str:
+        """Raw Messages API call without CS-draft wrapping."""
+        payload: Dict[str, Any] = {
+            "model": self.model_name,
+            "max_tokens": int(max_tokens),
+            "system": system,
+            "messages": [{"role": "user", "content": user_prompt}],
+        }
+        self._apply_temperature(payload, temperature)
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                API_URL,
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json=payload,
+                timeout=180.0,
             )
             response.raise_for_status()
             data = response.json()

@@ -7,6 +7,7 @@ import {
   type ReplyPlaybookEntry,
   type ReplyInsight,
 } from '../services/api'
+import SampleConversationsSection from './SampleConversationsSection'
 
 export default function AIInstructionsPage() {
   const queryClient = useQueryClient()
@@ -132,11 +133,17 @@ export default function AIInstructionsPage() {
         <Link to="/messages" className="text-sm text-blue-600 hover:underline">
           ← Messages
         </Link>
+        <span className="text-gray-300 mx-2">|</span>
+        <Link to="/messages-test" className="text-sm text-blue-600 hover:underline">
+          Messages-Test
+        </Link>
       </div>
 
       <div className="mb-6">
         <h1 className="text-3xl font-bold text-gray-900">AI Instructions</h1>
       </div>
+
+      <SampleConversationsSection />
 
       {/* Insights */}
       <section className="bg-white shadow rounded-lg border border-amber-200 p-6 mb-6">
