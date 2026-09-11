@@ -12,6 +12,7 @@ import {
   type PremadeMessage,
 } from '../services/api'
 import { getInstructionsDisplayValue } from '../utils/voiceInstructionsDisplay'
+import { isReplySendLockedForGerman, shouldApplyGermanTranslation } from '../utils/composeGermanGuard'
 
 /** eBay CDN: replace _1 or _12 with _57 in image URL to get full-size (zoomed) image. See eBay KB 2194. */
 function ebayImageFullSizeUrl(url: string): string {
@@ -127,6 +128,9 @@ export default function MessageDashboard({
   const [aiPromptInstructions, setAiPromptInstructions] = useState('')
   const [loading, setLoading] = useState(false)
   const [isDrafting, setIsDrafting] = useState(false)
+  const deRequestIdRef = useRef(0)
+  /** Thread the composer belongs to (set when a load starts, not from possibly-stale selectedThread). */
+  const selectedThreadIdRef = useRef<string | null>(null)
   const [testProvider, setTestProvider] = useState(() => {
     try {
       return localStorage.getItem(TEST_PROVIDER_STORAGE_KEY) || 'anthropic'
@@ -431,7 +435,11 @@ export default function MessageDashboard({
   const loadThread = useCallback(
     async (threadId: string, opts?: { silent?: boolean }) => {
       const silent = opts?.silent ?? false
+      selectedThreadIdRef.current = threadId
       if (!silent) {
+        // Abandon any in-flight DE translate before the new thread's composer is shown.
+        deRequestIdRef.current += 1
+        setComposingDe(false)
         setLoading(true)
         setError(null)
         setDraft('')
@@ -676,7 +684,7 @@ export default function MessageDashboard({
   }, [clearAttachErrorAfterDelay])
 
   const handleSend = async () => {
-    if (!selectedThread || (!replyContent.trim() && replyAttachments.length === 0)) return
+    if (!selectedThread || composingDe || (!replyContent.trim() && replyAttachments.length === 0)) return
     const content = replyContent.trim()
     const mediaToSend = replyAttachments.length > 0 ? [...replyAttachments] : undefined
     const draftSnapshot = _draft
@@ -689,6 +697,8 @@ export default function MessageDashboard({
         draftSnapshot ? draftSnapshot : undefined,
         mediaToSend,
       )
+      deRequestIdRef.current += 1
+      setComposingDe(false)
       setReplyContent('')
       setDraft('')
       setReplyAttachments([])
@@ -864,22 +874,48 @@ export default function MessageDashboard({
 
   const handleComposeGerman = async () => {
     if (!selectedThread || composingDe) return
+    if (!selectedThreadIdRef.current) {
+      selectedThreadIdRef.current = selectedThread.thread_id
+    }
+    if (selectedThreadIdRef.current !== selectedThread.thread_id) return
     const text = replyContent.trim()
     if (!text) {
       setError('Enter reply text to translate, then click DE.')
       return
     }
+    const sourceThreadId = selectedThread.thread_id
+    const requestId = ++deRequestIdRef.current
     setComposingDe(true)
     setError(null)
     try {
-      const res = await messagesAPI.draftGerman(selectedThread.thread_id, text)
+      const res = await messagesAPI.draftGerman(sourceThreadId, text)
+      if (
+        !shouldApplyGermanTranslation({
+          sourceThreadId,
+          currentThreadId: selectedThreadIdRef.current,
+          requestId,
+          latestRequestId: deRequestIdRef.current,
+        })
+      ) {
+        return
+      }
       setReplyContent(res.data.draft)
       setDraft('')
     } catch (e: unknown) {
+      if (
+        !shouldApplyGermanTranslation({
+          sourceThreadId,
+          currentThreadId: selectedThreadIdRef.current,
+          requestId,
+          latestRequestId: deRequestIdRef.current,
+        })
+      ) {
+        return
+      }
       const ax = e as { response?: { data?: { detail?: string } } }
       setError(ax.response?.data?.detail || (e instanceof Error ? e.message : 'German translation failed'))
     } finally {
-      setComposingDe(false)
+      if (deRequestIdRef.current === requestId) setComposingDe(false)
     }
   }
 
@@ -1472,7 +1508,7 @@ export default function MessageDashboard({
                   <button
                     type="button"
                     onClick={handleComposeGerman}
-                    disabled={composingDe || loading || !replyContent.trim()}
+                    disabled={composingDe || isReplySendLockedForGerman(loading, composingDe) || !replyContent.trim()}
                     className="h-10 px-3 flex-shrink-0 rounded-full bg-gray-100 text-gray-800 hover:bg-gray-200 disabled:opacity-50 flex items-center justify-center text-xs font-semibold tracking-wide"
                     title="Translate reply text to German (uses reply box only; ignores Instructions for AI)"
                     aria-label="Compose in German"
@@ -1482,7 +1518,7 @@ export default function MessageDashboard({
                   <button
                     type="button"
                     onClick={handleSend}
-                    disabled={(!replyContent.trim() && replyAttachments.length === 0) || replyContent.length > 2000 || loading}
+                    disabled={(!replyContent.trim() && replyAttachments.length === 0) || replyContent.length > 2000 || isReplySendLockedForGerman(loading, composingDe)}
                     title={
                       replyContent.length > 2000
                         ? 'Message exceeds 2000 character limit.'
