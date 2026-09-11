@@ -25,6 +25,24 @@ def _rejects_temperature(model_name: str) -> bool:
     return False
 
 
+def _adaptive_thinking_on_by_default(model_name: str) -> bool:
+    """
+    Claude Sonnet 5 / Opus 5 / Fable 5 run adaptive thinking unless the request
+    sets thinking.type=disabled. Thinking tokens count against max_tokens, so a
+    700-token CS draft (or detect_language max_tokens=10) can return only a
+    thinking block and empty/truncated text with stop_reason=max_tokens.
+
+    Do not send the thinking field to older models that never had this default
+    (Claude 3.5, 4.5, Opus 4.7) — they may 400 on an unknown parameter.
+    """
+    name = (model_name or "").lower()
+    if "4-5" in name or "3-5" in name:
+        return False
+    return any(tag in name for tag in ("sonnet-5", "opus-5", "fable-5", "mythos")) or (
+        "-5" in name
+    )
+
+
 def _extract_text(data: Dict[str, Any], default: str = "") -> str:
     """
     Pull the assistant's text from a Messages API response.
@@ -52,6 +70,14 @@ class AnthropicProvider(AIProvider):
         """Add temperature to the payload only for models that accept it."""
         if not _rejects_temperature(self.model_name):
             payload["temperature"] = float(temperature)
+        return payload
+
+    def _finalize_payload(self, payload: Dict[str, Any], temperature: float) -> Dict[str, Any]:
+        """Apply sampling + thinking flags that newer Claude models require."""
+        self._apply_temperature(payload, temperature)
+        if _adaptive_thinking_on_by_default(self.model_name):
+            # CS drafts / lang detect / translate need the text budget, not reasoning.
+            payload["thinking"] = {"type": "disabled"}
         return payload
 
     def _build_system_prompt(self, context: Dict[str, Any]) -> str:
@@ -138,7 +164,7 @@ Draft a response to the buyer in English only. Do not write German or any other 
             "system": system,
             "messages": [{"role": "user", "content": user_content}],
         }
-        self._apply_temperature(payload, self.temperature)
+        self._finalize_payload(payload, self.temperature)
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 API_URL,
@@ -195,7 +221,7 @@ Draft a response to the buyer in English only. Do not write German or any other 
                 "content": f"Detect the language of this text and respond with only the ISO 639-1 two-letter code (e.g., 'en', 'de', 'fr'):\n\n{text[:500]}",
             }],
         }
-        self._apply_temperature(payload, 0)
+        self._finalize_payload(payload, 0)
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 API_URL,
@@ -227,7 +253,7 @@ Draft a response to the buyer in English only. Do not write German or any other 
                 "content": f"Translate the following text from {source_lang} to {target_lang}. Preserve the meaning and tone. Do not add any explanation - just provide the translation:\n\n{text}",
             }],
         }
-        self._apply_temperature(payload_fwd, 0.3)
+        self._finalize_payload(payload_fwd, 0.3)
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 API_URL,
@@ -251,7 +277,7 @@ Draft a response to the buyer in English only. Do not write German or any other 
                 "content": f"Translate the following text from {target_lang} back to {source_lang}. This is for verification. Do not add any explanation - just provide the translation:\n\n{translated}",
             }],
         }
-        self._apply_temperature(payload_back, 0.3)
+        self._finalize_payload(payload_back, 0.3)
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 API_URL,
